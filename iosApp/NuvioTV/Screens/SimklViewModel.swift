@@ -6,8 +6,11 @@ import SharedCore
 /// `connect()` asks Simkl for a user code — the repo publishes it (plus the verification URL) via
 /// its uiState and polls `/oauth/pin/{user_code}` in the background until the user approves the
 /// code at simkl.com/pin on another device (or it expires). Once connected, Simkl becomes usable
-/// as a Library Source / Watch Progress Source (Content Sources pane) and scrobbles automatically
-/// as you play (`SimklAuthRepository` registers the same SCROBBLE capability Trakt does).
+/// as a Library Source / Watch Progress Source (Content Sources pane), and both players scrobble it
+/// as you play: their start and stop go through `TrackingScrobbleCoordinator.scrobbleOtherTrackers`
+/// (every connected tracker but Trakt, which keeps its direct `TraktScrobbleRepository` calls), and a
+/// stop commits into the Simkl snapshot, so Continue Watching follows the episode just played.
+/// Registering the SCROBBLE capability alone reaches nothing: the players have to make that call.
 ///
 /// Structurally a clone of `TraktViewModel` — same published shape, same start/stop/connect/
 /// cancelActivation/disconnect surface — so the Settings pane can render both with one card layout.

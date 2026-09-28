@@ -112,9 +112,11 @@ object TraktScrobbleRepository : TrackingScrobbler {
     /**
      * Provider-neutral scrobble entry point used by [TrackingScrobbleCoordinator].
      *
-     * Phase 1 note: the player still calls [scrobbleStart]/[scrobbleStop] directly, so this path
-     * is the registered seam rather than the live one. Both funnel into the same [sendScrobble]
-     * dedupe/retry machinery, so wiring the coordinator up later changes no Trakt behaviour.
+     * The tvOS players call [scrobbleStart]/[scrobbleStop] directly. The coordinator's live path,
+     * `TrackingScrobbleCoordinator.scrobbleOtherTrackers` (Simkl), deliberately skips Trakt
+     * (`DirectPathScrobbleProviderIds`), so this override is only reached through
+     * `TrackingScrobbleCoordinator.scrobble`, which nothing on tvOS calls. Both funnel into the same
+     * [sendScrobble] dedupe/retry machinery.
      */
     override suspend fun scrobble(
         profileId: Int,
