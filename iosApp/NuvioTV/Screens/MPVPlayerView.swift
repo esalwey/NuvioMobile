@@ -1120,8 +1120,9 @@ final class MPVTVPlayerViewController: UIViewController {
         if WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(state.durationSec * 1000)) { return }
         traktScrobbleRequested = true
         // Not behind the Trakt item build below: it returns nil for ids Trakt can't address
-        // (`kitsu:`, `mal:` …), which Simkl can.
-        if !otherTrackersOpen {
+        // (`kitsu:`, `mal:` …), which Simkl can. Never once the session is closed (the Trakt start
+        // below is refused then too): nothing would stop it.
+        if !otherTrackersOpen, !traktSessionClosed {
             otherTrackersOpen = true
             scrobbleOtherTrackers(TrackingScrobbleAction.start, percent: traktStartPercent())
         }
@@ -1160,9 +1161,10 @@ final class MPVTVPlayerViewController: UIViewController {
         let percent: Float = short ? 0 : (finished ? 100 : currentProgressPercent())
         if otherTrackersOpen {
             otherTrackersOpen = false
-            // Not for a placeholder clip: Simkl keeps one paused session per show, so a stop at 0 %
-            // would replace the show's real resume point with the stub's.
-            if !short { scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent) }
+            // Not for a placeholder clip, nor with the duration unknown (the percentage would read
+            // 0): Simkl keeps one paused session per show, so a stop at 0 % would replace the
+            // show's real resume point.
+            if !short, state.durationSec > 0 { scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent) }
         }
         guard let item = traktScrobbleItem else { return }
         traktScrobbleItem = nil

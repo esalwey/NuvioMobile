@@ -81,6 +81,9 @@ final class PlaybackProgressRecorder {
             lastTickWasPlaying = false
         } else {
             observeBackgroundIfNeeded()
+            // A session requested before the file knew its duration (an HLS item at readyToPlay)
+            // reaches the other trackers with the first tick that knows it.
+            openOtherTrackersIfReady(positionSec: positionSec, durationSec: durationSec)
             if isPaused && !isBuffering && lastTickWasPlaying { flush = true }
             if !isBuffering { lastTickWasPlaying = !isPaused }
             lastTick = (positionSec: positionSec, durationSec: durationSec, speed: speed)
@@ -147,10 +150,7 @@ final class PlaybackProgressRecorder {
         traktRequested = true
         // Not behind the Trakt item build below: it returns nil for ids Trakt can't address
         // (`kitsu:`, `mal:` …), which Simkl can.
-        if !otherTrackersOpen {
-            otherTrackersOpen = true
-            scrobbleOtherTrackers(TrackingScrobbleAction.start, percent: Self.percent(positionSec, durationSec))
-        }
+        openOtherTrackersIfReady(positionSec: positionSec, durationSec: durationSec)
         TraktScrobbleRepository.shared.buildItem(
             contentType: context.contentType,
             parentMetaId: context.parentMetaId,
@@ -173,6 +173,22 @@ final class PlaybackProgressRecorder {
         }
     }
 
+    /// Opens the other trackers' session once the Trakt session is requested and the file's
+    /// duration is known. That is at `startTrakt`, or at the first tick that knows the duration
+    /// when an HLS item did not know it at readyToPlay.
+    ///
+    /// Why wait for the duration: a start sent at 0 % would end with a stop at 0 %, and that stop
+    /// replaces the show's real Simkl resume point.
+    ///
+    /// Never once the session is closed: a start that lands after the viewer left, while the resume
+    /// seek was still in flight, would have no stop.
+    private func openOtherTrackersIfReady(positionSec: Double, durationSec: Double) {
+        guard traktRequested, !traktClosed, !otherTrackersOpen, durationSec > 0,
+              !WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(durationSec * 1000)) else { return }
+        otherTrackersOpen = true
+        scrobbleOtherTrackers(TrackingScrobbleAction.start, percent: Self.percent(positionSec, durationSec))
+    }
+
     /// A new viewing on this recorder ("Play Again" after the session was stopped): the next
     /// `startTrakt` opens a fresh scrobble instead of being ignored as a repeat.
     func reopenTrakt() {
@@ -192,10 +208,10 @@ final class PlaybackProgressRecorder {
         let percent: Float = short ? 0 : Self.percent(positionSec, durationSec)
         if otherTrackersOpen {
             otherTrackersOpen = false
-            // Not for a placeholder clip (its start can go out before its duration is known): Simkl
-            // keeps one paused session per show, so a stop at 0 % would replace the show's real
-            // resume point with the stub's.
-            if !short { scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent) }
+            // Not for a placeholder clip, nor with the duration unknown (the percentage would read
+            // 0): Simkl keeps one paused session per show, so a stop at 0 % would replace the
+            // show's real resume point.
+            if !short, durationSec > 0 { scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent) }
         }
         guard let item = traktItem else { return }
         traktItem = nil
