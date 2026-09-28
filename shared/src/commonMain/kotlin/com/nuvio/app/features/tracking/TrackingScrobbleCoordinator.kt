@@ -4,9 +4,11 @@ import co.touchlab.kermit.Logger
 import com.nuvio.app.core.tracking.ensureTrackingProvidersRegistered
 import com.nuvio.app.features.profiles.ProfileRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withContext
 
 data class TrackingScrobbleFailure(
     val providerId: TrackingProviderId,
@@ -95,7 +97,9 @@ object TrackingScrobbleCoordinator {
      * Never throws anything but cancellation: each scrobbler's failure (offline, HTTP error, and the
      * `require(...)` checks of `SimklMutationService.scrobble`) is caught per scrobbler by
      * [dispatchTrackingScrobble] and logged here, and anything else is logged too — an exception
-     * escaping a Kotlin suspend function into Swift aborts the app.
+     * escaping a Kotlin suspend function into Swift aborts the app. Runs off the main thread the
+     * players call it from: a Simkl stop ends in `SimklSyncRepository.commitScrobble`, which encodes
+     * and writes the whole snapshot. The completion therefore lands off-main too.
      */
     suspend fun scrobbleOtherTrackers(
         profileId: Int,
@@ -111,41 +115,69 @@ object TrackingScrobbleCoordinator {
     ) {
         try {
             if (profileId != ProfileRepository.activeProfileId) return
-            // Idempotent: Simkl's scrobbler registers itself on first access, which must not depend
-            // on some other repository having touched it first.
-            ensureTrackingProvidersRegistered()
-            TrackingProviderRegistry.ensureLoaded()
-            val scrobblers = otherTrackerScrobblers(TrackingProviderRegistry.connectedScrobblers())
-            if (scrobblers.isEmpty()) return
-            val event = buildOtherTrackerScrobbleEvent(
-                contentType = contentType,
-                parentMetaId = parentMetaId,
-                videoId = videoId,
-                title = title,
-                seasonNumber = seasonNumber,
-                episodeNumber = episodeNumber,
-                episodeTitle = episodeTitle,
-                progressPercent = progressPercent,
-            ) ?: run {
-                log.d { "Skipped ${action.wireValue} scrobble for $parentMetaId: no id or title to match" }
-                return
-            }
-            val failures = dispatchTrackingScrobble(
-                scrobblers = scrobblers,
-                profileId = profileId,
-                action = action,
-                event = event,
-            )
-            failures.forEach { failure ->
-                log.w(failure.cause) {
-                    "${failure.providerId.storageId} scrobble ${action.wireValue} failed for $parentMetaId " +
-                        "(${seasonNumber ?: "-"}x${episodeNumber ?: "-"}) at ${event.progressPercent}%"
-                }
+            withContext(Dispatchers.Default) {
+                dispatchOtherTrackersScrobble(
+                    profileId = profileId,
+                    action = action,
+                    contentType = contentType,
+                    parentMetaId = parentMetaId,
+                    videoId = videoId,
+                    title = title,
+                    seasonNumber = seasonNumber,
+                    episodeNumber = episodeNumber,
+                    episodeTitle = episodeTitle,
+                    progressPercent = progressPercent,
+                )
             }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             log.e(error) { "Scrobble ${action.wireValue} to the other trackers failed for $parentMetaId" }
+        }
+    }
+
+    private suspend fun dispatchOtherTrackersScrobble(
+        profileId: Int,
+        action: TrackingScrobbleAction,
+        contentType: String,
+        parentMetaId: String,
+        videoId: String?,
+        title: String?,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        episodeTitle: String?,
+        progressPercent: Double,
+    ) {
+        // Idempotent: Simkl's scrobbler registers itself on first access, which must not depend on
+        // some other repository having touched it first.
+        ensureTrackingProvidersRegistered()
+        TrackingProviderRegistry.ensureLoaded()
+        val scrobblers = otherTrackerScrobblers(TrackingProviderRegistry.connectedScrobblers())
+        if (scrobblers.isEmpty()) return
+        val event = buildOtherTrackerScrobbleEvent(
+            contentType = contentType,
+            parentMetaId = parentMetaId,
+            videoId = videoId,
+            title = title,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            episodeTitle = episodeTitle,
+            progressPercent = progressPercent,
+        ) ?: run {
+            log.d { "Skipped ${action.wireValue} scrobble for $parentMetaId: no id or title to match" }
+            return
+        }
+        val failures = dispatchTrackingScrobble(
+            scrobblers = scrobblers,
+            profileId = profileId,
+            action = action,
+            event = event,
+        )
+        failures.forEach { failure ->
+            log.w(failure.cause) {
+                "${failure.providerId.storageId} scrobble ${action.wireValue} failed for $parentMetaId " +
+                    "(${seasonNumber ?: "-"}x${episodeNumber ?: "-"}) at ${event.progressPercent}%"
+            }
         }
     }
 
