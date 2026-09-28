@@ -18,3 +18,17 @@ struct PlayerSwipeHint: View {
         .allowsHitTesting(false)
     }
 }
+
+extension PlayerSwipeHint {
+    /// AES-9: the hint teaches one gesture. Once the viewer has opened the swipe-down panel on
+    /// either engine it stops appearing (the mpv transport bar used to carry it every time the bar
+    /// showed). Device-local UI state, like the player's other UserDefaults keys.
+    static let learnedKey = "player.swipeDownHintLearned"
+
+    static var isLearned: Bool { UserDefaults.standard.bool(forKey: learnedKey) }
+
+    static func markLearned() {
+        guard !isLearned else { return }
+        UserDefaults.standard.set(true, forKey: learnedKey)
+    }
+}

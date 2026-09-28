@@ -77,12 +77,12 @@ struct PlayerTopPanel: View {
         .padding(.top, Theme.Spacing.xl)
         .padding(.bottom, Theme.Spacing.lg)
         .frame(maxWidth: .infinity, alignment: .top)
-        // Same recipe as the mpv transport bar (PlayerControlsOverlay): dark-tinted glass keeps text
+        // Same recipe as every player panel (`playerPanelGlass()`, AES-7): dark-tinted glass keeps text
         // legible over bright scenes; only the bottom corners are rounded (the top edge is the screen edge).
-        .glassEffect(.regular.tint(.black.opacity(0.35)),
-                     in: UnevenRoundedRectangle(bottomLeadingRadius: Theme.Radius.hero,
-                                                bottomTrailingRadius: Theme.Radius.hero, style: .continuous))
-        .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
+        .glassEffect(.regular.tint(PlayerChipStyle.glassTint),
+                     in: UnevenRoundedRectangle(bottomLeadingRadius: Theme.Radius.panel,
+                                                bottomTrailingRadius: Theme.Radius.panel, style: .continuous))
+        .playerPanelShadow()
     }
 
     private var tabRow: some View {

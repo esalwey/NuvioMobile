@@ -15,11 +15,32 @@ enum PlayerChipStyle {
     static let skipSymbol = "forward.frame.fill"
     static let nextSymbol = "forward.end.fill"
     /// Neutral Liquid Glass (docs/design/hig-hybrid-contract.md): a prompt is an action, not a
-    /// selection, so it never wears the brand accent.
+    /// selection, so it never wears the brand accent. Also the one tint of every player panel
+    /// (`playerPanelGlass()`), dark enough for text over bright scenes.
     static let glassTint = Color.black.opacity(0.45)
+    /// Inner padding of every floating player panel (transport bar, pause / Up Next / stream-info
+    /// cards) — AES-7.
+    static let panelPadding: CGFloat = Theme.Spacing.lg
     /// Skip window ends this many seconds before the segment end so the affordance disappears
     /// cleanly (both engines' `updateSkipPrompt`).
     static let lastSecondExclusion: Double = 1
+}
+
+extension View {
+    /// The single surface every floating player panel wears (AES-7): neutral Liquid Glass in the
+    /// shared tint, `Theme.Radius.panel` corners and one soft drop shadow — the transport bar and the
+    /// cards around it used to show four radii, three tints and four shadows on one screen.
+    func playerPanelGlass() -> some View {
+        glassEffect(.regular.tint(PlayerChipStyle.glassTint),
+                    in: RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous))
+            .playerPanelShadow()
+    }
+
+    /// The one drop shadow under every floating player surface: the panels above, the swipe-down
+    /// panel (its own bottom-rounded glass shape) and the mpv action chip.
+    func playerPanelShadow() -> some View {
+        shadow(color: .black.opacity(0.4), radius: 14, y: 6)
+    }
 }
 
 /// Non-focusable action chip drawn by the mpv screen (the native screen uses contextualActions).
@@ -43,7 +64,7 @@ struct PlayerActionChip: View {
         .padding(.horizontal, Theme.Spacing.lg + Theme.Spacing.xs)
         .padding(.vertical, Theme.Spacing.md)
         .glassEffect(.regular.tint(PlayerChipStyle.glassTint), in: .capsule)
-        .shadow(color: .black.opacity(0.4), radius: 10, y: 4)
+        .playerPanelShadow()
         .accessibilityElement(children: .combine)
     }
 }

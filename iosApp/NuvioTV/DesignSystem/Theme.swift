@@ -128,8 +128,18 @@ enum Theme {
         static let outline = Color(hex: 0x252A2A)
         /// Rating star.
         static let star = Color(hex: 0xFFC857)
-        /// Progress bar fill (continue watching).
-        static let progress = Color(hex: 0xFF5252)
+        /// Advisory warnings (the stream picker's debrid-session banner, AES-11) — the star's amber,
+        /// so the app keeps a single warm signal colour instead of a raw `.yellow`.
+        static let warning = Color(hex: 0xFFC857)
+        /// Resting fill of a focusable row drawn over artwork or a panel material (the stream
+        /// picker's rows, AES-3): the chips' translucent white, a step quieter, so a list reads as
+        /// separate cards without competing with the white focus platter.
+        static let restingRowFill = Color.white.opacity(0.07)
+        /// Progress bar fill (continue watching). AES-5: derived from `accentFocus`, never a fixed
+        /// hex — it was pinned to CRIMSON's `FF5252` when theme switching was added, so Ocean,
+        /// Emerald, Violet… still drew red bars. Computed, so it follows `applyTheme` through the same
+        /// ContentView `.id` remount every accent read relies on; CRIMSON renders exactly as before.
+        static var progress: Color { accentFocus }
         /// Label color on the system focus platter (near-white). Public mirror of
         /// `FlatControlStyles.FocusLook.onPlatter` — that type stays private to
         /// FlatControlStyles.swift, so call sites elsewhere (e.g. `StreamBadges.swift`, BUG-28)
@@ -451,6 +461,10 @@ enum Theme {
         static let chip: CGFloat = 6
         static let card: CGFloat = 12
         static let hero: CGFloat = 16
+        /// Floating panels over media and artwork — the player's transport bar, its pause / Up Next /
+        /// stream-info cards, the swipe-down panel, the stream picker's list (AES-7). Artwork inside
+        /// them keeps `card`.
+        static let panel: CGFloat = 24
     }
 
     // MARK: - Standard element sizes

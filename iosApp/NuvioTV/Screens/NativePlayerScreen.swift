@@ -77,11 +77,11 @@ struct NativePlayerScreen: View {
 
             switch coordinator.phase {
             case .preparing:
-                VStack(spacing: 20) {
+                VStack(spacing: Theme.Spacing.lg) {
                     ProgressView().scaleEffect(1.6)
                     Text(coordinator.preparingLabel)
                         .font(Theme.Font.body)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(Theme.Palette.textSecondary)
                 }
             case .playing:
                 if let player = coordinator.player {
@@ -113,6 +113,11 @@ struct NativePlayerScreen: View {
                             panelOpen = open
                             // The Up Next countdown waits while the panel is open.
                             upNext?.setPanelOpen(open)
+                            // The swipe hint has done its job on both engines (AES-9).
+                            if open {
+                                PlayerSwipeHint.markLearned()
+                                hideSwipeHint()
+                            }
                         }
                     )
                     .ignoresSafeArea()
@@ -214,6 +219,8 @@ struct NativePlayerScreen: View {
     private enum SwipeHintReason { case start, pause }
 
     private func flashSwipeHint(after delay: Double, reason: SwipeHintReason) {
+        // Only until the viewer has opened the panel once (AES-9, shared with the mpv screen).
+        guard !PlayerSwipeHint.isLearned else { return }
         swipeHintTask?.cancel()
         swipeHintReason = reason
         swipeHintTask = Task { @MainActor in

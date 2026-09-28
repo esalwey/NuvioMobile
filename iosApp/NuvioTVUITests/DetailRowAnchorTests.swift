@@ -104,6 +104,12 @@ final class DetailRowAnchorTests: XCTestCase {
             remote.press(.menu)
             pause(3)
         }
+        // AES-10: a synopsis longer than four lines adds its More / Less pill as a focus stop
+        // between the action row and the rows below. Step onto it first, so the six-press walk
+        // below starts where it always has: one press from the first row.
+        if app.buttons["detail.overview.toggle"].exists {
+            press(.down, times: 1, gap: 1.4)
+        }
 
         var anchorSamples = 0
         var anchoredRows = Set<String>()

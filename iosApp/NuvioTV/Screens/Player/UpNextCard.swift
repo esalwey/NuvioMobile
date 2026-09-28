@@ -9,12 +9,27 @@ import SwiftUI
 /// twins are the system contextual actions. Neutral glass (a prompt is an action, not a selection —
 /// `PlayerChipStyle`), Theme tokens only. The countdown lives in its own ring, never in a line of
 /// text that could truncate it away.
+///
+/// Layout: still · "Next Episode · S1 · E5" over the episode name and status · ring; a hairline;
+/// then the remote hints — the same panel surface and type scale as the pause card and the
+/// transport bar (`playerPanelGlass()`, AES-7).
 struct UpNextCard: View {
     @ObservedObject var engine: NextEpisodeEngine
     /// Artwork when the next episode has no still of its own (series backdrop, else poster).
     let fallbackArtwork: String?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The series backdrop (`CachedTitleArt`): a 16:9 stand-in for a next episode without a still,
+    /// sharper in this frame than the 2:3 poster the players pass as `fallbackArtwork`. Read at init,
+    /// like `PlayerEndScreen`, so the card's first frame already draws it — no poster-to-backdrop
+    /// swap while the card fades in.
+    private let seriesBackdrop: String?
+
+    init(engine: NextEpisodeEngine, fallbackArtwork: String?) {
+        _engine = ObservedObject(wrappedValue: engine)
+        self.fallbackArtwork = fallbackArtwork
+        seriesBackdrop = CachedTitleArt.peek(type: engine.contentType, id: engine.parentMetaId)?.background
+    }
 
     private static let cardWidth: CGFloat = 920
     private static let artworkSize = CGSize(width: 288, height: 162)
@@ -29,12 +44,15 @@ struct UpNextCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ring
             }
+            Rectangle()
+                .fill(Theme.Palette.textPrimary.opacity(0.12))
+                .frame(height: 1)
+                .accessibilityHidden(true)
             hints
         }
-        .padding(Theme.Spacing.lg)
+        .padding(PlayerChipStyle.panelPadding)
         .frame(width: Self.cardWidth, alignment: .leading)
-        .glassEffect(.regular.tint(PlayerChipStyle.glassTint), in: RoundedRectangle(cornerRadius: Theme.Radius.hero))
-        .shadow(color: .black.opacity(0.4), radius: 14, y: 6)
+        .playerPanelGlass()
         .accessibilityElement(children: .combine)
     }
 
@@ -42,30 +60,34 @@ struct UpNextCard: View {
 
     private var artworkURL: String? {
         let still: String? = engine.nextVideo?.thumbnail
-        if let still, !still.isEmpty { return still }
-        return fallbackArtwork
+        return CachedTitleArt.nonEmpty(still) ?? seriesBackdrop ?? fallbackArtwork
     }
 
     private var artwork: some View {
         CachedAsyncImage(string: artworkURL)
             .frame(width: Self.artworkSize.width, height: Self.artworkSize.height)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+            .accessibilityHidden(true)
     }
 
     // MARK: - Text
 
+    /// "Next Episode · S1 · E5" — one eyebrow line instead of two, with the player's localized code.
+    private var eyebrow: String {
+        let label = String(localized: "Next Episode")
+        guard let season = engine.nextVideo?.season?.value, let episode = engine.nextVideo?.episode?.value else {
+            return label
+        }
+        return "\(label) \u{00B7} \(PlaybackTitleParts.episodeCode(season: season, episode: episode))"
+    }
+
     private var details: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-            Text("Next Episode")
+            Text(eyebrow)
                 .font(Theme.Font.meta)
                 .foregroundStyle(Theme.Palette.textSecondary)
-            if let season = engine.nextVideo?.season?.value, let episode = engine.nextVideo?.episode?.value {
-                // "SxEy", the app's episode code (not localized, like the episode chips).
-                Text(verbatim: "S\(season)E\(episode)")
-                    .font(Theme.Font.meta)
-                    .foregroundStyle(Theme.Palette.textPrimary)
-            }
-            Text(engine.nextVideo?.title ?? engine.nextEpisodeTitle)
+                .lineLimit(1)
+            Text(CachedTitleArt.nonEmpty(engine.nextVideo?.title) ?? engine.nextEpisodeTitle)
                 .font(Theme.Font.sectionTitle)
                 .foregroundStyle(Theme.Palette.textPrimary)
                 .lineLimit(2)
