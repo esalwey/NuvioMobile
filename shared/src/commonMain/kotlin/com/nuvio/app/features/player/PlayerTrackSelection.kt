@@ -537,6 +537,44 @@ fun findPersistedAudioTrackIndex(
     }?.index ?: languageCandidates.firstOrNull()?.index ?: -1
 }
 
+/**
+ * Upstream c9d6f5f63 (public here: the tvOS players call it from Swift). The addon subtitle to
+ * restore for a saved addon choice: the saved file itself when the list still has it (the same
+ * episode), else — the next episode, whose addon subtitles are other files — the one in the saved
+ * language, from the saved provider when it has one, preferring the saved display name. Never the
+ * saved URL for a list that doesn't contain it (another episode's file).
+ */
+fun findPersistedAddonSubtitle(
+    subtitles: List<AddonSubtitle>,
+    preference: PersistedPlayerTrackPreference,
+): AddonSubtitle? {
+    preference.addonSubtitleUrl?.takeIf { it.isNotBlank() }?.let { url ->
+        subtitles.firstOrNull { it.url == url }?.let { return it }
+    }
+    val language = preference.subtitleLanguage?.takeIf { it.isNotBlank() } ?: return null
+    val candidates = subtitles.filter { addonSubtitleMatchesLanguage(it, language) }
+    val providerCandidates = preference.addonSubtitleAddonName?.takeIf { it.isNotBlank() }?.let { name ->
+        candidates.filter { it.addonName.equals(name, ignoreCase = true) }
+    }.orEmpty()
+    val preferredCandidates = providerCandidates.ifEmpty { candidates }
+    return preferredCandidates.firstOrNull {
+        it.display.equals(preference.subtitleName, ignoreCase = true)
+    } ?: preferredCandidates.firstOrNull()
+}
+
+/**
+ * Upstream c9d6f5f63's gate while addon subtitles are still arriving: restore `subtitle` (a
+ * [findPersistedAddonSubtitle] match) right away only when it is the saved file or comes from the
+ * saved provider — another provider's match waits, since the saved one may still arrive.
+ */
+fun canRestorePersistedAddonSubtitleWhileLoading(
+    subtitle: AddonSubtitle,
+    preference: PersistedPlayerTrackPreference,
+): Boolean =
+    subtitle.url == preference.addonSubtitleUrl ||
+        preference.addonSubtitleAddonName.isNullOrBlank() ||
+        subtitle.addonName.equals(preference.addonSubtitleAddonName, ignoreCase = true)
+
 fun findPersistedSubtitleTrackIndex(
     tracks: List<SubtitleTrack>,
     preference: PersistedPlayerTrackPreference,

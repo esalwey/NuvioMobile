@@ -75,6 +75,11 @@ struct PlaybackContext: Identifiable {
     /// overwhelming majority of streams. Consumed by BOTH engines: mpv (`http-header-fields`)
     /// and the native path's FFmpeg source opens (MediaProbe + RemuxSession `headers` option).
     var requestHeaders: [String: String] = [:]
+    /// Where to start instead of the saved progress — an in-player source switch picks up where the
+    /// previous source was (upstream c69b643a6, "resume restored player from current position"):
+    /// the saved position is up to a tick stale, and an entry already counted as completed near the
+    /// end would restart the episode from 0. nil = the saved progress decides.
+    var startPositionSec: Double? = nil
 
     // Headers join the identity (Codex 2026-08-20 round 3): two sources for the same episode can
     // share a URL but require different headers; StreamPickerView rebuilds the player and

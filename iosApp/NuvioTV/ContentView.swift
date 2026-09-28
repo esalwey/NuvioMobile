@@ -176,7 +176,7 @@ struct ContentView: View {
                 topShelf.start()
                 if let url = pendingDeepLinkURL {
                     pendingDeepLinkURL = nil
-                    deepLink = DeepLink.parse(url)
+                    if !ExternalPlaybackCallbacks.handle(url) { deepLink = DeepLink.parse(url) }
                 }
             } else {
                 // Sign-out wipes local progress first, so the watcher's final emission already
@@ -198,6 +198,9 @@ struct ContentView: View {
         }
         .onOpenURL { url in
             if auth.gate == .main, entered {
+                // Infuse coming back from a hand-off (x-callback-url): recorded, never a deep link —
+                // parsing it as one would close a deep-link cover the viewer returns to.
+                if ExternalPlaybackCallbacks.handle(url) { return }
                 deepLink = DeepLink.parse(url)
             } else {
                 // Cold launch from the Top Shelf: apply once the profile gate is passed.

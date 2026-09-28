@@ -370,6 +370,15 @@ final class NextEpisodeEngine: ObservableObject {
     /// The engine is done with this player: it cancelled (exit, choose a source) or handed off.
     var isFinished: Bool { cancelled || handedOff }
 
+    /// A file this long is a short error/placeholder clip, not the playing episode — unless its
+    /// metadata runtime says the episode really is that short (mpv's error card, PLY-1).
+    func isPlaceholderClip(durationSec: Double) -> Bool {
+        UpNextTrigger.isPlaceholder(
+            durationSec: durationSec,
+            expectedRuntimeSec: expectedRuntimeSec ?? Self.runtimeSec(parsing: context.meta?.runtime)
+        )
+    }
+
     init(context: PlaybackContext, onPlayNext: @escaping (PlaybackContext) -> Void) {
         self.context = context
         self.onPlayNext = onPlayNext
@@ -880,7 +889,7 @@ final class NextEpisodeEngine: ObservableObject {
         }
     }
 
-    /// Switch the current video to a different stream (position resumes via saved watch progress).
+    /// Switch the current video to a different stream (it starts at the current position).
     /// Returns false when the stream can't be played at all; true means "handled" — a debrid
     /// stream resolves asynchronously first (the panel may dismiss; playback switches when the
     /// link lands, ~1s for cached torrents, and a failed resolve leaves playback untouched).
@@ -934,7 +943,9 @@ final class NextEpisodeEngine: ObservableObject {
             meta: context.meta,
             fileSizeBytes: { let n: Int64? = stream.behaviorHints.videoSize?.int64Value; return n }(),
             requestHeaders: StreamModelsKt.sanitizePlaybackHeaders(
-                headers: stream.behaviorHints.proxyHeaders?.request)
+                headers: stream.behaviorHints.proxyHeaders?.request),
+            // The new source picks up exactly where this one is (c69b643a6).
+            startPositionSec: lastPositionSec
         )
         handedOff = true
         countdownTask?.cancel()

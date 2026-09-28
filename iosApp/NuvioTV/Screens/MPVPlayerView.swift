@@ -60,6 +60,8 @@ final class MPVPlaybackState: ObservableObject {
     /// that dropped or expired mid-way — only that one records the episode as completed. Set before
     /// `isEnded` flips.
     var endedNaturally = true
+    /// The playback error card is up (PLY-1): the overlays under it stay away.
+    @Published var playbackErrorShown = false
 
     /// Wired by the controller so the SwiftUI track picker can drive libmpv.
     var selectAudio: ((Int) -> Void)?
@@ -89,6 +91,12 @@ final class MPVPlaybackState: ObservableObject {
     /// The engine is prefetching the NEXT episode's addon subtitles into the shared repository —
     /// stop side-loading that list into this file.
     var freezeAddonSubtitles = false
+    /// Wired by `MPVPlayerScreen` to the engine: the Up Next card is on screen. An end of file then
+    /// belongs to its hand-off (the episode is in its credits), never to the error card (PLY-1).
+    var upNextCardUp: (() -> Bool)?
+    /// Wired likewise: a file this long is a short error/placeholder clip, not the episode (unless its
+    /// metadata runtime is that short too).
+    var isPlaceholderClip: ((Double) -> Bool)?
 
     let title: String
     init(title: String) { self.title = title }
@@ -135,6 +143,27 @@ final class MPVTVPlayerViewController: UIViewController {
     private var didUserSelectAudio = false
     private var addedSubtitleUrls = Set<String>()
     private var fileLoaded = false
+    /// Subtitle choice memory (c9d6f5f63): the choice saved for this title (series-wide), the addon
+    /// subtitles side-loaded into this file by URL, the addon list last filtered for it, and the last
+    /// track walk's subtitle rows.
+    private lazy var persistedTrackPreference: PersistedPlayerTrackPreference? =
+        PlayerSubtitleMemory.load(parentMetaId: context.parentMetaId)
+    private var sideLoadedAddonSubtitles: [String: AddonSubtitle] = [:]
+    private var latestAddonSubtitles: [AddonSubtitle] = []
+    private var lastSubtitleInfos: [TrackInfo] = []
+    /// This file's subtitle selection is settled: restored, planned, or picked by the viewer.
+    private var subtitleSelectionResolved = false
+    /// A saved addon choice waits this long, at most, for this episode's addon subtitles.
+    private var subtitleRestoreDeadline: DispatchWorkItem?
+    private var subtitleRestoreDeadlinePassed = false
+    private static let subtitleRestoreWaitSec: TimeInterval = 8
+    /// The audio pass's inputs for the subtitle language plan (it may run after a restore gave up).
+    private var subtitlePlanAudio: AudioTrack?
+    private var subtitlePlanAudioTargets: [String] = []
+    /// `eventQueue`-confined: an addon subtitle to select once its side-load lands, and the addon URL
+    /// behind each credential-scoped local copy.
+    private var pendingSubtitleSelectURL: String?
+    private var externalSubtitleSources: [String: String] = [:]
     /// Trakt scrobbling (no-ops while Trakt is disconnected — the shared repo checks auth).
     private var traktScrobbleItem: TraktScrobbleItem?
     private var traktScrobbleRequested = false
@@ -142,6 +171,13 @@ final class MPVTVPlayerViewController: UIViewController {
     /// out before it returns, the late completion must not start a scrobble that nothing will ever
     /// stop (ME-004).
     private var traktSessionClosed = false
+    /// PLY-6: the file loaded, but its duration only reaches `state` on the next refresh tick — the
+    /// Trakt start waits for that tick, so the placeholder-clip guard and the start percentage both
+    /// see the real duration instead of 0.
+    private var traktStartPending = false
+    /// Where the FILE_LOADED resume seek lands. The Trakt start reports it while that seek is still
+    /// in flight (a resumed episode used to open its scrobble at 0 %).
+    private var resumeTargetSec: Double?
     private var skipSegments: [SkipSegment] = []
     /// Last raw eof-reached value (edge detection for the post-play cover).
     private var lastEofFlag = false
@@ -199,6 +235,30 @@ final class MPVTVPlayerViewController: UIViewController {
     /// saved progress — which may already be marked completed near the end, and would restart the
     /// episode from 0.
     private let startPositionSec: Double?
+
+    // MARK: Playback errors (PLY-1)
+
+    /// The error card's "Choose Another Source": back to a stream list for this episode. nil = no
+    /// picker behind the player — the button reads "Back" and leaves the player.
+    var onChooseAnotherSource: (() -> Void)?
+    /// The error on screen (the card is `errorHost`); nil while playback is healthy.
+    private var playbackError: PlayerPlaybackError?
+    private var errorHost: PlayerErrorHostController?
+    /// Bounds the wait for FILE_LOADED: a source that accepts the connection but never delivers a
+    /// playable file raises no mpv event at all.
+    private var loadWatchdog: DispatchWorkItem?
+    private static let loadTimeoutSec: TimeInterval = 30
+    /// Where this load started playing (the resume target, else 0). An end of file within
+    /// `earlyEndSec` of it — short of the duration — is a stream that failed right after opening,
+    /// not the end of the episode.
+    private var loadStartPositionSec: Double = 0
+    private static let earlyEndSec: Double = 10
+    /// `eventQueue`-confined: this load attempt reached FILE_LOADED, and the last HTTP error status
+    /// the core logged before it did (the likely reason for an END_FILE error).
+    private var coreOpenedFile = false
+    private var lastHttpErrorStatus: Int?
+    /// The viewer is leaving the player from the card: nothing may present it again meanwhile.
+    private var leavingFromErrorCard = false
 
     init(context: PlaybackContext, state: MPVPlaybackState, startPositionSec: Double? = nil) {
         self.context = context
@@ -261,6 +321,7 @@ final class MPVTVPlayerViewController: UIViewController {
             // the fallback for a `setupMpv()` that ran before the settings store had hydrated.
             applyAudioLanguagePreferences()
             command("loadfile", args: [context.url.absoluteString, "replace"])
+            armLoadWatchdog()
             startPolling()
             flashControls()
 
@@ -272,7 +333,11 @@ final class MPVTVPlayerViewController: UIViewController {
             }
             subtitleLoadingWatcher = FlowWatcherKt.watch(SubtitleRepository.shared.isLoading) { [weak self] emitted in
                 guard let self, let loading = (emitted as? NSNumber)?.boolValue else { return }
-                DispatchQueue.main.async { self.state.subtitleSearchInFlight = loading }
+                DispatchQueue.main.async {
+                    self.state.subtitleSearchInFlight = loading
+                    // A saved addon choice may have been waiting for this fetch to finish.
+                    if !loading { self.resolveSubtitleSelection(subInfos: self.lastSubtitleInfos) }
+                }
             }
 
             // Subtitle appearance from Settings (color/size/bold/outline/background). The watcher
@@ -294,10 +359,18 @@ final class MPVTVPlayerViewController: UIViewController {
             startPolling()
             if fileLoaded { applyDisplayCriteriaIfEnabled() }
         }
+        // PLY-1: the load watchdog stands down while the player is covered; back on screen with the
+        // file still not loaded, it runs again. An error that arrived meanwhile is shown now.
+        if didLoad, mpv != nil, !fileLoaded, playbackError == nil, loadWatchdog == nil {
+            armLoadWatchdog()
+        }
+        presentErrorCardIfNeeded()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        loadWatchdog?.cancel()
+        loadWatchdog = nil
         pollTimer?.invalidate()
         pollTimer = nil
         endSeek()
@@ -537,6 +610,8 @@ final class MPVTVPlayerViewController: UIViewController {
 
     private struct TrackInfo {
         let id: Int; let lang: String; let title: String; let forced: Bool; let selected: Bool
+        /// Side-loaded (external) track: the URL it was added from. nil = embedded in the file.
+        var sourceURL: String? = nil
     }
 
     /// Schedule a track-list walk on `eventQueue`. The walk is dozens of synchronous property
@@ -571,12 +646,18 @@ final class MPVTVPlayerViewController: UIViewController {
             let id = getInt("track-list/\(i)/id")
             let selected = getFlag("track-list/\(i)/selected")
             let label = trackLabel(index: i, fallbackId: id)
+            // External (side-loaded) subtitles: the URL behind the file mpv reads — the local copy
+            // of a credential-scoped download maps back to its addon URL.
+            let sourceURL: String? = type == "sub" && getFlag("track-list/\(i)/external")
+                ? getString("track-list/\(i)/external-filename").map { externalSubtitleSources[$0] ?? $0 }
+                : nil
             let info = TrackInfo(
                 id: id,
                 lang: getString("track-list/\(i)/lang") ?? "",
                 title: getString("track-list/\(i)/title") ?? "",
                 forced: getFlag("track-list/\(i)/forced"),
-                selected: selected
+                selected: selected,
+                sourceURL: sourceURL
             )
             if type == "audio" {
                 audio.append(PlayerTrack(id: id, label: label, isSelected: selected))
@@ -585,6 +666,14 @@ final class MPVTVPlayerViewController: UIViewController {
                 subs.append(PlayerTrack(id: id, label: label, isSelected: selected))
                 subInfos.append(info)
             }
+        }
+
+        // A restored addon subtitle whose side-load has now landed (c9d6f5f63).
+        if let pending = pendingSubtitleSelectURL,
+           let info = subInfos.first(where: { $0.sourceURL == pending }) {
+            pendingSubtitleSelectURL = nil
+            setMpvInt("sid", Int64(info.id))
+            refreshTracksAsync()        // publish the new selection
         }
 
         DispatchQueue.main.async { [weak self] in
@@ -596,7 +685,11 @@ final class MPVTVPlayerViewController: UIViewController {
             // The panel diffs its rows by stable ids, so refreshing while it is open is safe.
             if self.state.audioTracks != audio { self.state.audioTracks = audio }
             if self.state.subtitleTracks != newSubs { self.state.subtitleTracks = newSubs }
+            self.lastSubtitleInfos = subInfos
             self.autoSelectPreferredTracks(audioInfos: audioInfos, subInfos: subInfos)
+            // The subtitle half: a saved choice first, else the language plan. A saved addon choice
+            // that waits for this episode's addon subtitles is retried on every walk.
+            self.resolveSubtitleSelection(subInfos: subInfos)
         }
     }
 
@@ -657,16 +750,25 @@ final class MPVTVPlayerViewController: UIViewController {
             )
         }
 
-        // Subtitles: shared plan decides targets + forced/normal mode.
+        // The subtitle half runs from `resolveSubtitleSelection`: a saved choice first (c9d6f5f63),
+        // else `applySubtitlePlan` — possibly later, once this episode's addon subtitles arrived.
+        subtitlePlanAudio = effectiveAudioTrack
+        subtitlePlanAudioTargets = audioTargets
+    }
+
+    /// The shared audio-aware subtitle plan (targets + forced/normal mode) over `subInfos`.
+    private func applySubtitlePlan(subInfos: [TrackInfo]) {
+        guard let settings = playerSettings, mpv != nil else { return }
+        let effectiveAudioTrack = subtitlePlanAudio
         let subTargets = PlayerLanguagePreferencesKt.resolvePreferredSubtitleLanguageTargets(
             preferredSubtitleLanguage: settings.preferredSubtitleLanguage,
             secondaryPreferredSubtitleLanguage: settings.secondaryPreferredSubtitleLanguage,
-            deviceLanguages: deviceLanguages
+            deviceLanguages: DeviceLanguagePreferences.shared.preferredLanguageCodes()
         )
         guard !subInfos.isEmpty,
               let plan = PlayerTrackSelectionKt.resolveSubtitleAutoSelectionPlan(
                   selectedAudioTrack: effectiveAudioTrack,
-                  preferredAudioTargets: audioTargets,
+                  preferredAudioTargets: subtitlePlanAudioTargets,
                   preferredSubtitleTargets: subTargets,
                   useForcedSubtitles: settings.subtitleStyle.useForcedSubtitles
               )
@@ -691,6 +793,168 @@ final class MPVTVPlayerViewController: UIViewController {
         } else if plan.mode == .forcedOnly {
             // Forced-only plan with no forced track in that language: keep subtitles off.
             eventQueue.async { [weak self] in self?.setMpvString("sid", "no") }
+        }
+    }
+
+    // MARK: - Subtitle choice memory (upstream c9d6f5f63)
+    //
+    // The viewer's subtitle pick is saved per title (series-wide, profile-scoped, the shared
+    // `PlayerTrackPreferenceStorage` mobile uses) and restored on the next episode — or the next
+    // session — before the language plan runs: Off stays off, an embedded track is matched by
+    // language / forced flag / name, and an addon subtitle by the saved file on the same episode,
+    // else this episode's subtitle in the saved language from the saved provider.
+
+    private enum SubtitleRestore { case restored, waiting, unmatched }
+
+    /// Once per file: restore the saved choice, or run the language plan. A saved addon choice can
+    /// wait (`.waiting`) for this episode's addon subtitles — retried on every track walk, when the
+    /// fetch completes, and at `subtitleRestoreWaitSec` at the latest. Never before FILE_LOADED: a
+    /// track walk can publish while the file is still opening, before `onFileLoaded` side-loads the
+    /// prefetched addon list — a saved addon choice would find nothing and give up.
+    private func resolveSubtitleSelection(subInfos: [TrackInfo]) {
+        guard didAutoSelectTracks, fileLoaded, !subtitleSelectionResolved, mpv != nil else { return }
+        switch restorePersistedSubtitle(subInfos: subInfos) {
+        case .restored:
+            finishSubtitleSelection()
+        case .waiting:
+            armSubtitleRestoreDeadline()
+        case .unmatched:
+            finishSubtitleSelection()
+            applySubtitlePlan(subInfos: subInfos)
+        }
+    }
+
+    private func finishSubtitleSelection() {
+        subtitleSelectionResolved = true
+        subtitleRestoreDeadline?.cancel()
+        subtitleRestoreDeadline = nil
+    }
+
+    private func restorePersistedSubtitle(subInfos: [TrackInfo]) -> SubtitleRestore {
+        guard let preference = persistedTrackPreference else { return .unmatched }
+        let type = preference.subtitleType
+        if type == PersistedSubtitleSelectionType.shared.DISABLED {
+            print("[MPV] subtitles: restored Off")
+            eventQueue.async { [weak self] in self?.setMpvString("sid", "no") }
+            refreshTracksAsync()
+            return .restored
+        }
+        if type == PersistedSubtitleSelectionType.shared.INTERNAL {
+            if let id = persistedInternalSubtitleId(preference, subInfos: subInfos) {
+                print("[MPV] subtitles: restored track \(id) (\(preference.subtitleLanguage ?? "?"))")
+                eventQueue.async { [weak self] in self?.setMpvInt("sid", Int64(id)) }
+                refreshTracksAsync()
+                return .restored
+            }
+            // Stream-attached subtitle files are side-loaded after the first walk.
+            let streamSubtitlesPending = !subtitleRestoreDeadlinePassed && context.externalSubtitles.contains { sub in
+                !subInfos.contains { $0.sourceURL == sub.url }
+            }
+            return streamSubtitlesPending ? .waiting : .unmatched
+        }
+        if type == PersistedSubtitleSelectionType.shared.ADDON {
+            let stillLoading = !subtitleRestoreDeadlinePassed && !addonSubtitleFetchFinished()
+            guard let match = PlayerTrackSelectionKt.findPersistedAddonSubtitle(
+                subtitles: latestAddonSubtitles, preference: preference
+            ) else {
+                return stillLoading ? .waiting : .unmatched
+            }
+            // Another provider's match waits while the saved provider may still answer.
+            if stillLoading, !PlayerTrackSelectionKt.canRestorePersistedAddonSubtitleWhileLoading(
+                subtitle: match, preference: preference
+            ) {
+                return .waiting
+            }
+            print("[MPV] subtitles: restored addon subtitle \(match.display) (\(match.language))")
+            selectAddonSubtitle(match)
+            return .restored
+        }
+        return .unmatched
+    }
+
+    /// An embedded (or stream-attached) track for a saved INTERNAL choice. The saved mpv track id
+    /// counts only while it still names the saved language and forced flag (the same file); across
+    /// episodes the shared matcher decides — language, forced flag, variant, then name.
+    private func persistedInternalSubtitleId(_ preference: PersistedPlayerTrackPreference,
+                                             subInfos: [TrackInfo]) -> Int? {
+        let candidates = subInfos.filter { info in
+            guard let url = info.sourceURL else { return true }
+            return sideLoadedAddonSubtitles[url] == nil       // an addon file is another kind of choice
+        }
+        guard !candidates.isEmpty else { return nil }
+        let language = preference.subtitleLanguage ?? ""
+        let forced = preference.subtitleIsForced?.boolValue
+        if let savedId = preference.subtitleTrackId.flatMap({ Int($0) }),
+           let info = candidates.first(where: { $0.id == savedId }),
+           language.isEmpty || PlayerLanguagePreferencesKt.languageMatchesPreference(trackLanguage: info.lang, targetLanguage: language),
+           forced == nil || forced == info.forced {
+            return info.id
+        }
+        let tracks = candidates.enumerated().map { index, info in
+            SubtitleTrack(
+                index: Int32(index),
+                id: String(info.id),
+                label: info.title.isEmpty ? info.lang : info.title,
+                language: info.lang.isEmpty ? nil : info.lang,
+                isSelected: info.selected,
+                isForced: info.forced
+            )
+        }
+        let match = Int(PlayerTrackSelectionKt.findPersistedSubtitleTrackIndex(
+            tracks: tracks, preference: PlayerSubtitleMemory.withoutTrackId(preference)
+        ))
+        return candidates.indices.contains(match) ? candidates[match].id : nil
+    }
+
+    /// Select an addon subtitle, side-loading it first if needed; the track walk after the side-load
+    /// lands picks it up (`pendingSubtitleSelectURL`).
+    private func selectAddonSubtitle(_ subtitle: AddonSubtitle) {
+        let url = subtitle.url
+        if !addedSubtitleUrls.contains(url) {
+            sideLoadedAddonSubtitles[url] = subtitle
+            subAdd(url: url, title: subtitle.display, lang: subtitle.language)
+        }
+        eventQueue.async { [weak self] in self?.pendingSubtitleSelectURL = url }
+        refreshTracksAsync()
+    }
+
+    private func addonSubtitleFetchFinished() -> Bool {
+        (SubtitleRepository.shared.completedRequest.value_ as? String)
+            == SubtitleRepository.shared.requestKey(type: context.contentType, videoId: context.videoId)
+    }
+
+    private func armSubtitleRestoreDeadline() {
+        guard subtitleRestoreDeadline == nil, !subtitleRestoreDeadlinePassed else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.subtitleRestoreDeadline = nil
+            self.subtitleRestoreDeadlinePassed = true
+            self.resolveSubtitleSelection(subInfos: self.lastSubtitleInfos)
+        }
+        subtitleRestoreDeadline = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.subtitleRestoreWaitSec, execute: work)
+    }
+
+    /// The viewer picked a subtitle (the top panel): remember it for this title.
+    private func persistSubtitleChoice(trackId id: Int) {
+        let metaId = context.parentMetaId
+        let current = persistedTrackPreference
+        if id < 0 {
+            persistedTrackPreference = PlayerSubtitleMemory.saveOff(parentMetaId: metaId, keeping: current)
+        } else if let info = lastSubtitleInfos.first(where: { $0.id == id }) {
+            if let url = info.sourceURL, let addon = sideLoadedAddonSubtitles[url] {
+                persistedTrackPreference = PlayerSubtitleMemory.saveAddon(parentMetaId: metaId, subtitle: addon,
+                                                                          keeping: current)
+            } else {
+                persistedTrackPreference = PlayerSubtitleMemory.saveInternal(
+                    parentMetaId: metaId,
+                    language: info.lang.isEmpty ? nil : info.lang,
+                    name: info.title.isEmpty ? info.lang : info.title,
+                    trackId: String(info.id),
+                    forced: info.forced,
+                    keeping: current
+                )
+            }
         }
     }
 
@@ -739,7 +1003,10 @@ final class MPVTVPlayerViewController: UIViewController {
         applySubtitleStyle()
         applyDisplayCriteriaIfEnabled()
         fetchSkipSegments()
-        startTraktScrobble()
+        // Started by the first refresh tick that knows the duration (PLY-6).
+        traktStartPending = true
+        // The subtitle choice, if a track walk already came through while the file was opening.
+        resolveSubtitleSelection(subInfos: lastSubtitleInfos)
     }
 
     // MARK: - Match content frame rate (AVDisplayManager)
@@ -818,9 +1085,10 @@ final class MPVTVPlayerViewController: UIViewController {
 
     // MARK: - Trakt scrobbling
     //
-    // Simplified vs. mobile: scrobble "start" once when the file loads, "stop" once with the final
-    // progress when the player goes away (Trakt marks the item watched at >= 80%). The shared repo
-    // resolves IMDB/TMDB ids itself and silently no-ops when Trakt isn't connected.
+    // Simplified vs. mobile: scrobble "start" once the file has loaded and its duration is known
+    // (PLY-6), "stop" once with the final progress when the player goes away (Trakt marks the item
+    // watched at >= 80%). The shared repo resolves IMDB/TMDB ids itself and silently no-ops when
+    // Trakt isn't connected.
 
     private func startTraktScrobble() {
         guard !traktScrobbleRequested else { return }
@@ -845,8 +1113,9 @@ final class MPVTVPlayerViewController: UIViewController {
                 TraktScrobbleRepository.shared.scrobbleStart(
                     profileId: ActiveProfileProvider.shared.activeProfileId,
                     item: item,
-                    progressPercent: self.currentProgressPercent()
+                    progressPercent: self.traktStartPercent()
                 ) { _ in }
+                self.resumeTargetSec = nil
             }
         }
     }
@@ -871,6 +1140,16 @@ final class MPVTVPlayerViewController: UIViewController {
         let duration = state.durationSec
         guard duration > 0 else { return 0 }
         return Float(min(100, max(0, state.positionSec / duration * 100)))
+    }
+
+    /// The scrobble start's percentage: the playhead — or where the resume seek lands, while that
+    /// seek is still in flight and the playhead still reads the start of the file.
+    private func traktStartPercent() -> Float {
+        let duration = state.durationSec
+        guard duration > 0 else { return 0 }
+        var position = state.positionSec
+        if let target = resumeTargetSec, position + 5 < target { position = target }
+        return Float(min(100, max(0, position / duration * 100)))
     }
 
     // MARK: - Subtitle appearance (mirrors the mobile libmpv mapping)
@@ -969,8 +1248,10 @@ final class MPVTVPlayerViewController: UIViewController {
         let kept = playerSettings.map {
             PlayerTrackSelectionKt.filterAddonSubtitlesForSettings(subtitles: subs, settings: $0)
         } ?? subs
+        latestAddonSubtitles = kept
         var added = false
         for sub in kept where !addedSubtitleUrls.contains(sub.url) {
+            sideLoadedAddonSubtitles[sub.url] = sub
             subAdd(url: sub.url, title: sub.display, lang: sub.language)
             added = true
         }
@@ -1002,6 +1283,8 @@ final class MPVTVPlayerViewController: UIViewController {
                     return
                 }
                 self.eventQueue.async { [weak self] in
+                    // The track walk maps the local copy back to the addon URL (subtitle memory).
+                    self?.externalSubtitleSources[local.path] = url
                     self?.command("sub-add", args: [local.path, "auto", title, lang])
                 }
             }.resume()
@@ -1015,8 +1298,13 @@ final class MPVTVPlayerViewController: UIViewController {
 
     private func selectSubtitle(_ id: Int) {
         guard mpv != nil else { return }
+        // The viewer's pick wins over a saved choice still waiting to be restored, and is saved for
+        // the next episode (c9d6f5f63).
+        finishSubtitleSelection()
+        persistSubtitleChoice(trackId: id)
         eventQueue.async { [weak self] in
             guard let self, let mpv = self.mpv else { return }
+            self.pendingSubtitleSelectURL = nil
             if id < 0 {
                 self.checkError(mpv_set_property_string(mpv, "sid", "no"))
             } else {
@@ -1185,12 +1473,26 @@ final class MPVTVPlayerViewController: UIViewController {
         state.durationSec = snap.duration
         state.positionSec = max(snap.position, 0)
         state.isPaused = snap.paused
-        state.isBuffering = snap.cacheWait || (snap.coreIdle && !snap.paused)
+        // A failed load leaves the core idle and unpaused — which reads as buffering forever (PLY-1).
+        state.isBuffering = playbackError == nil && (snap.cacheWait || (snap.coreIdle && !snap.paused))
+
+        // PLY-6: the first tick that knows the duration opens the Trakt session.
+        if traktStartPending, snap.duration > 0 {
+            traktStartPending = false
+            startTraktScrobble()
+        }
 
         // Rising-edge detection: eof-reached STAYS true while keep-open holds the last frame, so
         // only propagate transitions — otherwise a dismissed end screen re-presents each tick.
         if snap.eof != lastEofFlag {
             lastEofFlag = snap.eof
+            // PLY-1: an end of file that is really a failed source — the stream dropped or is
+            // truncated, or a placeholder clip stood in for the video — gets the error card (Retry,
+            // another source) instead of the end-of-playback flow, and nothing is recorded as watched.
+            if snap.eof, playbackError == nil, let failure = failedSourceAtEndOfFile(snap) {
+                showPlaybackError(failure)
+                return
+            }
             // eof-reached also rises when a debrid/HTTP stream drops or expires mid-way: only an end
             // at the duration is the episode's real end (completed, Trakt 100 %, Up Next chaining).
             state.endedNaturally = !snap.eof
@@ -1212,7 +1514,7 @@ final class MPVTVPlayerViewController: UIViewController {
             logStartupStatsIfNeeded()
         }
 
-        updateSkipPrompt(position: snap.position)
+        updateSkipPrompt(position: snap.position, durationSec: snap.duration)
     }
 
     /// First-90s diagnostics for the beta "laggy at first" report: one `[MPVStats]` line per
@@ -1251,8 +1553,11 @@ final class MPVTVPlayerViewController: UIViewController {
 
     /// Show a skip prompt while the playhead is inside a segment (leaving a 1s tail so the button
     /// disappears cleanly at the end).
-    private func updateSkipPrompt(position: Double) {
-        let active = skipSegments.first { position >= $0.start && position < $0.end - PlayerChipStyle.lastSecondExclusion }
+    private func updateSkipPrompt(position: Double, durationSec: Double) {
+        // Upstream 80860602f: an error/placeholder clip (shared short-placeholder rule) offers no skip.
+        let placeholder = WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(durationSec * 1000))
+        let active = placeholder ? nil
+            : skipSegments.first(where: { position >= $0.start && position < $0.end - PlayerChipStyle.lastSecondExclusion })
         let prompt = active.map {
             SkipPrompt(label: skipLabel(for: $0.type), targetSec: $0.end,
                        isCredits: UpNextTrigger.outroTypes.contains($0.type.lowercased()))
@@ -1388,11 +1693,14 @@ final class MPVTVPlayerViewController: UIViewController {
         state.endedNaturally = true
         state.completedByHandOff = false
         state.positionSec = 0            // the next poll tick reports the real position
+        loadStartPositionSec = 0
         // The end screen's presentation closed the Trakt session (viewDidDisappear): a replay is a
         // new viewing, so it scrobbles again from the start.
         traktSessionClosed = false
         traktScrobbleRequested = false
         traktScrobbleItem = nil
+        traktStartPending = false
+        resumeTargetSec = nil
         startTraktScrobble()
         flashControls()
         becomeFirstResponder()
@@ -1424,9 +1732,239 @@ final class MPVTVPlayerViewController: UIViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
     }
 
+    // MARK: - Playback errors (PLY-1)
+
+    /// A failed load used to look exactly like buffering: mpv logged the END_FILE error, went idle
+    /// unpaused, and the spinner stayed up for good. The error card names the problem and offers
+    /// another source, a retry, and — while a slow source is still being waited on — more waiting.
+    private func showPlaybackError(_ error: PlayerPlaybackError) {
+        guard mpv != nil else { return }
+        loadWatchdog?.cancel()
+        loadWatchdog = nil
+        endSeek()
+        playbackError = error
+        state.playbackErrorShown = true
+        state.isBuffering = false
+        state.controlsVisible = false
+        // A dead stream must not hold the screensaver off forever.
+        UIApplication.shared.isIdleTimerDisabled = false
+        presentErrorCardIfNeeded()
+    }
+
+    /// The end of file `snap` just reached, when it is a failed source rather than the end of the
+    /// episode — except with the Up Next card up: the episode is in its credits there, and the engine's
+    /// hand-off carries on as before.
+    ///  - Right after this load started, short of the duration: truncated, or dropped at once — with no
+    ///    duration known too (nothing real ends seconds after it started).
+    ///  - Later, short of a known duration: the connection dropped or the link expired mid-way (FFmpeg
+    ///    ends the file there rather than reporting an error). Unknown duration: nothing to be short of.
+    ///  - A short error/placeholder clip (a debrid "not cached" video) that played to its end.
+    private func failedSourceAtEndOfFile(_ snap: PropSnapshot) -> PlayerPlaybackError? {
+        if state.upNextCardUp?() == true { return nil }
+        if !UpNextTrigger.isNaturalEnd(positionSec: snap.position, durationSec: snap.duration) {
+            if snap.position < loadStartPositionSec + Self.earlyEndSec {
+                print("[MPV] end of file at \(Int(snap.position))s, right after the load started — failed stream")
+                return PlayerPlaybackError(kind: .endedEarly)
+            }
+            guard snap.duration > 0 else { return nil }
+            print("[MPV] end of file at \(Int(snap.position))s of \(Int(snap.duration))s — the stream dropped")
+            return PlayerPlaybackError(kind: .dropped)
+        }
+        let placeholder = state.isPlaceholderClip?(snap.duration)
+            ?? UpNextTrigger.isPlaceholder(durationSec: snap.duration, expectedRuntimeSec: nil)
+        guard placeholder else { return nil }
+        print("[MPV] a \(Int(snap.duration))s clip played to its end — a placeholder, not the video")
+        return PlayerPlaybackError(kind: .placeholder)
+    }
+
+    /// Present (or refresh) the card. Presented from this controller like the top panel
+    /// (`.overFullScreen`), so the player keeps its session for "Retry".
+    private func presentErrorCardIfNeeded() {
+        guard let error = playbackError, !leavingFromErrorCard else { return }
+        if let host = errorHost {
+            host.rootView = makeErrorScreen(error)
+            return
+        }
+        // Something presented here is still animating in or out — the previous card going away after
+        // Retry (straight into another refusal), the top panel: once it's done. An `.overFullScreen`
+        // dismissal never brings `viewDidAppear` back to present it.
+        if let presented = presentedViewController, presented.isBeingPresented || presented.isBeingDismissed {
+            presentErrorCardShortly()
+            return
+        }
+        // The top panel can be open over a stream that is still loading: close it first.
+        if let panel = presentedViewController as? PlayerPanelPresenting {
+            panel.close(animated: false)
+            presentErrorCardShortly()
+            return
+        }
+        // Covered by a full-screen cover (the end screen), or not on screen: `viewDidAppear` presents it.
+        guard presentedViewController == nil, view.window != nil else { return }
+        let host = PlayerErrorHostController(rootView: makeErrorScreen(error))
+        host.modalPresentationStyle = .overFullScreen
+        host.modalTransitionStyle = .crossDissolve
+        host.onMenu = { [weak self] in
+            guard let self else { return }
+            let leave = self.onExit
+            self.leaveFromErrorCard { leave?() }
+        }
+        errorHost = host
+        present(host, animated: !UIAccessibility.isReduceMotionEnabled)
+    }
+
+    private func presentErrorCardShortly() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.presentErrorCardIfNeeded()
+        }
+    }
+
+    private func makeErrorScreen(_ error: PlayerPlaybackError) -> PlayerErrorScreen {
+        PlayerErrorScreen(
+            error: error,
+            title: context.title,
+            canChooseSource: onChooseAnotherSource != nil,
+            onChooseSource: { [weak self] in self?.chooseAnotherSource() },
+            onRetry: { [weak self] in self?.retryLoad() },
+            onKeepWaiting: { [weak self] in self?.keepWaiting() }
+        )
+    }
+
+    private func clearPlaybackError() {
+        playbackError = nil
+        state.playbackErrorShown = false
+        guard let host = errorHost else { return }
+        errorHost = nil
+        host.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in
+            self?.becomeFirstResponder()     // libmpv's controller owns the remote again
+            // An error that arrived while this card was going away (Retry straight into another
+            // refusal) gets its card now.
+            self?.presentErrorCardIfNeeded()
+        }
+    }
+
+    /// Leave the player from the card (Menu, "Choose Another Source"): the card goes first, then
+    /// `action` closes the player. The player sits in a SwiftUI cover, and closing that must not
+    /// depend on UIKit also taking down this card, which SwiftUI doesn't own — only the card might go,
+    /// stranding a dead player. `playbackError` stays set on the way out: no spinner, no end-of-file
+    /// handling, and the Up Next countdown stays held.
+    private func leaveFromErrorCard(_ action: @escaping () -> Void) {
+        guard !leavingFromErrorCard else { return }
+        leavingFromErrorCard = true
+        guard let host = errorHost else {
+            action()
+            return
+        }
+        errorHost = nil
+        guard host.presentingViewController != nil, !host.isBeingPresented, !host.isBeingDismissed else {
+            action()
+            return
+        }
+        host.dismiss(animated: false) { [weak self] in
+            self?.becomeFirstResponder()
+            action()
+        }
+    }
+
+    /// SwiftUI is removing this player (a hand-off rebuilt it for the next episode, its cover
+    /// closed): its card goes with it — never left over the next player, talking to a dead one.
+    func tearDownErrorCard() {
+        leavingFromErrorCard = true
+        guard let host = errorHost else { return }
+        errorHost = nil
+        guard host.presentingViewController != nil, !host.isBeingDismissed else { return }
+        if host.isBeingPresented {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { host.dismiss(animated: false) }
+        } else {
+            host.dismiss(animated: false)
+        }
+    }
+
+    /// FILE_LOADED reached the main thread: the watchdog stands down, and a "not responding" card
+    /// that went up meanwhile goes away — the slow source came through after all.
+    private func fileDidLoad() {
+        loadWatchdog?.cancel()
+        loadWatchdog = nil
+        if playbackError?.kind == .timedOut {
+            clearPlaybackError()
+            UIApplication.shared.isIdleTimerDisabled = !state.isPaused
+        }
+    }
+
+    private func armLoadWatchdog() {
+        loadWatchdog?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.mpv != nil, !self.fileLoaded, self.playbackError == nil else { return }
+            print("[MPV] nothing loaded after \(Int(Self.loadTimeoutSec)) s — the source isn't answering")
+            self.showPlaybackError(PlayerPlaybackError(kind: .timedOut))
+        }
+        loadWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.loadTimeoutSec, execute: work)
+    }
+
+    /// Card → "Retry": load the same stream again, from where it stopped (or the resume position,
+    /// if it never loaded; where this load started, after a placeholder clip).
+    private func retryLoad() {
+        guard mpv != nil else { return }
+        let resumeAt: Double?
+        if !fileLoaded {
+            resumeAt = pendingResumeSec
+        } else if playbackError?.kind == .placeholder {
+            resumeAt = loadStartPositionSec
+        } else {
+            resumeAt = max(state.positionSec, loadStartPositionSec)
+        }
+        clearPlaybackError()
+        print("[MPV] retrying the stream" + (resumeAt.map { " at \(Int($0))s" } ?? ""))
+        pendingResumeSec = (resumeAt ?? 0) > 1 ? resumeAt : nil
+        // A fresh load of the file: its per-file setup (`onFileLoaded`) runs again — side-loaded
+        // subtitles belong to the file that failed.
+        fileLoaded = false
+        addedSubtitleUrls.removeAll()
+        sideLoadedAddonSubtitles.removeAll()
+        didAutoSelectTracks = false
+        // The subtitle choice is settled again for the new file (a pick made before the failure is
+        // saved, so it comes back).
+        subtitleSelectionResolved = false
+        subtitleRestoreDeadline?.cancel()
+        subtitleRestoreDeadline = nil
+        subtitleRestoreDeadlinePassed = false
+        traktStartPending = false
+        lastEofFlag = false
+        updateProps { $0.eof = false; $0.paused = false }
+        state.isBuffering = true
+        UIApplication.shared.isIdleTimerDisabled = true
+        armLoadWatchdog()
+        let url = context.url.absoluteString
+        eventQueue.async { [weak self] in
+            guard let self else { return }
+            self.coreOpenedFile = false
+            self.lastHttpErrorStatus = nil
+            self.pendingSubtitleSelectURL = nil
+            // An end of file left mpv paused (keep-open), and a new file would open paused too.
+            self.setFlag("pause", false)
+            self.command("loadfile", args: [url, "replace"])
+        }
+    }
+
+    /// Card → "Keep Waiting" (a slow source): the spinner again, and another watchdog round.
+    private func keepWaiting() {
+        clearPlaybackError()
+        UIApplication.shared.isIdleTimerDisabled = true
+        armLoadWatchdog()
+    }
+
+    /// Card → "Choose Another Source": the presenter closes the player onto a stream list for this
+    /// episode, once the card is down. No picker behind the player → just leave it.
+    private func chooseAnotherSource() {
+        let leave = onChooseAnotherSource ?? onExit
+        leaveFromErrorCard { leave?() }
+    }
+
     // MARK: - Teardown
 
     deinit {
+        loadWatchdog?.cancel()
+        subtitleRestoreDeadline?.cancel()
         pollTimer?.invalidate()
         seekTimer?.invalidate()
         subtitleWatcher?.cancel()
@@ -1456,9 +1994,11 @@ final class MPVTVPlayerViewController: UIViewController {
                 if id == MPV_EVENT_NONE { break }
                 if id == MPV_EVENT_SHUTDOWN { return }
                 if id == MPV_EVENT_FILE_LOADED {
+                    self.coreOpenedFile = true
                     self.fileLoadedUptime = ProcessInfo.processInfo.systemUptime
                     self.alangTrace("file-loaded alang=\(self.getString("alang") ?? "-") aid=\(self.getString("aid") ?? "-")")
                     DispatchQueue.main.async {
+                        self.fileDidLoad()
                         self.applyPendingResume()
                         self.onFileLoaded()
                     }
@@ -1471,13 +2011,26 @@ final class MPVTVPlayerViewController: UIViewController {
                 if id == MPV_EVENT_END_FILE, let data = ev.pointee.data {
                     let endFile = UnsafePointer<mpv_event_end_file>(OpaquePointer(data)).pointee
                     if endFile.reason == MPV_END_FILE_REASON_ERROR {
-                        print("[MPV] End file error: \(String(cString: mpv_error_string(endFile.error)))")
+                        let message = String(cString: mpv_error_string(endFile.error))
+                        print("[MPV] End file error: \(message)")
+                        // PLY-1: this print used to be the only trace of a failed load — the spinner
+                        // stayed up for good. An HTTP status logged while opening names the reason.
+                        let status = self.coreOpenedFile ? nil : self.lastHttpErrorStatus
+                        DispatchQueue.main.async {
+                            self.showPlaybackError(PlayerPlaybackError(
+                                kind: .failed,
+                                detail: PlayerPlaybackError.detail(httpStatus: status, mpvError: message)
+                            ))
+                        }
                     }
                 }
                 if id == MPV_EVENT_LOG_MESSAGE,
                    let msg = UnsafeMutablePointer<mpv_event_log_message>(OpaquePointer(ev.pointee.data)) {
                     let level = String(cString: msg.pointee.level!)
                     let text = String(cString: msg.pointee.text!)
+                    if !self.coreOpenedFile, let status = PlayerPlaybackError.httpStatus(inLogLine: text) {
+                        self.lastHttpErrorStatus = status
+                    }
                     print("[MPV] \(level): \(text)", terminator: "")
                 }
             }
@@ -1531,9 +2084,14 @@ final class MPVTVPlayerViewController: UIViewController {
     }
 
     private func applyPendingResume() {
+        loadStartPositionSec = pendingResumeSec ?? 0
         guard let seconds = pendingResumeSec else { return }
         pendingResumeSec = nil
-        command("seek", args: [String(format: "%.3f", seconds), "absolute"])
+        // PLY-5: through `eventQueue` like every other seek. This runs at FILE_LOADED, the core's
+        // busiest moment — a synchronous `mpv_command` here parked the main thread on the core lock
+        // (the BUG-2/BUG-3 rule above `PropSnapshot`).
+        resumeTargetSec = seconds
+        seekAbsolute(seconds)
     }
 
     // MARK: - libmpv C-interop helpers
@@ -1599,10 +2157,13 @@ private struct MPVPlayerRepresentable: UIViewControllerRepresentable {
     /// Builds the engine-specific fourth tab at open time (its views observe live state).
     let makeExtraTab: () -> PlayerPanelExtraTab
     let onExit: () -> Void
+    /// Error card's "Choose Another Source" (PLY-1); nil = no stream picker behind the player.
+    let onChooseAnotherSource: (() -> Void)?
 
     func makeUIViewController(context ctx: Context) -> MPVTVPlayerViewController {
         let controller = MPVTVPlayerViewController(context: context, state: state, startPositionSec: startPositionSec)
         controller.onExit = onExit
+        controller.onChooseAnotherSource = onChooseAnotherSource
         let state = state, model = panelModel, makeExtraTab = makeExtraTab
         controller.onOpenPanel = { [weak controller] in
             guard let controller, controller.presentedViewController == nil else { return }
@@ -1621,6 +2182,11 @@ private struct MPVPlayerRepresentable: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: MPVTVPlayerViewController, context: Context) {}
+
+    /// The player is going away (a hand-off's rebuild, its cover closing): no error card outlives it.
+    static func dismantleUIViewController(_ controller: MPVTVPlayerViewController, coordinator: ()) {
+        controller.tearDownErrorCard()
+    }
 }
 
 /// SwiftUI host for the libmpv player + transport overlay; presented full-screen over the stream
@@ -1645,6 +2211,9 @@ struct MPVPlayerScreen: View {
     var onExitToDetails: (() -> Void)? = nil
     /// Open the stream picker for the next episode. nil → leave the player.
     var onPickNextSource: ((MetaVideo) -> Void)? = nil
+    /// The stream failed (error card, PLY-1): close the player onto a stream list for this episode.
+    /// nil → no picker behind the player; the card's button just leaves it.
+    var onChooseAnotherSource: (() -> Void)? = nil
 
     @StateObject private var state: MPVPlaybackState
     @Environment(\.dismiss) private var dismiss
@@ -1669,7 +2238,8 @@ struct MPVPlayerScreen: View {
          startPositionSec: Double? = nil,
          routingNote: String? = nil,
          onExitToDetails: (() -> Void)? = nil,
-         onPickNextSource: ((MetaVideo) -> Void)? = nil) {
+         onPickNextSource: ((MetaVideo) -> Void)? = nil,
+         onChooseAnotherSource: (() -> Void)? = nil) {
         self.context = context
         titleParts = PlaybackTitleParts(context: context)
         _upNext = ObservedObject(wrappedValue: upNext)
@@ -1678,6 +2248,7 @@ struct MPVPlayerScreen: View {
         self.routingNote = routingNote
         self.onExitToDetails = onExitToDetails
         self.onPickNextSource = onPickNextSource
+        self.onChooseAnotherSource = onChooseAnotherSource
         _state = StateObject(wrappedValue: MPVPlaybackState(title: context.title))
         _panelModel = StateObject(wrappedValue: PlayerTopPanelModel(
             info: PlayerPanelInfo(header: NativeInfoHeader(context: context))))
@@ -1694,7 +2265,8 @@ struct MPVPlayerScreen: View {
                                        onClose: { panelModel.onClose?() })
                     }
                 },
-                onExit: { dismiss() }
+                onExit: { dismiss() },
+                onChooseAnotherSource: onChooseAnotherSource
             )
             .ignoresSafeArea()
 
@@ -1810,15 +2382,17 @@ struct MPVPlayerScreen: View {
                 upNext.playbackResumedFromEnd()
             }
         }
-        // The Up Next countdown waits while the top panel is open.
+        // The Up Next countdown waits while the top panel — or the error card (PLY-1) — is up: no
+        // automatic hand-off may replace the player from under either.
         .onChange(of: state.panelOpen) { _, open in
-            upNext.setPanelOpen(open)
+            upNext.setPanelOpen(open || state.playbackErrorShown)
             // The viewer found the panel: the swipe hint has done its job (AES-9).
             if open {
                 PlayerSwipeHint.markLearned()
                 hideSwipeHint()
             }
         }
+        .onChange(of: state.playbackErrorShown) { _, shown in upNext.setPanelOpen(shown || state.panelOpen) }
         .onChange(of: state.isPaused) { _, paused in
             // The Up Next countdown pauses with the video.
             upNext.setPaused(paused)
@@ -1842,6 +2416,7 @@ struct MPVPlayerScreen: View {
     /// Next card over it.
     private var pauseCardVisible: Bool {
         showPauseInfo && state.isPaused && !state.isBuffering && !state.isEnded && !upNext.isCardVisible
+            && !state.playbackErrorShown
     }
 
     /// Bottom inset of the bottom-trailing prompts (Up Next card, skip chip): the screen-edge inset,
@@ -1890,7 +2465,12 @@ struct MPVPlayerScreen: View {
             upNext?.skipCreditsToNext(creditsEndSec: creditsEnd) ?? false
         }
         state.onSkipSegmentsLoaded = { [weak upNext] segments in upNext?.setSkipSegments(segments) }
-        upNext.setPanelOpen(state.panelOpen)
+        state.upNextCardUp = { [weak upNext] in upNext?.isCardVisible ?? false }
+        state.isPlaceholderClip = { [weak upNext] durationSec in
+            upNext?.isPlaceholderClip(durationSec: durationSec)
+                ?? UpNextTrigger.isPlaceholder(durationSec: durationSec, expectedRuntimeSec: nil)
+        }
+        upNext.setPanelOpen(state.panelOpen || state.playbackErrorShown)
     }
 
     private var endScreenPresented: Binding<Bool> {

@@ -4528,6 +4528,16 @@
         }
       }
     },
+    "Can’t Play This Source": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Impossible de lire cette source"
+          }
+        }
+      }
+    },
     "Card Depth": {
       "localizations": {
         "de": {
@@ -4966,6 +4976,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tiếng Trung"
+          }
+        }
+      }
+    },
+    "Choose Another Source": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choisir une autre source"
           }
         }
       }
@@ -11543,6 +11563,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Giữ Profile 7 FEL trên mpv"
+          }
+        }
+      }
+    },
+    "Keep Waiting": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continuer d’attendre"
           }
         }
       }
@@ -24652,6 +24682,16 @@
         }
       }
     },
+    "The file is no longer on the server (HTTP %lld).": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le fichier n’est plus sur le serveur (HTTP %lld)."
+          }
+        }
+      }
+    },
     "The hero plays a muted trailer preview after a moment of focus on a poster": {},
     "The hero plays its trailer by itself, without waiting for focus": {},
     "The hero shows artwork only": {},
@@ -24719,6 +24759,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Con cáo nâu nhanh nhẹn"
+          }
+        }
+      }
+    },
+    "The server answered with an error (HTTP %lld).": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le serveur a répondu par une erreur (HTTP %lld)."
           }
         }
       }
@@ -24791,6 +24841,26 @@
         }
       }
     },
+    "The server ran into an error (HTTP %lld).": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le serveur a rencontré une erreur (HTTP %lld)."
+          }
+        }
+      }
+    },
+    "The server refused access (HTTP %lld). The link may have expired.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le serveur a refusé l’accès (HTTP %lld). Le lien a peut-être expiré."
+          }
+        }
+      }
+    },
     "The server returned an invalid discovery document.": {
       "localizations": {
         "de": {
@@ -24855,6 +24925,56 @@
           "stringUnit": {
             "state": "translated",
             "value": "Máy chủ đã được lưu, nhưng ứng dụng không thể khởi động lại kết nối. Hãy khởi chạy lại Nuvio."
+          }
+        }
+      }
+    },
+    "The source didn’t deliver a playable video. The link may have expired, or the file may be unavailable or unsupported.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La source n’a pas fourni de vidéo lisible. Le lien a peut-être expiré, ou le fichier est indisponible ou non pris en charge."
+          }
+        }
+      }
+    },
+    "The source isn’t responding — it may be overloaded or offline. Playback starts on its own if it answers.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La source ne répond pas — elle est peut-être surchargée ou hors ligne. La lecture démarrera d’elle-même si elle répond."
+          }
+        }
+      }
+    },
+    "The source played a short clip instead of the video — often a notice from the debrid service that the file isn’t ready yet.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La source a lu un court extrait au lieu de la vidéo — souvent un avis du service debrid indiquant que le fichier n’est pas encore prêt."
+          }
+        }
+      }
+    },
+    "The stream stopped before the end. The connection may have dropped, or the link may have expired. Retry picks up where it stopped.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le flux s’est arrêté avant la fin. La connexion a peut-être été coupée, ou le lien a expiré. « Réessayer » reprend là où il s’est arrêté."
+          }
+        }
+      }
+    },
+    "The stream stopped right after it started. The file may be incomplete, or the connection dropped.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le flux s’est arrêté juste après avoir démarré. Le fichier est peut-être incomplet, ou la connexion a été coupée."
           }
         }
       }
@@ -25297,6 +25417,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nguồn này được ghim vào công ty hoặc mạng TMDB của nó; các bộ lọc này sẽ thu hẹp thêm."
+          }
+        }
+      }
+    },
+    "This source needs request headers that external players can’t send — it may not play there.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cette source exige des en-têtes HTTP que les lecteurs externes ne peuvent pas transmettre — elle risque de ne pas être lue."
+          }
+        }
+      }
+    },
+    "This source needs request headers that external players can’t send — playing in NuvioTV.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cette source exige des en-têtes HTTP que les lecteurs externes ne peuvent pas transmettre — lecture dans NuvioTV."
           }
         }
       }

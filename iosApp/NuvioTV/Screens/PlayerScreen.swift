@@ -23,6 +23,9 @@ struct PlayerScreen: View {
     var onExitToDetails: (() -> Void)?
     /// Open the stream picker for the next episode (its stream couldn't be auto-selected).
     var onPickNextSource: ((MetaVideo) -> Void)?
+    /// The stream can't be played (mpv's error card, PLY-1): close the player onto a stream list for
+    /// this episode. nil = no picker behind the player (the card's button just leaves it).
+    var onChooseAnotherSource: (() -> Void)?
 
     @StateObject private var upNext: NextEpisodeEngine
     @State private var decision: EngineDecision?
@@ -34,11 +37,13 @@ struct PlayerScreen: View {
     init(context: PlaybackContext,
          onPlayNext: ((PlaybackContext) -> Void)? = nil,
          onExitToDetails: (() -> Void)? = nil,
-         onPickNextSource: ((MetaVideo) -> Void)? = nil) {
+         onPickNextSource: ((MetaVideo) -> Void)? = nil,
+         onChooseAnotherSource: (() -> Void)? = nil) {
         self.context = context
         self.onPlayNext = onPlayNext
         self.onExitToDetails = onExitToDetails
         self.onPickNextSource = onPickNextSource
+        self.onChooseAnotherSource = onChooseAnotherSource
         _upNext = StateObject(wrappedValue: NextEpisodeEngine(context: context, onPlayNext: onPlayNext ?? { _ in }))
     }
 
@@ -67,10 +72,12 @@ struct PlayerScreen: View {
             case .mpv:
                 MPVPlayerScreen(context: context, upNext: upNext,
                                 canSwitchStreams: onPlayNext != nil,
-                                startPositionSec: fallbackStartSec,
+                                // The native engine's hand-over position, else a source switch's.
+                                startPositionSec: fallbackStartSec.flatMap { $0 > 1 ? $0 : nil } ?? context.startPositionSec,
                                 routingNote: forcedMPV ? String(localized: "mpv \u{00B7} fallback") : decision?.displayNote,
                                 onExitToDetails: onExitToDetails,
-                                onPickNextSource: onPickNextSource)
+                                onPickNextSource: onPickNextSource,
+                                onChooseAnotherSource: onChooseAnotherSource)
             case .deciding:
                 ZStack {
                     Color.black.ignoresSafeArea()

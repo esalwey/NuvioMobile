@@ -297,7 +297,8 @@ struct StreamPickerView: View {
                         onLeaveToDetails?()
                         dismiss()
                     },
-                    onPickNextSource: { video in chooseSource(for: video) }
+                    onPickNextSource: { video in chooseSource(for: video) },
+                    onChooseAnotherSource: { chooseAnotherSource(for: ctx) }
                 )
                 .ignoresSafeArea()
                 .id(ctx.id)
@@ -591,6 +592,22 @@ struct StreamPickerView: View {
     private func chooseSource(for video: MetaVideo) {
         retarget(to: video)
         selected = nil
+    }
+
+    /// The player couldn't play the picked stream (its error card, PLY-1): close it onto a list of
+    /// the playing episode's streams — this one, or, for an episode autoplay reached, this picker
+    /// retargeted to it (its list here is a previous episode's).
+    private func chooseAnotherSource(for ctx: PlaybackContext) {
+        guard ctx.videoId != target.videoId else {
+            autoAdvanced = false     // this list IS the playing episode's: stay on it
+            selected = nil
+            return
+        }
+        if let video = ctx.episodes.first(where: { $0.season?.value == ctx.season && $0.episode?.value == ctx.episode }) {
+            chooseSource(for: video)
+        } else {
+            selected = nil           // no episode to retarget to: the usual close (details after autoplay)
+        }
     }
 
     private func retarget(to video: MetaVideo) {
@@ -971,6 +988,21 @@ struct StreamPickerView: View {
     /// whose URL builders consume `sub`/`position` (VidHub `/play`, Infuse, VLC) resume and
     /// subtitle like the built-in player instead of starting cold.
     private func openExternally(urlString: String, stream: StreamItem, playerId: String, fallbackToInternal: Bool = false) {
+        // PLY-7: request headers the addon requires for this stream (Referer / User-Agent / auth —
+        // the built-in player sends them). None of the tvOS external players' URL schemes can carry
+        // headers, so such a stream may fail over there. The default player's Select plays it here,
+        // and says why; "Open in …" (a long press) is the viewer's explicit choice — it still hands
+        // off, with a warning (many hosts don't actually enforce the header).
+        let requestHeaders = StreamModelsKt.sanitizePlaybackHeaders(headers: stream.behaviorHints.proxyHeaders?.request)
+        if !requestHeaders.isEmpty {
+            if fallbackToInternal, let url = URL(string: urlString) {
+                showToast(String(localized: "This source needs request headers that external players can’t send — playing in NuvioTV."))
+                NextEpisodeEngine.consecutiveAutoPlays = 0
+                selected = context(url: url, stream: stream)
+                return
+            }
+            showToast(String(localized: "This source needs request headers that external players can’t send — it may not play there."))
+        }
         let progress = WatchProgressRepository.shared.progressForVideo(
             videoId: videoId,
             parentMetaId: parentMetaId,
@@ -981,11 +1013,37 @@ struct StreamPickerView: View {
             guard let progress, !progress.isCompleted, progress.lastPositionMs > 10_000 else { return 0 }
             return progress.lastPositionMs
         }()
+        // Infuse reports where it stopped through x-callback-url (upstream 99ced26a4): register the
+        // launch it will report back on.
+        var callbackLaunchId: String?
+        var callbacks: (success: String, error: String)?
+        if playerId == "infuse" {
+            let launch = ExternalPlaybackCallbacks.PendingLaunch(
+                id: UUID().uuidString,
+                sourceUrl: urlString,
+                profileId: ActiveProfileProvider.shared.activeProfileId,
+                contentType: type,
+                parentMetaId: parentMetaId,
+                videoId: videoId,
+                title: title,
+                poster: poster,
+                season: season,
+                episode: episode,
+                providerName: stream.addonName,
+                providerAddonId: stream.addonId,
+                streamTitle: stream.streamLabel,
+                streamSubtitle: { let s: String? = stream.description_; return s }(),
+                durationMs: progress.flatMap { $0.durationMs > 0 ? $0.durationMs : nil }
+            )
+            callbackLaunchId = launch.id
+            callbacks = ExternalPlaybackCallbacks.prepare(launch)
+        }
         let request = ExternalPlayerPlaybackRequest(
             sourceUrl: urlString,
             title: title,
             streamTitle: nil,
-            sourceHeaders: [:],
+            // For a URL builder that can carry them — none of the tvOS ones can (the guard above).
+            sourceHeaders: requestHeaders,
             resumePositionMs: resumeMs,
             subtitles: stream.externalSubtitles.map { sub in
                 SubtitleInput(url: sub.url, name: { let n: String? = sub.name; return n }() ?? sub.language, lang: sub.language)
@@ -993,11 +1051,14 @@ struct StreamPickerView: View {
             season: season.map { KotlinInt(int: Int32($0)) },
             episode: episode.map { KotlinInt(int: Int32($0)) },
             episodeTitle: nil,
-            skipSegmentsJson: nil
+            skipSegmentsJson: nil,
+            callbackSuccessUrl: callbacks?.success,
+            callbackErrorUrl: callbacks?.error
         )
         let result = ExternalPlayerPlatform.shared.open(request: request, playerId: playerId)
         // SharedCore lowercases the whole Kotlin enum entry name (see KMP bridging notes).
         guard result != ExternalPlayerOpenResult.opened else { return }
+        if let callbackLaunchId { ExternalPlaybackCallbacks.cancel(id: callbackLaunchId) }
         if fallbackToInternal, let url = URL(string: urlString) {
             showToast(String(localized: "Couldn\u{2019}t open the external player \u{2014} playing in NuvioTV."))
             NextEpisodeEngine.consecutiveAutoPlays = 0
