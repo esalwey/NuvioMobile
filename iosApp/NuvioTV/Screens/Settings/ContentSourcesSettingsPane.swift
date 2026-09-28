@@ -160,6 +160,16 @@ struct ContentSourcesSettingsPane: View {
             )
         )
 
+        // Upstream 7c1c6578 (#1934): per profile, stored on this Apple TV.
+        SettingsToggleRow(
+            title: String(localized: "Recent Searches"),
+            subtitle: String(localized: "Save recent searches and show them on the Search screen."),
+            isOn: Binding(
+                get: { model.recentSearchesEnabled },
+                set: { model.setRecentSearchesEnabled($0) }
+            )
+        )
+
         Text("Choose which catalogs Search looks through. Fewer sources means faster, more focused results. Applies to this Apple TV only.")
             .font(Theme.Font.caption)
             .foregroundStyle(Theme.Palette.textSecondary)

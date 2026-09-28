@@ -225,7 +225,10 @@ object AccountDataStores {
         AccountDataStore(
             name = "SearchHistoryStorage",
             androidPreferences = "nuvio_search_history",
-            appleKeys = listOf(AppleKeySpec.ProfileScoped("search_history_payload")),
+            appleKeys = listOf(
+                AppleKeySpec.ProfileScoped("search_history_payload"),
+                AppleKeySpec.ProfileScoped("recent_searches_enabled"),
+            ),
         ),
         AccountDataStore(
             name = "DiscoverSelectionStorage",

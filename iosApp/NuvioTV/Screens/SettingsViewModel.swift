@@ -20,6 +20,8 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var showCatalogType = true
     /// UX-8: hide the entire Discover section on the Search screen (synced; default off).
     @Published private(set) var hideDiscover = false
+    /// Upstream 7c1c6578: keep and show recent searches (per profile, this Apple TV; default on).
+    @Published private(set) var recentSearchesEnabled = true
     /// TMDB enrichment (cast profiles, studios/networks, collections, artwork). Gated on a user key.
     @Published private(set) var tmdbEnabled = false
     @Published private(set) var tmdbHasKey = false
@@ -100,6 +102,7 @@ final class SettingsViewModel: ObservableObject {
     private var cardDepthWatcher: FlowWatcher?
     private var trackingSettingsWatcher: FlowWatcher?
     private var searchStateWatcher: FlowWatcher?
+    private var searchHistoryWatcher: FlowWatcher?
     private var enabledAddons: [ManagedAddon] = []
 
     func start() {
@@ -204,6 +207,12 @@ final class SettingsViewModel: ObservableObject {
             self.lastSearchFanOut = state.lastFanOut
         }
 
+        SearchHistoryRepository.shared.ensureLoaded()
+        searchHistoryWatcher = FlowWatcherKt.watch(SearchHistoryRepository.shared.enabled) { [weak self] emitted in
+            guard let self, let enabled = emitted as? KotlinBoolean else { return }
+            self.recentSearchesEnabled = enabled.boolValue
+        }
+
         // "Home Rows blank" bug: Settings must not depend on Home/Search having mounted first to
         // hydrate the addon list. Without this call, entering Settings directly — post-wipe or
         // post-profile-switch, before Home ever ran its own `AddonRepository.initialize()` — left
@@ -223,6 +232,7 @@ final class SettingsViewModel: ObservableObject {
         cardDepthWatcher?.cancel(); cardDepthWatcher = nil
         trackingSettingsWatcher?.cancel(); trackingSettingsWatcher = nil
         searchStateWatcher?.cancel(); searchStateWatcher = nil
+        searchHistoryWatcher?.cancel(); searchHistoryWatcher = nil
     }
 
     // MARK: - Actions
@@ -411,6 +421,12 @@ final class SettingsViewModel: ObservableObject {
     /// home-catalog namespace, same channel as Show Catalog Type).
     func setHideDiscover(_ enabled: Bool) {
         HomeCatalogSettingsRepository.shared.setHideDiscover(enabled: enabled)
+    }
+
+    /// Upstream 7c1c6578 (#1934): off stops recording and hides the Recent Searches chips; the
+    /// saved list is kept and comes back when switched on again.
+    func setRecentSearchesEnabled(_ enabled: Bool) {
+        SearchHistoryRepository.shared.setEnabled(enabled: enabled)
     }
 
     /// Clearing the key also disables enrichment (handled inside the repo).
@@ -625,5 +641,6 @@ final class SettingsViewModel: ObservableObject {
         cardDepthWatcher?.cancel()
         trackingSettingsWatcher?.cancel()
         searchStateWatcher?.cancel()
+        searchHistoryWatcher?.cancel()
     }
 }

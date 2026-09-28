@@ -19963,6 +19963,16 @@
         }
       }
     },
+    "Save recent searches and show them on the Search screen.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enregistrer les recherches récentes et les afficher dans l’écran Recherche."
+          }
+        }
+      }
+    },
     "Saved": {
       "localizations": {
         "de": {
