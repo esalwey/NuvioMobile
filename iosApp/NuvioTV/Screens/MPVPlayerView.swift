@@ -1159,7 +1159,10 @@ final class MPVTVPlayerViewController: UIViewController {
             videoHeight: Int32(truncatingIfNeeded: cachedProps().videoH)
         )
         if flush {
-            WatchProgressRepository.shared.flushPlaybackProgress(session: session, snapshot: snapshot, syncRemote: false)
+            // PLY-4: the end-of-file / teardown write reaches the Nuvio account (mobile
+            // `flushWatchProgress` parity), and with it the watched mark of a finished episode.
+            // The 5 s ticks below stay local; the push is deduplicated.
+            WatchProgressRepository.shared.flushPlaybackProgress(session: session, snapshot: snapshot, syncRemote: true)
         } else {
             WatchProgressRepository.shared.upsertPlaybackProgress(session: session, snapshot: snapshot, syncRemote: false)
         }

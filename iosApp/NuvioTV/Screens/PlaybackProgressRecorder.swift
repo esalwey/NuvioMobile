@@ -67,7 +67,10 @@ final class PlaybackProgressRecorder {
             videoHeight: 0
         )
         if flush {
-            WatchProgressRepository.shared.flushPlaybackProgress(session: session, snapshot: snapshot, syncRemote: false)
+            // PLY-4: the terminal write reaches the Nuvio account (mobile `flushWatchProgress`
+            // parity) — and, through the shared completion cascade, marks a finished episode
+            // watched there too. The 3 s ticks below stay local; the push is deduplicated.
+            WatchProgressRepository.shared.flushPlaybackProgress(session: session, snapshot: snapshot, syncRemote: true)
         } else {
             WatchProgressRepository.shared.upsertPlaybackProgress(session: session, snapshot: snapshot, syncRemote: false)
         }
