@@ -33,7 +33,7 @@ struct EpisodesSection: View {
         let preferred = Self.preferredSeasonKey(preferredSeason, in: grouped)
         let current = selectedSeason ?? preferred ?? seasons.first
         let episodes = current.flatMap { grouped[$0] } ?? []
-        let scrollTarget = Self.scrollTarget(
+        let restingEpisodeId = Self.shelfRestingEpisodeId(
             episodes: episodes,
             isPreferredSeason: preferred != nil && current == preferred,
             preferredEpisode: preferredEpisode
@@ -131,14 +131,14 @@ struct EpisodesSection: View {
                 .scrollClipDisabled()
                 .onAppear {
                     // EP-1: open on the Resume / Up Next episode (the layout pass has to land first).
-                    guard let scrollTarget, scrollTarget != episodes.first?.id else { return }
+                    guard let restingEpisodeId, restingEpisodeId != episodes.first?.id else { return }
                     DispatchQueue.main.async {
                         var tx = Transaction()
                         tx.disablesAnimations = true
-                        withTransaction(tx) { proxy.scrollTo(scrollTarget, anchor: .leading) }
+                        withTransaction(tx) { proxy.scrollTo(restingEpisodeId, anchor: .leading) }
                     }
                 }
-                .onChange(of: scrollTarget) { _, target in
+                .onChange(of: restingEpisodeId) { _, target in
                     // A new season can be shorter than the old scroll offset; snap to its first
                     // episode — or, EP-1, to the Resume / Up Next episode — without animating
                     // through the intermediate layout. Never under a viewer browsing the shelf.
@@ -150,7 +150,7 @@ struct EpisodesSection: View {
             }
             .focusSection()
 
-            focusedOverviewPanel(episodes: episodes, restingEpisodeId: scrollTarget)
+            focusedOverviewPanel(episodes: episodes, restingEpisodeId: restingEpisodeId)
         }
         .fullScreenCover(item: $episodeForStreams) { route in
             StreamPickerView(
@@ -328,8 +328,8 @@ struct EpisodesSection: View {
 
     /// EP-1: the episode the shelf rests on — the Resume / Up Next episode when its season is on
     /// screen, else the season's first episode.
-    nonisolated private static func scrollTarget(episodes: [MetaVideo], isPreferredSeason: Bool,
-                                                 preferredEpisode: Int?) -> String? {
+    nonisolated private static func shelfRestingEpisodeId(episodes: [MetaVideo], isPreferredSeason: Bool,
+                                                          preferredEpisode: Int?) -> String? {
         if isPreferredSeason, let preferredEpisode,
            let match = episodes.first(where: { $0.episode?.value == preferredEpisode }) {
             return match.id
