@@ -153,7 +153,6 @@ internal object PluginRuntime {
                         $code
                     })();
                 """.trimIndent()
-                evaluate<Any?>(wrappedCode)
 
                 val tmdbIdArg = JsonPrimitive(tmdbId).toString()
                 val mediaTypeArg = JsonPrimitive(mediaType).toString()
@@ -165,18 +164,25 @@ internal object PluginRuntime {
                             var getStreams = module.exports.getStreams || globalThis.getStreams;
                             if (!getStreams) {
                                 console.error("getStreams function not found on module.exports or globalThis");
+                                __plugin_timers_stopped = true;
                                 __capture_result(JSON.stringify([]));
                                 return;
                             }
                             var result = await getStreams($tmdbIdArg, $mediaTypeArg, $seasonArg, $episodeArg);
+                            __plugin_timers_stopped = true;
                             __capture_result(JSON.stringify(result || []));
                         } catch (e) {
                             console.error("getStreams error:", e && e.message ? e.message : e, e && e.stack ? e.stack : "");
+                            __plugin_timers_stopped = true;
                             __capture_result(JSON.stringify([]));
                         }
                     })();
                 """.trimIndent()
-                evaluate<Any?>(callCode)
+                // One evaluation for the plugin's module code and the getStreams call: evaluate()
+                // returns only once every pending timer sleep has ended, so a timer the module code
+                // starts would otherwise hold the call open before getStreams even runs. Capturing
+                // the result ends all of them (HostFunctions).
+                evaluate<Any?>(wrappedCode + "\n" + callCode)
                 
                 deferred.await()
             }

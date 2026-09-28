@@ -26,7 +26,10 @@ internal object JsBindings {
 
     // Upstream d03d97eb7 (supersedes 72b120b60's busy-wait): QuickJS has no event loop or native
     // timers, so timers are backed by the `__plugin_sleep` coroutine delay (HostFunctions) and their
-    // callbacks run asynchronously without blocking a worker.
+    // callbacks run asynchronously without blocking a worker. Fork: each sleep carries its timer id,
+    // so clearing a timer ends its sleep at once (`__plugin_cancel_sleep`), and every sleep ends once
+    // the result is captured; a sleep that ended that way resolves false and its callback is skipped.
+    // quickjs-kt's evaluate() waits for every pending sleep, so neither may be left running.
     private fun timerPolyfill() = """
         var __plugin_timer_id = 0;
         var __plugin_timers = Object.create(null);
@@ -41,14 +44,23 @@ internal object JsBindings {
         }
         // Only where the host registered the sleep binding (not the settings-layout runtime).
         var __plugin_has_sleep = typeof __plugin_sleep === 'function';
+        var __plugin_can_cancel_sleep = typeof __plugin_cancel_sleep === 'function';
+        function __plugin_clear_timer(id) {
+            if (!__plugin_timers[id]) return;
+            delete __plugin_timers[id];
+            if (__plugin_can_cancel_sleep) __plugin_cancel_sleep(id);
+        }
+        // Set by the getStreams call (PluginRuntime) as it hands the result over: from then on no
+        // timer fires or re-arms, whatever its sleep resolved to.
+        var __plugin_timers_stopped = false;
         if (__plugin_has_sleep && typeof globalThis.setTimeout === 'undefined') {
             globalThis.setTimeout = function(callback, delay) {
                 if (typeof callback !== 'function') throw new TypeError('Timer callback must be a function');
                 var id = ++__plugin_timer_id;
                 var args = Array.prototype.slice.call(arguments, 2);
                 __plugin_timers[id] = true;
-                __plugin_sleep(__plugin_delay_value(delay, false)).then(function() {
-                    if (!__plugin_timers[id]) return;
+                __plugin_sleep(__plugin_delay_value(delay, false), id).then(function(elapsed) {
+                    if (elapsed === false || __plugin_timers_stopped || !__plugin_timers[id]) return;
                     delete __plugin_timers[id];
                     try { callback.apply(globalThis, args); } catch (error) { __plugin_report_timer_error(error); }
                 }, function(error) {
@@ -59,7 +71,7 @@ internal object JsBindings {
             };
         }
         if (__plugin_has_sleep && typeof globalThis.clearTimeout === 'undefined') {
-            globalThis.clearTimeout = function(id) { delete __plugin_timers[id]; };
+            globalThis.clearTimeout = function(id) { __plugin_clear_timer(id); };
         }
         if (__plugin_has_sleep && typeof globalThis.setInterval === 'undefined') {
             globalThis.setInterval = function(callback, delay) {
@@ -69,8 +81,8 @@ internal object JsBindings {
                 var args = Array.prototype.slice.call(arguments, 2);
                 __plugin_timers[id] = true;
                 function tick() {
-                    __plugin_sleep(duration).then(function() {
-                        if (!__plugin_timers[id]) return;
+                    __plugin_sleep(duration, id).then(function(elapsed) {
+                        if (elapsed === false || __plugin_timers_stopped || !__plugin_timers[id]) return;
                         try { callback.apply(globalThis, args); } catch (error) { __plugin_report_timer_error(error); }
                         if (__plugin_timers[id]) tick();
                     }, function(error) {
@@ -83,7 +95,7 @@ internal object JsBindings {
             };
         }
         if (__plugin_has_sleep && typeof globalThis.clearInterval === 'undefined') {
-            globalThis.clearInterval = function(id) { delete __plugin_timers[id]; };
+            globalThis.clearInterval = function(id) { __plugin_clear_timer(id); };
         }
     """.trimIndent()
 
