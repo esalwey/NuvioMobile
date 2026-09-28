@@ -470,8 +470,12 @@ struct StreamPickerView: View {
     /// names (BUG-16) keep most of the screen.
     private static let headerWidth: CGFloat = 520
     private static let logoMaxHeight: CGFloat = 140
-    /// Stream rows are indented under their addon's name (header padding + chevron + spacing).
-    private static let rowIndent: CGFloat = Theme.Spacing.lg + Theme.Spacing.xs
+    /// The group header's chevron column (`groupHeader`).
+    private static let chevronWidth: CGFloat = 20
+    /// Stream rows start where their addon's name does: the header's leading padding, its chevron
+    /// column and the spacing after it — derived from `groupHeader`'s metrics so the two can't
+    /// drift apart.
+    private static let rowIndent: CGFloat = Theme.Spacing.sm + chevronWidth + Theme.Spacing.sm
 
     /// Series · code · episode name for the header, from the launch title, the episode list and
     /// the series record (`headerArt`).
@@ -511,7 +515,7 @@ struct StreamPickerView: View {
                         Text(line)
                             .font(Theme.Font.screenTitle)
                             .foregroundStyle(Theme.Palette.textPrimary)
-                            .lineLimit(3)
+                            .lineLimit(2)
                     }
                 }
             } else {
@@ -522,6 +526,10 @@ struct StreamPickerView: View {
                     .font(Theme.Font.body)
                     .foregroundStyle(Theme.Palette.textSecondary)
                     .lineLimit(parts.isEpisode ? 4 : 7)
+                    // The column's give: an episode's logo, still, code and two-line name come
+                    // close to the screen's height (more so in Open Sans), so the synopsis is what
+                    // loses lines when they don't all fit — never the name, never past the edge.
+                    .layoutPriority(-1)
             }
         }
         .frame(width: Self.headerWidth, alignment: .leading)
@@ -551,12 +559,14 @@ struct StreamPickerView: View {
             .lineLimit(2)
     }
 
-    /// Year · runtime · IMDb rating for a movie (the same facts the player's Info chips show).
+    /// Year · runtime · IMDb rating for a movie (the same facts the player's Info chips show): the
+    /// launch path's `meta`, else the title record's — Home's Continue Watching and a Top Shelf
+    /// resume pass no `meta`. Display only: `context()` still hands the player `meta` alone.
     @ViewBuilder
     private var movieFacts: some View {
-        let year: String? = CachedTitleArt.nonEmpty(meta?.year)
-        let runtime: String? = CachedTitleArt.nonEmpty(meta?.runtime)
-        let rating: String? = CachedTitleArt.nonEmpty(meta?.imdbRating)
+        let year: String? = CachedTitleArt.nonEmpty(meta?.year) ?? headerArt?.year
+        let runtime: String? = CachedTitleArt.nonEmpty(meta?.runtime) ?? headerArt?.runtime
+        let rating: String? = CachedTitleArt.nonEmpty(meta?.imdbRating) ?? headerArt?.rating
         if year != nil || runtime != nil || rating != nil {
             HStack(spacing: Theme.Spacing.md) {
                 if let year { Text(year) }
@@ -626,7 +636,7 @@ struct StreamPickerView: View {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .font(Theme.Font.body)
                     .rowTextColor(secondary: true)
-                    .frame(width: 20, alignment: .center)
+                    .frame(width: Self.chevronWidth, alignment: .center)
                 Text(group.addonName)
                     .font(Theme.Font.sectionTitle)
                     .rowTextColor()
