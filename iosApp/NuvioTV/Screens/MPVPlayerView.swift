@@ -135,6 +135,27 @@ final class MPVTVPlayerViewController: UIViewController {
     private var didUserSelectAudio = false
     private var addedSubtitleUrls = Set<String>()
     private var fileLoaded = false
+    /// Subtitle choice memory (c9d6f5f63): the choice saved for this title (series-wide), the addon
+    /// subtitles side-loaded into this file by URL, the addon list last filtered for it, and the last
+    /// track walk's subtitle rows.
+    private lazy var persistedTrackPreference: PersistedPlayerTrackPreference? =
+        PlayerSubtitleMemory.load(parentMetaId: context.parentMetaId)
+    private var sideLoadedAddonSubtitles: [String: AddonSubtitle] = [:]
+    private var latestAddonSubtitles: [AddonSubtitle] = []
+    private var lastSubtitleInfos: [TrackInfo] = []
+    /// This file's subtitle selection is settled: restored, planned, or picked by the viewer.
+    private var subtitleSelectionResolved = false
+    /// A saved addon choice waits this long, at most, for this episode's addon subtitles.
+    private var subtitleRestoreDeadline: DispatchWorkItem?
+    private var subtitleRestoreDeadlinePassed = false
+    private static let subtitleRestoreWaitSec: TimeInterval = 8
+    /// The audio pass's inputs for the subtitle language plan (it may run after a restore gave up).
+    private var subtitlePlanAudio: AudioTrack?
+    private var subtitlePlanAudioTargets: [String] = []
+    /// `eventQueue`-confined: an addon subtitle to select once its side-load lands, and the addon URL
+    /// behind each credential-scoped local copy.
+    private var pendingSubtitleSelectURL: String?
+    private var externalSubtitleSources: [String: String] = [:]
     /// Trakt scrobbling (no-ops while Trakt is disconnected — the shared repo checks auth).
     private var traktScrobbleItem: TraktScrobbleItem?
     private var traktScrobbleRequested = false
@@ -302,7 +323,11 @@ final class MPVTVPlayerViewController: UIViewController {
             }
             subtitleLoadingWatcher = FlowWatcherKt.watch(SubtitleRepository.shared.isLoading) { [weak self] emitted in
                 guard let self, let loading = (emitted as? NSNumber)?.boolValue else { return }
-                DispatchQueue.main.async { self.state.subtitleSearchInFlight = loading }
+                DispatchQueue.main.async {
+                    self.state.subtitleSearchInFlight = loading
+                    // A saved addon choice may have been waiting for this fetch to finish.
+                    if !loading { self.resolveSubtitleSelection(subInfos: self.lastSubtitleInfos) }
+                }
             }
 
             // Subtitle appearance from Settings (color/size/bold/outline/background). The watcher
@@ -575,6 +600,8 @@ final class MPVTVPlayerViewController: UIViewController {
 
     private struct TrackInfo {
         let id: Int; let lang: String; let title: String; let forced: Bool; let selected: Bool
+        /// Side-loaded (external) track: the URL it was added from. nil = embedded in the file.
+        var sourceURL: String? = nil
     }
 
     /// Schedule a track-list walk on `eventQueue`. The walk is dozens of synchronous property
@@ -609,12 +636,18 @@ final class MPVTVPlayerViewController: UIViewController {
             let id = getInt("track-list/\(i)/id")
             let selected = getFlag("track-list/\(i)/selected")
             let label = trackLabel(index: i, fallbackId: id)
+            // External (side-loaded) subtitles: the URL behind the file mpv reads — the local copy
+            // of a credential-scoped download maps back to its addon URL.
+            let sourceURL: String? = type == "sub" && getFlag("track-list/\(i)/external")
+                ? getString("track-list/\(i)/external-filename").map { externalSubtitleSources[$0] ?? $0 }
+                : nil
             let info = TrackInfo(
                 id: id,
                 lang: getString("track-list/\(i)/lang") ?? "",
                 title: getString("track-list/\(i)/title") ?? "",
                 forced: getFlag("track-list/\(i)/forced"),
-                selected: selected
+                selected: selected,
+                sourceURL: sourceURL
             )
             if type == "audio" {
                 audio.append(PlayerTrack(id: id, label: label, isSelected: selected))
@@ -623,6 +656,14 @@ final class MPVTVPlayerViewController: UIViewController {
                 subs.append(PlayerTrack(id: id, label: label, isSelected: selected))
                 subInfos.append(info)
             }
+        }
+
+        // A restored addon subtitle whose side-load has now landed (c9d6f5f63).
+        if let pending = pendingSubtitleSelectURL,
+           let info = subInfos.first(where: { $0.sourceURL == pending }) {
+            pendingSubtitleSelectURL = nil
+            setMpvInt("sid", Int64(info.id))
+            refreshTracksAsync()        // publish the new selection
         }
 
         DispatchQueue.main.async { [weak self] in
@@ -634,7 +675,11 @@ final class MPVTVPlayerViewController: UIViewController {
             // The panel diffs its rows by stable ids, so refreshing while it is open is safe.
             if self.state.audioTracks != audio { self.state.audioTracks = audio }
             if self.state.subtitleTracks != newSubs { self.state.subtitleTracks = newSubs }
+            self.lastSubtitleInfos = subInfos
             self.autoSelectPreferredTracks(audioInfos: audioInfos, subInfos: subInfos)
+            // The subtitle half: a saved choice first, else the language plan. A saved addon choice
+            // that waits for this episode's addon subtitles is retried on every walk.
+            self.resolveSubtitleSelection(subInfos: subInfos)
         }
     }
 
@@ -695,16 +740,25 @@ final class MPVTVPlayerViewController: UIViewController {
             )
         }
 
-        // Subtitles: shared plan decides targets + forced/normal mode.
+        // The subtitle half runs from `resolveSubtitleSelection`: a saved choice first (c9d6f5f63),
+        // else `applySubtitlePlan` — possibly later, once this episode's addon subtitles arrived.
+        subtitlePlanAudio = effectiveAudioTrack
+        subtitlePlanAudioTargets = audioTargets
+    }
+
+    /// The shared audio-aware subtitle plan (targets + forced/normal mode) over `subInfos`.
+    private func applySubtitlePlan(subInfos: [TrackInfo]) {
+        guard let settings = playerSettings, mpv != nil else { return }
+        let effectiveAudioTrack = subtitlePlanAudio
         let subTargets = PlayerLanguagePreferencesKt.resolvePreferredSubtitleLanguageTargets(
             preferredSubtitleLanguage: settings.preferredSubtitleLanguage,
             secondaryPreferredSubtitleLanguage: settings.secondaryPreferredSubtitleLanguage,
-            deviceLanguages: deviceLanguages
+            deviceLanguages: DeviceLanguagePreferences.shared.preferredLanguageCodes()
         )
         guard !subInfos.isEmpty,
               let plan = PlayerTrackSelectionKt.resolveSubtitleAutoSelectionPlan(
                   selectedAudioTrack: effectiveAudioTrack,
-                  preferredAudioTargets: audioTargets,
+                  preferredAudioTargets: subtitlePlanAudioTargets,
                   preferredSubtitleTargets: subTargets,
                   useForcedSubtitles: settings.subtitleStyle.useForcedSubtitles
               )
@@ -729,6 +783,166 @@ final class MPVTVPlayerViewController: UIViewController {
         } else if plan.mode == .forcedOnly {
             // Forced-only plan with no forced track in that language: keep subtitles off.
             eventQueue.async { [weak self] in self?.setMpvString("sid", "no") }
+        }
+    }
+
+    // MARK: - Subtitle choice memory (upstream c9d6f5f63)
+    //
+    // The viewer's subtitle pick is saved per title (series-wide, profile-scoped, the shared
+    // `PlayerTrackPreferenceStorage` mobile uses) and restored on the next episode — or the next
+    // session — before the language plan runs: Off stays off, an embedded track is matched by
+    // language / forced flag / name, and an addon subtitle by the saved file on the same episode,
+    // else this episode's subtitle in the saved language from the saved provider.
+
+    private enum SubtitleRestore { case restored, waiting, none }
+
+    /// Once per file: restore the saved choice, or run the language plan. A saved addon choice can
+    /// wait (`.waiting`) for this episode's addon subtitles — retried on every track walk, when the
+    /// fetch completes, and at `subtitleRestoreWaitSec` at the latest.
+    private func resolveSubtitleSelection(subInfos: [TrackInfo]) {
+        guard didAutoSelectTracks, !subtitleSelectionResolved, mpv != nil else { return }
+        switch restorePersistedSubtitle(subInfos: subInfos) {
+        case .restored:
+            finishSubtitleSelection()
+        case .waiting:
+            armSubtitleRestoreDeadline()
+        case .none:
+            finishSubtitleSelection()
+            applySubtitlePlan(subInfos: subInfos)
+        }
+    }
+
+    private func finishSubtitleSelection() {
+        subtitleSelectionResolved = true
+        subtitleRestoreDeadline?.cancel()
+        subtitleRestoreDeadline = nil
+    }
+
+    private func restorePersistedSubtitle(subInfos: [TrackInfo]) -> SubtitleRestore {
+        guard let preference = persistedTrackPreference else { return .none }
+        let type = preference.subtitleType
+        if type == PersistedSubtitleSelectionType.shared.DISABLED {
+            print("[MPV] subtitles: restored Off")
+            eventQueue.async { [weak self] in self?.setMpvString("sid", "no") }
+            refreshTracksAsync()
+            return .restored
+        }
+        if type == PersistedSubtitleSelectionType.shared.INTERNAL {
+            if let id = persistedInternalSubtitleId(preference, subInfos: subInfos) {
+                print("[MPV] subtitles: restored track \(id) (\(preference.subtitleLanguage ?? "?"))")
+                eventQueue.async { [weak self] in self?.setMpvInt("sid", Int64(id)) }
+                refreshTracksAsync()
+                return .restored
+            }
+            // Stream-attached subtitle files are side-loaded after the first walk.
+            let streamSubtitlesPending = !subtitleRestoreDeadlinePassed && context.externalSubtitles.contains { sub in
+                !subInfos.contains { $0.sourceURL == sub.url }
+            }
+            return streamSubtitlesPending ? .waiting : .none
+        }
+        if type == PersistedSubtitleSelectionType.shared.ADDON {
+            let stillLoading = !subtitleRestoreDeadlinePassed && !addonSubtitleFetchFinished()
+            guard let match = PlayerTrackSelectionKt.findPersistedAddonSubtitle(
+                subtitles: latestAddonSubtitles, preference: preference
+            ) else {
+                return stillLoading ? .waiting : .none
+            }
+            // Another provider's match waits while the saved provider may still answer.
+            if stillLoading, !PlayerTrackSelectionKt.canRestorePersistedAddonSubtitleWhileLoading(
+                subtitle: match, preference: preference
+            ) {
+                return .waiting
+            }
+            print("[MPV] subtitles: restored addon subtitle \(match.display) (\(match.language))")
+            selectAddonSubtitle(match)
+            return .restored
+        }
+        return .none
+    }
+
+    /// An embedded (or stream-attached) track for a saved INTERNAL choice. The saved mpv track id
+    /// counts only while it still names the saved language and forced flag (the same file); across
+    /// episodes the shared matcher decides — language, forced flag, variant, then name.
+    private func persistedInternalSubtitleId(_ preference: PersistedPlayerTrackPreference,
+                                             subInfos: [TrackInfo]) -> Int? {
+        let candidates = subInfos.filter { info in
+            guard let url = info.sourceURL else { return true }
+            return sideLoadedAddonSubtitles[url] == nil       // an addon file is another kind of choice
+        }
+        guard !candidates.isEmpty else { return nil }
+        let language = preference.subtitleLanguage ?? ""
+        let forced = preference.subtitleIsForced?.boolValue
+        if let savedId = preference.subtitleTrackId.flatMap({ Int($0) }),
+           let info = candidates.first(where: { $0.id == savedId }),
+           language.isEmpty || PlayerLanguagePreferencesKt.languageMatchesPreference(trackLanguage: info.lang, targetLanguage: language),
+           forced == nil || forced == info.forced {
+            return info.id
+        }
+        let tracks = candidates.enumerated().map { index, info in
+            SubtitleTrack(
+                index: Int32(index),
+                id: String(info.id),
+                label: info.title.isEmpty ? info.lang : info.title,
+                language: info.lang.isEmpty ? nil : info.lang,
+                isSelected: info.selected,
+                isForced: info.forced
+            )
+        }
+        let match = Int(PlayerTrackSelectionKt.findPersistedSubtitleTrackIndex(
+            tracks: tracks, preference: PlayerSubtitleMemory.withoutTrackId(preference)
+        ))
+        return candidates.indices.contains(match) ? candidates[match].id : nil
+    }
+
+    /// Select an addon subtitle, side-loading it first if needed; the track walk after the side-load
+    /// lands picks it up (`pendingSubtitleSelectURL`).
+    private func selectAddonSubtitle(_ subtitle: AddonSubtitle) {
+        let url = subtitle.url
+        if !addedSubtitleUrls.contains(url) {
+            sideLoadedAddonSubtitles[url] = subtitle
+            subAdd(url: url, title: subtitle.display, lang: subtitle.language)
+        }
+        eventQueue.async { [weak self] in self?.pendingSubtitleSelectURL = url }
+        refreshTracksAsync()
+    }
+
+    private func addonSubtitleFetchFinished() -> Bool {
+        (SubtitleRepository.shared.completedRequest.value_ as? String)
+            == SubtitleRepository.shared.requestKey(type: context.contentType, videoId: context.videoId)
+    }
+
+    private func armSubtitleRestoreDeadline() {
+        guard subtitleRestoreDeadline == nil, !subtitleRestoreDeadlinePassed else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.subtitleRestoreDeadline = nil
+            self.subtitleRestoreDeadlinePassed = true
+            self.resolveSubtitleSelection(subInfos: self.lastSubtitleInfos)
+        }
+        subtitleRestoreDeadline = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.subtitleRestoreWaitSec, execute: work)
+    }
+
+    /// The viewer picked a subtitle (the top panel): remember it for this title.
+    private func persistSubtitleChoice(trackId id: Int) {
+        let metaId = context.parentMetaId
+        let current = persistedTrackPreference
+        if id < 0 {
+            persistedTrackPreference = PlayerSubtitleMemory.saveOff(parentMetaId: metaId, keeping: current)
+        } else if let info = lastSubtitleInfos.first(where: { $0.id == id }) {
+            if let url = info.sourceURL, let addon = sideLoadedAddonSubtitles[url] {
+                persistedTrackPreference = PlayerSubtitleMemory.saveAddon(parentMetaId: metaId, subtitle: addon,
+                                                                          keeping: current)
+            } else {
+                persistedTrackPreference = PlayerSubtitleMemory.saveInternal(
+                    parentMetaId: metaId,
+                    language: info.lang.isEmpty ? nil : info.lang,
+                    name: info.title.isEmpty ? info.lang : info.title,
+                    trackId: String(info.id),
+                    forced: info.forced,
+                    keeping: current
+                )
+            }
         }
     }
 
@@ -1020,8 +1234,10 @@ final class MPVTVPlayerViewController: UIViewController {
         let kept = playerSettings.map {
             PlayerTrackSelectionKt.filterAddonSubtitlesForSettings(subtitles: subs, settings: $0)
         } ?? subs
+        latestAddonSubtitles = kept
         var added = false
         for sub in kept where !addedSubtitleUrls.contains(sub.url) {
+            sideLoadedAddonSubtitles[sub.url] = sub
             subAdd(url: sub.url, title: sub.display, lang: sub.language)
             added = true
         }
@@ -1053,6 +1269,8 @@ final class MPVTVPlayerViewController: UIViewController {
                     return
                 }
                 self.eventQueue.async { [weak self] in
+                    // The track walk maps the local copy back to the addon URL (subtitle memory).
+                    self?.externalSubtitleSources[local.path] = url
                     self?.command("sub-add", args: [local.path, "auto", title, lang])
                 }
             }.resume()
@@ -1066,8 +1284,13 @@ final class MPVTVPlayerViewController: UIViewController {
 
     private func selectSubtitle(_ id: Int) {
         guard mpv != nil else { return }
+        // The viewer's pick wins over a saved choice still waiting to be restored, and is saved for
+        // the next episode (c9d6f5f63).
+        finishSubtitleSelection()
+        persistSubtitleChoice(trackId: id)
         eventQueue.async { [weak self] in
             guard let self, let mpv = self.mpv else { return }
+            self.pendingSubtitleSelectURL = nil
             if id < 0 {
                 self.checkError(mpv_set_property_string(mpv, "sid", "no"))
             } else {
@@ -1593,7 +1816,14 @@ final class MPVTVPlayerViewController: UIViewController {
         // subtitles belong to the file that failed.
         fileLoaded = false
         addedSubtitleUrls.removeAll()
+        sideLoadedAddonSubtitles.removeAll()
         didAutoSelectTracks = false
+        // The subtitle choice is settled again for the new file (a pick made before the failure is
+        // saved, so it comes back).
+        subtitleSelectionResolved = false
+        subtitleRestoreDeadline?.cancel()
+        subtitleRestoreDeadline = nil
+        subtitleRestoreDeadlinePassed = false
         traktStartPending = false
         lastEofFlag = false
         updateProps { $0.eof = false }
@@ -1605,6 +1835,7 @@ final class MPVTVPlayerViewController: UIViewController {
             guard let self else { return }
             self.coreOpenedFile = false
             self.lastHttpErrorStatus = nil
+            self.pendingSubtitleSelectURL = nil
             self.command("loadfile", args: [url, "replace"])
         }
     }
@@ -1630,6 +1861,7 @@ final class MPVTVPlayerViewController: UIViewController {
 
     deinit {
         loadWatchdog?.cancel()
+        subtitleRestoreDeadline?.cancel()
         pollTimer?.invalidate()
         seekTimer?.invalidate()
         subtitleWatcher?.cancel()

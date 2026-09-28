@@ -187,6 +187,26 @@ final class NativePlaybackCoordinator: ObservableObject {
     /// Embedded text tracks offered as renditions this session (Info tab row).
     private var embeddedSubtitleCount = 0
 
+    // MARK: Subtitle choice memory (upstream c9d6f5f63 — `PlayerSubtitleMemory`)
+
+    /// The subtitle choice saved for this title (series-wide), restored on each item once its
+    /// legible group has loaded.
+    private lazy var persistedTrackPreference: PersistedPlayerTrackPreference? =
+        PlayerSubtitleMemory.load(parentMetaId: context.parentMetaId)
+    /// The addon subtitles as last filtered (raw — the renditions keep only url/language/name), and
+    /// the ones the master offers, in order and by URL.
+    private var keptAddonSubtitles: [AddonSubtitle] = []
+    private var masterAddonSubtitles: [AddonSubtitle] = []
+    private var masterAddonSubtitlesByURL: [String: AddonSubtitle] = [:]
+    /// The item the saved choice was applied to (a signaling retry's new item gets it again).
+    private weak var subtitleRestoreItem: AVPlayerItem?
+    /// Once the initial selection has settled, a legible change is the viewer's own (the panel, or
+    /// the system Subtitles menu) and is remembered.
+    private var subtitleChoiceTrackingArmed = false
+    private var lastSubtitleChoiceName: String?
+    private var lastAudioChoiceName: String?
+    private var subtitleChoiceTrackTask: Task<Void, Never>?
+
     init(context: PlaybackContext) {
         self.context = context
         self.recorder = PlaybackProgressRecorder(context: context)
@@ -217,6 +237,7 @@ final class NativePlaybackCoordinator: ObservableObject {
                 let kept = self.playerSettings.map {
                     PlayerTrackSelectionKt.filterAddonSubtitlesForSettings(subtitles: subs, settings: $0)
                 } ?? subs
+                self.keptAddonSubtitles = kept
                 self.addonSubtitles = kept.map {
                     SubtitleFile(url: $0.url, language: $0.language, name: $0.display)
                 }
@@ -272,6 +293,11 @@ final class NativePlaybackCoordinator: ObservableObject {
             // Forced on but audio language unknown: leave player defaults untouched (mpv parity).
             plan.leaveToPlayer = true
             plan.subtitleTargets = subTargets
+        }
+        // Subtitles turned off on an earlier episode stay off (c9d6f5f63): nothing auto-enables.
+        if persistedTrackPreference?.subtitleType == PersistedSubtitleSelectionType.shared.DISABLED {
+            plan.subtitlesOff = true
+            plan.leaveToPlayer = false
         }
         if plan != languagePlan {
             languagePlan = plan
@@ -398,6 +424,8 @@ final class NativePlaybackCoordinator: ObservableObject {
         positionTask?.cancel(); positionTask = nil
         subtitleDelayApplyTask?.cancel(); subtitleDelayApplyTask = nil
         subtitleRefetchRestoreTask?.cancel(); subtitleRefetchRestoreTask = nil
+        subtitleChoiceTrackTask?.cancel(); subtitleChoiceTrackTask = nil
+        subtitleChoiceTrackingArmed = false
         if let o = mediaSelectionObserver { NotificationCenter.default.removeObserver(o); mediaSelectionObserver = nil }
         if let o = endObserver { NotificationCenter.default.removeObserver(o); endObserver = nil }
         timeControlObserver?.invalidate(); timeControlObserver = nil
@@ -505,6 +533,10 @@ final class NativePlaybackCoordinator: ObservableObject {
         }
         embeddedSubtitleCount = embeddedRenditions.count
         subtitleRenditionsByName = Dictionary(subtitleRenditions.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
+        // The addon subtitles behind those renditions (subtitle choice memory, c9d6f5f63).
+        masterAddonSubtitles = keptAddonSubtitles
+        masterAddonSubtitlesByURL = Dictionary(keptAddonSubtitles.map { (Self.subtitleURLKey($0.url), $0) },
+                                               uniquingKeysWith: { a, _ in a })
         print("[NativePlayer] subtitle renditions: \(subtitleRenditions.count) (\(embeddedRenditions.count) embedded)"
               + (subtitleRenditions.isEmpty ? "" : " — \(subtitleRenditions.prefix(6).map(\.name).joined(separator: ", "))\(subtitleRenditions.count > 6 ? ", …" : "")"))
         // A device that already fell back to the reduced master form keeps it across an
@@ -861,6 +893,7 @@ final class NativePlaybackCoordinator: ObservableObject {
     private func handleMediaSelectionChange(item: AVPlayerItem, player: AVPlayer) {
         guard playerItem === item else { return }
         selectionVersion &+= 1
+        rememberSubtitleChoiceIfChanged(item: item)
         if audibleGroup == nil {
             Task { @MainActor [weak self] in
                 let group = (try? await item.asset.loadMediaSelectionGroup(for: .audible)) ?? nil
@@ -910,7 +943,130 @@ final class NativePlaybackCoordinator: ObservableObject {
             guard let self, self.playerItem === item else { return }
             self.legibleGroup = group
             self.selectionVersion &+= 1
+            if let group { self.applyPersistedSubtitleChoice(item: item, group: group) }
         }
+    }
+
+    // MARK: - Subtitle choice memory (upstream c9d6f5f63)
+
+    /// Restore the saved subtitle choice on this item (once per item) — an explicit selection, which
+    /// AVPlayer honours over its criteria — then start remembering the viewer's own changes.
+    private func applyPersistedSubtitleChoice(item: AVPlayerItem, group: AVMediaSelectionGroup) {
+        guard subtitleRestoreItem !== item else { return }
+        subtitleRestoreItem = item
+        if let preference = persistedTrackPreference {
+            if preference.subtitleType == PersistedSubtitleSelectionType.shared.DISABLED {
+                item.select(nil, in: group)
+                selectionVersion &+= 1
+                print("[NativePlayer] subtitles: restored Off")
+            } else if let rendition = persistedSubtitleRendition(preference),
+                      let option = group.options.first(where: { option in
+                          let name = Self.renditionName(of: option)
+                          return Self.subtitleSlot(ofName: name) == 0 && Self.canonicalSubtitleName(name) == rendition.name
+                      }) {
+                item.select(option, in: group)
+                selectionVersion &+= 1
+                print("[NativePlayer] subtitles: restored ‘\(rendition.name)’")
+            }
+        }
+        armSubtitleChoiceTracking(item: item, group: group)
+    }
+
+    /// The rendition a saved INTERNAL or ADDON choice maps to in this master, if any.
+    private func persistedSubtitleRendition(_ preference: PersistedPlayerTrackPreference) -> SubtitleRendition? {
+        let renditions = subtitleRenditionsByName.values.sorted { $0.index < $1.index }
+        if preference.subtitleType == PersistedSubtitleSelectionType.shared.ADDON {
+            guard let match = PlayerTrackSelectionKt.findPersistedAddonSubtitle(
+                subtitles: masterAddonSubtitles, preference: preference
+            ) else { return nil }
+            let key = Self.subtitleURLKey(match.url)
+            return renditions.first { $0.sourceURL?.absoluteString == key }
+        }
+        guard preference.subtitleType == PersistedSubtitleSelectionType.shared.INTERNAL else { return nil }
+        // The file's own tracks and the stream's attached files — not the addon ones.
+        let candidates = renditions.filter { rendition in
+            guard let url = rendition.sourceURL else { return true }
+            return masterAddonSubtitlesByURL[url.absoluteString] == nil
+        }
+        let tracks = candidates.enumerated().map { index, rendition in
+            SubtitleTrack(
+                index: Int32(index),
+                id: String(rendition.index),
+                label: rendition.name,
+                language: rendition.language,
+                isSelected: false,
+                isForced: rendition.forced
+            )
+        }
+        let match = Int(PlayerTrackSelectionKt.findPersistedSubtitleTrackIndex(
+            tracks: tracks, preference: PlayerSubtitleMemory.withoutTrackId(preference)
+        ))
+        return candidates.indices.contains(match) ? candidates[match] : nil
+    }
+
+    /// After the initial selection settled (AVPlayer's automatic pick, then the restore), a legible
+    /// change is the viewer's — the panel, or the system Subtitles menu.
+    private func armSubtitleChoiceTracking(item: AVPlayerItem, group: AVMediaSelectionGroup) {
+        subtitleChoiceTrackTask?.cancel()
+        subtitleChoiceTrackingArmed = false
+        subtitleChoiceTrackTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self, !Task.isCancelled, self.playerItem === item else { return }
+            self.lastSubtitleChoiceName = Self.subtitleChoiceName(item.currentMediaSelection.selectedMediaOption(in: group))
+            self.lastAudioChoiceName = self.currentAudioChoiceName(item: item)
+            self.subtitleChoiceTrackingArmed = true
+        }
+    }
+
+    /// Media-selection change: remember a new subtitle choice — not the delay re-fetch's Off hop, and
+    /// not AVPlayer re-picking subtitles for audio the viewer just switched to.
+    private func rememberSubtitleChoiceIfChanged(item: AVPlayerItem) {
+        guard subtitleChoiceTrackingArmed, !isRefetchingSubtitles, let group = legibleGroup else { return }
+        let option = item.currentMediaSelection.selectedMediaOption(in: group)
+        let name = Self.subtitleChoiceName(option)
+        let audioName = currentAudioChoiceName(item: item)
+        let audioChanged = audioName != lastAudioChoiceName
+        lastAudioChoiceName = audioName
+        guard name != lastSubtitleChoiceName else { return }
+        lastSubtitleChoiceName = name
+        if audioChanged { return }
+        persistSubtitleChoice(option: option)
+    }
+
+    private func currentAudioChoiceName(item: AVPlayerItem) -> String? {
+        guard let group = audibleGroup, let option = item.currentMediaSelection.selectedMediaOption(in: group)
+        else { return nil }
+        return Self.renditionName(of: option)
+    }
+
+    private func persistSubtitleChoice(option: AVMediaSelectionOption?) {
+        let metaId = context.parentMetaId
+        let current = persistedTrackPreference
+        guard let option else {
+            persistedTrackPreference = PlayerSubtitleMemory.saveOff(parentMetaId: metaId, keeping: current)
+            return
+        }
+        guard let rendition = subtitleRenditionsByName[Self.canonicalSubtitleName(Self.renditionName(of: option))]
+        else { return }
+        if let url = rendition.sourceURL, let addon = masterAddonSubtitlesByURL[url.absoluteString] {
+            persistedTrackPreference = PlayerSubtitleMemory.saveAddon(parentMetaId: metaId, subtitle: addon,
+                                                                      keeping: current)
+        } else {
+            persistedTrackPreference = PlayerSubtitleMemory.saveInternal(
+                parentMetaId: metaId, language: rendition.language, name: rendition.name, trackId: nil,
+                forced: rendition.forced, keeping: current
+            )
+        }
+    }
+
+    /// "" = Off (rendition names are never empty).
+    private static func subtitleChoiceName(_ option: AVMediaSelectionOption?) -> String {
+        option.map { canonicalSubtitleName(renditionName(of: $0)) } ?? ""
+    }
+
+    /// The form a rendition's `sourceURL` takes, for matching an addon subtitle's URL string to it.
+    private static func subtitleURLKey(_ url: String) -> String {
+        URL(string: url)?.absoluteString ?? url
     }
 
     // MARK: - Top panel: media selection API (Subtitles / Audio tabs)
@@ -923,6 +1079,9 @@ final class NativePlaybackCoordinator: ObservableObject {
         item.select(option, in: group)
         print("[NativePlayer] subtitle selection → \(option.map(Self.renditionName(of:)) ?? "Off")")
         selectionVersion &+= 1
+        // A panel pick is the viewer's: remembered for the next episode (c9d6f5f63).
+        lastSubtitleChoiceName = Self.subtitleChoiceName(option)
+        persistSubtitleChoice(option: option)
     }
 
     // MARK: - Subtitle delay
