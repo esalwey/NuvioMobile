@@ -2,8 +2,12 @@ package com.nuvio.app.features.plugins.runtime.host
 
 import co.touchlab.kermit.Logger
 import com.dokar.quickjs.QuickJs
+import com.dokar.quickjs.binding.asyncFunction
 import com.dokar.quickjs.binding.define
 import com.dokar.quickjs.binding.function
+import kotlinx.coroutines.delay
+
+private const val MAX_PLUGIN_TIMER_DELAY_MS = 60_000L
 
 internal class HostFunctions(
     private val scraperId: String,
@@ -12,6 +16,17 @@ internal class HostFunctions(
     private val log = Logger.withTag("PluginRuntime")
 
     override fun register(runtime: QuickJs) {
+        // Upstream d03d97eb7: backs the setTimeout/setInterval polyfill (JsBindings) with a
+        // coroutine delay, so a timer callback runs asynchronously instead of busy-waiting.
+        runtime.asyncFunction("__plugin_sleep") { args: Array<Any?> ->
+            val durationMs = (args.getOrNull(0) as? Number)
+                ?.toLong()
+                ?.coerceIn(0L, MAX_PLUGIN_TIMER_DELAY_MS)
+                ?: 0L
+            delay(durationMs)
+            null
+        }
+
         runtime.define("console") {
             function("log") { args ->
                 log.d { "Plugin:$scraperId ${args.joinToString(" ") { it?.toString() ?: "null" }}" }

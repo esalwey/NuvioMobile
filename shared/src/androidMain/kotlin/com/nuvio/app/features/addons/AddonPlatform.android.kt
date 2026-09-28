@@ -150,8 +150,11 @@ private fun readAtMostBytes(stream: InputStream, maxBytes: Int): LimitedReadResu
     return LimitedReadResult(out.toByteArray(), truncated)
 }
 
-private fun readResponseBodyLimited(body: ResponseBody?, maxBytes: Int): String {
-    if (body == null) return ""
+/** Upstream 12621c654: the raw bytes are kept next to the decoded text for binary consumers. */
+private class LimitedResponseBody(val text: String, val bytes: ByteArray)
+
+private fun readResponseBodyLimited(body: ResponseBody?, maxBytes: Int): LimitedResponseBody {
+    if (body == null) return LimitedResponseBody(text = "", bytes = ByteArray(0))
     val charset = body.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
     val readResult = body.byteStream().use { stream ->
         readAtMostBytes(stream, maxBytes.coerceAtLeast(0))
@@ -163,7 +166,10 @@ private fun readResponseBodyLimited(body: ResponseBody?, maxBytes: Int): String 
         String(readResult.bytes, Charsets.UTF_8)
     }
 
-    return if (readResult.truncated) "$decoded\n...[truncated]" else decoded
+    return LimitedResponseBody(
+        text = if (readResult.truncated) "$decoded\n...[truncated]" else decoded,
+        bytes = readResult.bytes,
+    )
 }
 
 private fun readResponseBody(body: ResponseBody?): String {
@@ -262,6 +268,7 @@ actual suspend fun httpRequestRaw(
     body: String,
     followRedirects: Boolean,
     maxResponseBodyBytes: Int,
+    bodyBytes: ByteArray?,
 ): RawHttpResponse =
     withContext(Dispatchers.IO) {
         val normalizedMethod = method.uppercase()
@@ -274,7 +281,8 @@ actual suspend fun httpRequestRaw(
         val request = if (requestAllowsBody(normalizedMethod)) {
             val contentType = sanitizedHeaders.getHeaderIgnoreCase("Content-Type")
                 ?: if (normalizedMethod == "POST") "application/x-www-form-urlencoded" else "application/json"
-            val requestBody = body.toByteArray(Charsets.UTF_8).toRequestBody(contentType.toMediaType())
+            val requestBody = (bodyBytes ?: body.toByteArray(Charsets.UTF_8))
+                .toRequestBody(contentType.toMediaType())
             builder.method(normalizedMethod, requestBody)
         } else {
             builder.method(normalizedMethod, null)
@@ -290,16 +298,18 @@ actual suspend fun httpRequestRaw(
         }
 
         client.newCall(request).execute().use { response ->
+            val limited = readResponseBodyLimited(response.body, maxResponseBodyBytes)
             RawHttpResponse(
                 status = response.code,
                 statusText = response.message,
                 url = response.request.url.toString(),
-                body = readResponseBodyLimited(response.body, maxResponseBodyBytes),
+                body = limited.text,
                 headers = response.headers.toMultimap().mapValues { (_, values) ->
                     values.joinToString(",")
                 }.mapKeys { (name, _) ->
                     name.lowercase()
                 },
+                bodyBytes = limited.bytes,
             )
         }
     }
