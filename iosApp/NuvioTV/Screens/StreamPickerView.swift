@@ -352,7 +352,8 @@ struct StreamPickerView: View {
                         onLeaveToDetails?()
                         dismiss()
                     },
-                    onPickNextSource: { video in chooseSource(for: video) }
+                    onPickNextSource: { video in chooseSource(for: video) },
+                    onChooseAnotherSource: { chooseAnotherSource(for: ctx) }
                 )
                 .ignoresSafeArea()
                 .id(ctx.id)
@@ -367,6 +368,22 @@ struct StreamPickerView: View {
     private func chooseSource(for video: MetaVideo) {
         retarget(to: video)
         selected = nil
+    }
+
+    /// The player couldn't play the picked stream (its error card, PLY-1): close it onto a list of
+    /// the playing episode's streams — this one, or, for an episode autoplay reached, this picker
+    /// retargeted to it (its list here is a previous episode's).
+    private func chooseAnotherSource(for ctx: PlaybackContext) {
+        guard ctx.videoId != target.videoId else {
+            autoAdvanced = false     // this list IS the playing episode's: stay on it
+            selected = nil
+            return
+        }
+        if let video = ctx.episodes.first(where: { $0.season?.value == ctx.season && $0.episode?.value == ctx.episode }) {
+            chooseSource(for: video)
+        } else {
+            selected = nil           // no episode to retarget to: the usual close (details after autoplay)
+        }
     }
 
     private func retarget(to video: MetaVideo) {

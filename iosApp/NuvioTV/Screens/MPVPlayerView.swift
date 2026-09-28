@@ -207,6 +207,28 @@ final class MPVTVPlayerViewController: UIViewController {
     /// episode from 0.
     private let startPositionSec: Double?
 
+    // MARK: Playback errors (PLY-1)
+
+    /// The error card's "Choose Another Source": back to a stream list for this episode. nil = no
+    /// picker behind the player — the button reads "Back" and leaves the player.
+    var onChooseAnotherSource: (() -> Void)?
+    /// The error on screen (the card is `errorHost`); nil while playback is healthy.
+    private var playbackError: PlayerPlaybackError?
+    private var errorHost: PlayerErrorHostController?
+    /// Bounds the wait for FILE_LOADED: a source that accepts the connection but never delivers a
+    /// playable file raises no mpv event at all.
+    private var loadWatchdog: DispatchWorkItem?
+    private static let loadTimeoutSec: TimeInterval = 30
+    /// Where this load started playing (the resume target, else 0). An end of file within
+    /// `earlyEndSec` of it — short of the duration — is a stream that failed right after opening,
+    /// not the end of the episode.
+    private var loadStartPositionSec: Double = 0
+    private static let earlyEndSec: Double = 10
+    /// `eventQueue`-confined: this load attempt reached FILE_LOADED, and the last HTTP error status
+    /// the core logged before it did (the likely reason for an END_FILE error).
+    private var coreOpenedFile = false
+    private var lastHttpErrorStatus: Int?
+
     init(context: PlaybackContext, state: MPVPlaybackState, startPositionSec: Double? = nil) {
         self.context = context
         self.state = state
@@ -268,6 +290,7 @@ final class MPVTVPlayerViewController: UIViewController {
             // the fallback for a `setupMpv()` that ran before the settings store had hydrated.
             applyAudioLanguagePreferences()
             command("loadfile", args: [context.url.absoluteString, "replace"])
+            armLoadWatchdog()
             startPolling()
             flashControls()
 
@@ -301,10 +324,18 @@ final class MPVTVPlayerViewController: UIViewController {
             startPolling()
             if fileLoaded { applyDisplayCriteriaIfEnabled() }
         }
+        // PLY-1: the load watchdog stands down while the player is covered; back on screen with the
+        // file still not loaded, it runs again. An error that arrived meanwhile is shown now.
+        if didLoad, mpv != nil, !fileLoaded, playbackError == nil, loadWatchdog == nil {
+            armLoadWatchdog()
+        }
+        presentErrorCardIfNeeded()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        loadWatchdog?.cancel()
+        loadWatchdog = nil
         pollTimer?.invalidate()
         pollTimer = nil
         endSeek()
@@ -1205,7 +1236,8 @@ final class MPVTVPlayerViewController: UIViewController {
         state.durationSec = snap.duration
         state.positionSec = max(snap.position, 0)
         state.isPaused = snap.paused
-        state.isBuffering = snap.cacheWait || (snap.coreIdle && !snap.paused)
+        // A failed load leaves the core idle and unpaused — which reads as buffering forever (PLY-1).
+        state.isBuffering = playbackError == nil && (snap.cacheWait || (snap.coreIdle && !snap.paused))
 
         // PLY-6: the first tick that knows the duration opens the Trakt session.
         if traktStartPending, snap.duration > 0 {
@@ -1217,6 +1249,16 @@ final class MPVTVPlayerViewController: UIViewController {
         // only propagate transitions — otherwise a dismissed end screen re-presents each tick.
         if snap.eof != lastEofFlag {
             lastEofFlag = snap.eof
+            // PLY-1: an end of file a few seconds after this load started — short of the duration —
+            // is a stream that dropped or is truncated, not the end of the episode: the error card
+            // (Retry, another source) instead of the end-of-playback flow, and nothing recorded.
+            if snap.eof, playbackError == nil,
+               snap.position < loadStartPositionSec + Self.earlyEndSec,
+               !UpNextTrigger.isNaturalEnd(positionSec: snap.position, durationSec: snap.duration) {
+                print("[MPV] end of file at \(Int(snap.position))s, right after the load started — failed stream")
+                showPlaybackError(PlayerPlaybackError(kind: .endedEarly))
+                return
+            }
             // eof-reached also rises when a debrid/HTTP stream drops or expires mid-way: only an end
             // at the duration is the episode's real end (completed, Trakt 100 %, Up Next chaining).
             state.endedNaturally = !snap.eof
@@ -1414,6 +1456,7 @@ final class MPVTVPlayerViewController: UIViewController {
         state.endedNaturally = true
         state.completedByHandOff = false
         state.positionSec = 0            // the next poll tick reports the real position
+        loadStartPositionSec = 0
         // The end screen's presentation closed the Trakt session (viewDidDisappear): a replay is a
         // new viewing, so it scrobbles again from the start.
         traktSessionClosed = false
@@ -1452,9 +1495,141 @@ final class MPVTVPlayerViewController: UIViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
     }
 
+    // MARK: - Playback errors (PLY-1)
+
+    /// A failed load used to look exactly like buffering: mpv logged the END_FILE error, went idle
+    /// unpaused, and the spinner stayed up for good. The error card names the problem and offers
+    /// another source, a retry, and — while a slow source is still being waited on — more waiting.
+    private func showPlaybackError(_ error: PlayerPlaybackError) {
+        guard mpv != nil else { return }
+        loadWatchdog?.cancel()
+        loadWatchdog = nil
+        endSeek()
+        playbackError = error
+        state.isBuffering = false
+        state.controlsVisible = false
+        // A dead stream must not hold the screensaver off forever.
+        UIApplication.shared.isIdleTimerDisabled = false
+        presentErrorCardIfNeeded()
+    }
+
+    /// Present (or refresh) the card. Presented from this controller like the top panel
+    /// (`.overFullScreen`), so the player keeps its session for "Retry".
+    private func presentErrorCardIfNeeded() {
+        guard let error = playbackError else { return }
+        if let host = errorHost {
+            host.rootView = makeErrorScreen(error)
+            return
+        }
+        // The top panel can be open over a stream that is still loading: close it first.
+        if let panel = presentedViewController as? PlayerPanelPresenting {
+            panel.close(animated: false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                self?.presentErrorCardIfNeeded()
+            }
+            return
+        }
+        // Covered by something else, or not on screen: `viewDidAppear` presents it.
+        guard presentedViewController == nil, view.window != nil else { return }
+        let host = PlayerErrorHostController(rootView: makeErrorScreen(error))
+        host.modalPresentationStyle = .overFullScreen
+        host.modalTransitionStyle = .crossDissolve
+        host.onMenu = { [weak self] in self?.onExit?() }
+        errorHost = host
+        present(host, animated: !UIAccessibility.isReduceMotionEnabled)
+    }
+
+    private func makeErrorScreen(_ error: PlayerPlaybackError) -> PlayerErrorScreen {
+        PlayerErrorScreen(
+            error: error,
+            title: context.title,
+            canChooseSource: onChooseAnotherSource != nil,
+            onChooseSource: { [weak self] in self?.chooseAnotherSource() },
+            onRetry: { [weak self] in self?.retryLoad() },
+            onKeepWaiting: { [weak self] in self?.keepWaiting() }
+        )
+    }
+
+    private func clearPlaybackError() {
+        playbackError = nil
+        guard let host = errorHost else { return }
+        errorHost = nil
+        host.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in
+            self?.becomeFirstResponder()     // libmpv's controller owns the remote again
+        }
+    }
+
+    /// FILE_LOADED reached the main thread: the watchdog stands down, and a "not responding" card
+    /// that went up meanwhile goes away — the slow source came through after all.
+    private func fileDidLoad() {
+        loadWatchdog?.cancel()
+        loadWatchdog = nil
+        if playbackError?.kind == .timedOut {
+            clearPlaybackError()
+            UIApplication.shared.isIdleTimerDisabled = !state.isPaused
+        }
+    }
+
+    private func armLoadWatchdog() {
+        loadWatchdog?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.mpv != nil, !self.fileLoaded, self.playbackError == nil else { return }
+            print("[MPV] nothing loaded after \(Int(Self.loadTimeoutSec)) s — the source isn't answering")
+            self.showPlaybackError(PlayerPlaybackError(kind: .timedOut))
+        }
+        loadWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.loadTimeoutSec, execute: work)
+    }
+
+    /// Card → "Retry": load the same stream again, from where it stopped (or the resume position,
+    /// if it never loaded).
+    private func retryLoad() {
+        guard mpv != nil else { return }
+        let resumeAt: Double? = fileLoaded ? max(state.positionSec, loadStartPositionSec) : pendingResumeSec
+        clearPlaybackError()
+        print("[MPV] retrying the stream" + (resumeAt.map { " at \(Int($0))s" } ?? ""))
+        pendingResumeSec = (resumeAt ?? 0) > 1 ? resumeAt : nil
+        // A fresh load of the file: its per-file setup (`onFileLoaded`) runs again — side-loaded
+        // subtitles belong to the file that failed.
+        fileLoaded = false
+        addedSubtitleUrls.removeAll()
+        didAutoSelectTracks = false
+        traktStartPending = false
+        lastEofFlag = false
+        updateProps { $0.eof = false }
+        state.isBuffering = true
+        UIApplication.shared.isIdleTimerDisabled = true
+        armLoadWatchdog()
+        let url = context.url.absoluteString
+        eventQueue.async { [weak self] in
+            guard let self else { return }
+            self.coreOpenedFile = false
+            self.lastHttpErrorStatus = nil
+            self.command("loadfile", args: [url, "replace"])
+        }
+    }
+
+    /// Card → "Keep Waiting" (a slow source): the spinner again, and another watchdog round.
+    private func keepWaiting() {
+        clearPlaybackError()
+        UIApplication.shared.isIdleTimerDisabled = true
+        armLoadWatchdog()
+    }
+
+    /// Card → "Choose Another Source": the presenter closes the player onto a stream list for this
+    /// episode (the card goes down with it). No picker behind the player → just leave it.
+    private func chooseAnotherSource() {
+        if let onChooseAnotherSource {
+            onChooseAnotherSource()
+        } else {
+            onExit?()
+        }
+    }
+
     // MARK: - Teardown
 
     deinit {
+        loadWatchdog?.cancel()
         pollTimer?.invalidate()
         seekTimer?.invalidate()
         subtitleWatcher?.cancel()
@@ -1484,9 +1659,11 @@ final class MPVTVPlayerViewController: UIViewController {
                 if id == MPV_EVENT_NONE { break }
                 if id == MPV_EVENT_SHUTDOWN { return }
                 if id == MPV_EVENT_FILE_LOADED {
+                    self.coreOpenedFile = true
                     self.fileLoadedUptime = ProcessInfo.processInfo.systemUptime
                     self.alangTrace("file-loaded alang=\(self.getString("alang") ?? "-") aid=\(self.getString("aid") ?? "-")")
                     DispatchQueue.main.async {
+                        self.fileDidLoad()
                         self.applyPendingResume()
                         self.onFileLoaded()
                     }
@@ -1499,13 +1676,26 @@ final class MPVTVPlayerViewController: UIViewController {
                 if id == MPV_EVENT_END_FILE, let data = ev.pointee.data {
                     let endFile = UnsafePointer<mpv_event_end_file>(OpaquePointer(data)).pointee
                     if endFile.reason == MPV_END_FILE_REASON_ERROR {
-                        print("[MPV] End file error: \(String(cString: mpv_error_string(endFile.error)))")
+                        let message = String(cString: mpv_error_string(endFile.error))
+                        print("[MPV] End file error: \(message)")
+                        // PLY-1: this print used to be the only trace of a failed load — the spinner
+                        // stayed up for good. An HTTP status logged while opening names the reason.
+                        let status = self.coreOpenedFile ? nil : self.lastHttpErrorStatus
+                        DispatchQueue.main.async {
+                            self.showPlaybackError(PlayerPlaybackError(
+                                kind: .failed,
+                                detail: PlayerPlaybackError.detail(httpStatus: status, mpvError: message)
+                            ))
+                        }
                     }
                 }
                 if id == MPV_EVENT_LOG_MESSAGE,
                    let msg = UnsafeMutablePointer<mpv_event_log_message>(OpaquePointer(ev.pointee.data)) {
                     let level = String(cString: msg.pointee.level!)
                     let text = String(cString: msg.pointee.text!)
+                    if !self.coreOpenedFile, let status = PlayerPlaybackError.httpStatus(inLogLine: text) {
+                        self.lastHttpErrorStatus = status
+                    }
                     print("[MPV] \(level): \(text)", terminator: "")
                 }
             }
@@ -1559,6 +1749,7 @@ final class MPVTVPlayerViewController: UIViewController {
     }
 
     private func applyPendingResume() {
+        loadStartPositionSec = pendingResumeSec ?? 0
         guard let seconds = pendingResumeSec else { return }
         pendingResumeSec = nil
         // PLY-5: through `eventQueue` like every other seek. This runs at FILE_LOADED, the core's
@@ -1631,10 +1822,13 @@ private struct MPVPlayerRepresentable: UIViewControllerRepresentable {
     /// Builds the engine-specific fourth tab at open time (its views observe live state).
     let makeExtraTab: () -> PlayerPanelExtraTab
     let onExit: () -> Void
+    /// Error card's "Choose Another Source" (PLY-1); nil = no stream picker behind the player.
+    let onChooseAnotherSource: (() -> Void)?
 
     func makeUIViewController(context ctx: Context) -> MPVTVPlayerViewController {
         let controller = MPVTVPlayerViewController(context: context, state: state, startPositionSec: startPositionSec)
         controller.onExit = onExit
+        controller.onChooseAnotherSource = onChooseAnotherSource
         let state = state, model = panelModel, makeExtraTab = makeExtraTab
         controller.onOpenPanel = { [weak controller] in
             guard let controller, controller.presentedViewController == nil else { return }
@@ -1677,6 +1871,9 @@ struct MPVPlayerScreen: View {
     var onExitToDetails: (() -> Void)? = nil
     /// Open the stream picker for the next episode. nil → leave the player.
     var onPickNextSource: ((MetaVideo) -> Void)? = nil
+    /// The stream failed (error card, PLY-1): close the player onto a stream list for this episode.
+    /// nil → no picker behind the player; the card's button just leaves it.
+    var onChooseAnotherSource: (() -> Void)? = nil
 
     @StateObject private var state: MPVPlaybackState
     @Environment(\.dismiss) private var dismiss
@@ -1693,7 +1890,8 @@ struct MPVPlayerScreen: View {
          startPositionSec: Double? = nil,
          routingNote: String? = nil,
          onExitToDetails: (() -> Void)? = nil,
-         onPickNextSource: ((MetaVideo) -> Void)? = nil) {
+         onPickNextSource: ((MetaVideo) -> Void)? = nil,
+         onChooseAnotherSource: (() -> Void)? = nil) {
         self.context = context
         _upNext = ObservedObject(wrappedValue: upNext)
         self.canSwitchStreams = canSwitchStreams
@@ -1701,6 +1899,7 @@ struct MPVPlayerScreen: View {
         self.routingNote = routingNote
         self.onExitToDetails = onExitToDetails
         self.onPickNextSource = onPickNextSource
+        self.onChooseAnotherSource = onChooseAnotherSource
         _state = StateObject(wrappedValue: MPVPlaybackState(title: context.title))
         _panelModel = StateObject(wrappedValue: PlayerTopPanelModel(
             info: PlayerPanelInfo(header: NativeInfoHeader(context: context))))
@@ -1717,7 +1916,8 @@ struct MPVPlayerScreen: View {
                                        onClose: { panelModel.onClose?() })
                     }
                 },
-                onExit: { dismiss() }
+                onExit: { dismiss() },
+                onChooseAnotherSource: onChooseAnotherSource
             )
             .ignoresSafeArea()
 

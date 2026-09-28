@@ -4528,6 +4528,16 @@
         }
       }
     },
+    "Can’t Play This Source": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Impossible de lire cette source"
+          }
+        }
+      }
+    },
     "Card Depth": {
       "localizations": {
         "de": {
@@ -4966,6 +4976,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tiếng Trung"
+          }
+        }
+      }
+    },
+    "Choose Another Source": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choisir une autre source"
           }
         }
       }
@@ -11543,6 +11563,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Giữ Profile 7 FEL trên mpv"
+          }
+        }
+      }
+    },
+    "Keep Waiting": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continuer d’attendre"
           }
         }
       }
@@ -24584,6 +24614,16 @@
         }
       }
     },
+    "The file is no longer on the server (HTTP %lld).": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le fichier n’est plus sur le serveur (HTTP %lld)."
+          }
+        }
+      }
+    },
     "The hero plays a muted trailer preview after a moment of focus on a poster": {},
     "The hero plays its trailer by itself, without waiting for focus": {},
     "The hero shows artwork only": {},
@@ -24651,6 +24691,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Con cáo nâu nhanh nhẹn"
+          }
+        }
+      }
+    },
+    "The server answered with an error (HTTP %lld).": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le serveur a répondu par une erreur (HTTP %lld)."
           }
         }
       }
@@ -24723,6 +24773,26 @@
         }
       }
     },
+    "The server ran into an error (HTTP %lld).": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le serveur a rencontré une erreur (HTTP %lld)."
+          }
+        }
+      }
+    },
+    "The server refused access (HTTP %lld). The link may have expired.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le serveur a refusé l’accès (HTTP %lld). Le lien a peut-être expiré."
+          }
+        }
+      }
+    },
     "The server returned an invalid discovery document.": {
       "localizations": {
         "de": {
@@ -24787,6 +24857,36 @@
           "stringUnit": {
             "state": "translated",
             "value": "Máy chủ đã được lưu, nhưng ứng dụng không thể khởi động lại kết nối. Hãy khởi chạy lại Nuvio."
+          }
+        }
+      }
+    },
+    "The source didn’t deliver a playable video. The link may have expired, or the file may be unavailable or unsupported.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La source n’a pas fourni de vidéo lisible. Le lien a peut-être expiré, ou le fichier est indisponible ou non pris en charge."
+          }
+        }
+      }
+    },
+    "The source isn’t responding — it may be overloaded or offline. Playback starts on its own if it answers.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La source ne répond pas — elle est peut-être surchargée ou hors ligne. La lecture démarrera d’elle-même si elle répond."
+          }
+        }
+      }
+    },
+    "The stream stopped right after it started. The file may be incomplete, or the connection dropped.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le flux s’est arrêté juste après avoir démarré. Le fichier est peut-être incomplet, ou la connexion a été coupée."
           }
         }
       }
