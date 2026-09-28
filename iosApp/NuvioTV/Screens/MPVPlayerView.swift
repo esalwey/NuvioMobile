@@ -60,6 +60,8 @@ final class MPVPlaybackState: ObservableObject {
     /// that dropped or expired mid-way — only that one records the episode as completed. Set before
     /// `isEnded` flips.
     var endedNaturally = true
+    /// The playback error card is up (PLY-1): the overlays under it stay away.
+    @Published var playbackErrorShown = false
 
     /// Wired by the controller so the SwiftUI track picker can drive libmpv.
     var selectAudio: ((Int) -> Void)?
@@ -1732,6 +1734,7 @@ final class MPVTVPlayerViewController: UIViewController {
         loadWatchdog = nil
         endSeek()
         playbackError = error
+        state.playbackErrorShown = true
         state.isBuffering = false
         state.controlsVisible = false
         // A dead stream must not hold the screensaver off forever.
@@ -1778,6 +1781,7 @@ final class MPVTVPlayerViewController: UIViewController {
 
     private func clearPlaybackError() {
         playbackError = nil
+        state.playbackErrorShown = false
         guard let host = errorHost else { return }
         errorHost = nil
         host.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in
@@ -2168,7 +2172,8 @@ struct MPVPlayerScreen: View {
 
             // Metadata card after a sustained pause (Android TV PauseOverlay parity) — not on the
             // last frame, and not under the Up Next card.
-            if showPauseInfo, state.isPaused, !state.isBuffering, !state.isEnded, !upNext.isCardVisible {
+            if showPauseInfo, state.isPaused, !state.isBuffering, !state.isEnded, !upNext.isCardVisible,
+               !state.playbackErrorShown {
                 PauseInfoCard(context: context, state: state)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(60)
