@@ -207,9 +207,14 @@ final class NativePlaybackCoordinator: ObservableObject {
     private var lastAudioChoiceName: String?
     private var subtitleChoiceTrackTask: Task<Void, Never>?
 
+    /// An in-player source switch's start position (c69b643a6): used once, at the first
+    /// readyToPlay, instead of the saved progress.
+    private var explicitStartSec: Double?
+
     init(context: PlaybackContext) {
         self.context = context
         self.recorder = PlaybackProgressRecorder(context: context)
+        self.explicitStartSec = context.startPositionSec.flatMap { $0 > 1 ? $0 : nil }
     }
 
     // MARK: - Lifecycle
@@ -786,8 +791,9 @@ final class NativePlaybackCoordinator: ObservableObject {
                     readied = true
                     print("[NativePlayer] item readyToPlay")
                     let duration = CMTimeGetSeconds(item.duration)
-                    let resume = self.resumeFromStart ? nil : self.recorder.resumePositionSec()
+                    let resume = self.resumeFromStart ? nil : (self.explicitStartSec ?? self.recorder.resumePositionSec())
                     self.resumeFromStart = false
+                    self.explicitStartSec = nil
                     if let resume {
                         await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600))
                         self.lastPositionSec = resume

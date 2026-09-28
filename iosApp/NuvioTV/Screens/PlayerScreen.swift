@@ -72,7 +72,8 @@ struct PlayerScreen: View {
             case .mpv:
                 MPVPlayerScreen(context: context, upNext: upNext,
                                 canSwitchStreams: onPlayNext != nil,
-                                startPositionSec: fallbackStartSec,
+                                // The native engine's hand-over position, else a source switch's.
+                                startPositionSec: fallbackStartSec.flatMap { $0 > 1 ? $0 : nil } ?? context.startPositionSec,
                                 routingNote: forcedMPV ? String(localized: "mpv \u{00B7} fallback") : decision?.displayNote,
                                 onExitToDetails: onExitToDetails,
                                 onPickNextSource: onPickNextSource,
