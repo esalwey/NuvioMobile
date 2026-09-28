@@ -28,7 +28,8 @@ internal class SimklSyncEngine(
         }
 
         val playback = if (hasPlaybackActivityChanged(current.activities, activities)) {
-            remote.fetchPlayback()
+            // Upstream 077a264a2: a read lagging behind the app's own pause must not win.
+            mergeFetchedPlayback(fetched = remote.fetchPlayback(), held = current.playback)
         } else {
             current.playback
         }

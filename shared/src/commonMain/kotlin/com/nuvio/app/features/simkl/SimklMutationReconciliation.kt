@@ -99,6 +99,9 @@ private fun SimklSyncSnapshot.withResolvedHistoryStatus(
         mediaType = mediaType,
         status = mutation.status ?: existing.status,
         animeType = mutation.animeType ?: existing.animeType,
+        // Upstream 542aa5701: a title marked watched keeps a poster until Simkl's arrives.
+        localPosterUrl = existing.localPosterUrl
+            ?: mutation.request.media.posterUrl?.trim()?.takeIf(String::isNotBlank),
         show = media.takeIf { mediaType != SimklMediaType.MOVIES },
         movie = media.takeIf { mediaType == SimklMediaType.MOVIES },
     )

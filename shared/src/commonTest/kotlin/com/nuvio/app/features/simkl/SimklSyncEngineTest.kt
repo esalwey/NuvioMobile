@@ -101,6 +101,52 @@ class SimklSyncEngineTest {
         assertTrue(remote.isExhausted)
     }
 
+    // Upstream 077a264a2: Simkl publishes a pause on /sync/playback a moment after it answers it.
+    @Test
+    fun `playback read lagging behind the app's own pause keeps the local position`() = runBlocking {
+        val local = episodePlayback("7", pausedAt = "2026-09-14T10:05:00Z").copy(progress = 83.0)
+        val current = SimklSyncSnapshot(
+            isInitialized = true,
+            watermark = "v1",
+            activities = activities(all = "v1", playback = "p1", library = "l1"),
+            playback = listOf(local),
+        )
+        val stale = episodePlayback("7", pausedAt = "2026-09-14T10:00:00Z").copy(progress = 88.0)
+        val remote = ScriptedRemote(
+            Step.Activities(activities(all = "v2", playback = "p2", library = "l1")),
+            Step.Playback(listOf(stale, playback("8"))),
+        )
+
+        val result = SimklSyncEngine(remote) { 900L }.synchronize(current)
+
+        assertEquals(83.0, result.playback.single { it.id == 7L }.progress)
+        assertEquals(setOf(7L, 8L), result.playback.mapNotNull { it.id }.toSet())
+        assertTrue(remote.isExhausted)
+    }
+
+    @Test
+    fun `newer playback read replaces the local row and a forgotten row is dropped`() = runBlocking {
+        val current = SimklSyncSnapshot(
+            isInitialized = true,
+            watermark = "v1",
+            activities = activities(all = "v1", playback = "p1", library = "l1"),
+            playback = listOf(
+                episodePlayback("7", pausedAt = "2026-09-14T10:00:00Z").copy(progress = 40.0),
+                episodePlayback("9", pausedAt = "2026-09-14T11:00:00Z"),
+            ),
+        )
+        val newer = episodePlayback("7", pausedAt = "2026-09-14T10:30:00Z").copy(progress = 55.0)
+        val remote = ScriptedRemote(
+            Step.Activities(activities(all = "v2", playback = "p2", library = "l1")),
+            Step.Playback(listOf(newer)),
+        )
+
+        val result = SimklSyncEngine(remote) { 900L }.synchronize(current)
+
+        assertEquals(55.0, result.playback.single().progress)
+        assertEquals(7L, result.playback.single().id)
+    }
+
     @Test
     fun `settings only activity updates watermark without projection calls`() = runBlocking {
         val current = SimklSyncSnapshot(
