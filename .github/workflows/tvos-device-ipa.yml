@@ -27,7 +27,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: ["tvos-shared-extraction", "claude/**", "ipa/**"]
+    branches: ["tvos-shared-extraction", "ipa/**"]
     paths:
       - "iosApp/**"
       - "shared/**"
