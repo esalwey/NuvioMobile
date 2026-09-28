@@ -425,6 +425,17 @@ object AddonRepository {
             addonListKnown = addonListKnown ?: AddonStorage.hasStoredInstalledAddonUrls(currentProfileId),
         )
 
+    /// ADD-1: true once it is settled that the default-addon seed will NOT run for this profile
+    /// session — a signed-in account, its first pull settled, and a list this device already knew.
+    /// Home then treats the seed as done (the way it treats a failed seed) instead of holding its
+    /// rows for one that never comes.
+    fun defaultSeedDeclined(): Boolean {
+        val authState = AuthRepository.state.value
+        if (authState !is AuthState.Authenticated || authState.isAnonymous) return false
+        if (!_serverPullSettled.value) return false
+        return addonListKnown ?: AddonStorage.hasStoredInstalledAddonUrls(currentProfileId)
+    }
+
     /// ADD-2: whether the active profile is a secondary profile set to use the primary profile's
     /// add-ons. Install, remove, move and enable/disable are no-ops then (install reports it, the
     /// others return silently), so the Add-ons screen reads this to explain and lock its controls.
