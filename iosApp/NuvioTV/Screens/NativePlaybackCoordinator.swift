@@ -802,6 +802,10 @@ final class NativePlaybackCoordinator: ObservableObject {
                     self.explicitStartSec = nil
                     if let resume {
                         await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600))
+                        // The seek suspends this task, and the viewer may have left meanwhile
+                        // (stop() cancels it and releases the player): no play() of a torn-down
+                        // player, and no scrobble start that nothing would stop.
+                        guard !Task.isCancelled, self.player === player else { return }
                         self.lastPositionSec = resume
                     }
                     player.play()
@@ -847,6 +851,8 @@ final class NativePlaybackCoordinator: ObservableObject {
                             if current.isFinite, current < 10,
                                let resume = self.recorder.resumePositionSec(durationSec: knownDuration) {
                                 await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600))
+                                // As above: no tick of a player the viewer left during the seek.
+                                guard !Task.isCancelled, self.player === player else { return }
                                 self.lastPositionSec = resume
                             }
                         }

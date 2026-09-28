@@ -9,6 +9,7 @@ import com.nuvio.app.features.tracking.TrackingProgressSnapshot
 import com.nuvio.app.features.tracking.TrackingRefreshIntent
 import com.nuvio.app.features.tracking.TrackingWatchedProvider
 import com.nuvio.app.features.watched.WatchedItem
+import com.nuvio.app.features.watchprogress.TrackerOptimisticProgressTtlMs
 import com.nuvio.app.features.watchprogress.WatchProgressEntry
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -185,9 +186,12 @@ object SimklProgressRepository {
     private val projectionCache = SimklSnapshotProjectionCache(SimklSyncSnapshot::toSimklProgressEntries)
     private var publishedSyncState: SimklSyncUiState? = null
 
+    /** CW sync #3: local playback over the snapshot until Simkl catches up. Guarded by [publicationLock]. */
+    private val optimisticProgress = SimklOptimisticProgressOverlay()
+
     init {
         scope.launch {
-            SimklSyncRepository.state.collectLatest(::publish)
+            SimklSyncRepository.state.collectLatest { syncState -> publish(syncState) }
         }
     }
 
@@ -238,20 +242,122 @@ object SimklProgressRepository {
         SimklSyncRepository.commitPlaybackRemoval(removed)
     }
 
+    /**
+     * CW sync #3: a local progress write (the players' ticks and flushes, through
+     * `WatchProgressRepository.upsert` while Simkl is the source) shows on Continue Watching right
+     * away instead of waiting for a scrobble to commit — see [SimklOptimisticProgressOverlay].
+     */
+    fun applyOptimisticProgress(entry: WatchProgressEntry) {
+        if (!SimklAuthRepository.isAuthenticated.value) return
+        synchronized(publicationLock) {
+            val changed = optimisticProgress.put(
+                profileId = ProfileRepository.activeProfileId,
+                entry = entry,
+                nowEpochMs = SimklPlatformClock.nowEpochMs(),
+            )
+            if (changed) publishLocked(SimklSyncRepository.state.value, overlayChanged = true)
+        }
+    }
+
+    /** A removal from Continue Watching takes the local rows of those episodes along. */
+    fun applyOptimisticRemoval(entries: Collection<WatchProgressEntry>) {
+        if (entries.isEmpty()) return
+        synchronized(publicationLock) {
+            if (optimisticProgress.removeEpisodes(entries)) {
+                publishLocked(SimklSyncRepository.state.value, overlayChanged = true)
+            }
+        }
+    }
+
+    fun applyOptimisticRemovalByVideoIds(videoIds: Collection<String>) {
+        if (videoIds.isEmpty()) return
+        synchronized(publicationLock) {
+            if (optimisticProgress.removeVideoIds(videoIds)) {
+                publishLocked(SimklSyncRepository.state.value, overlayChanged = true)
+            }
+        }
+    }
+
+    /**
+     * Keeps the local rows of [contentId] on Continue Watching until at least [untilEpochMs] — while
+     * a scrobble stop is in flight, and after one failed (`SimklMutationRepository.scrobble`). Both
+     * the id as played and Simkl's canonical id for it match (rows are written under the canonical
+     * one). Returns how many rows it holds.
+     */
+    internal fun holdOptimisticProgress(profileId: Int, contentId: String, untilEpochMs: Long): Int {
+        val canonicalId = runCatching {
+            SimklSyncRepository.state.value.snapshot.resolveCanonicalContentId(contentId)
+        }.getOrNull()
+        return synchronized(publicationLock) {
+            optimisticProgress.hold(
+                profileId = profileId,
+                contentIds = listOfNotNull(contentId, canonicalId),
+                untilEpochMs = untilEpochMs,
+                nowEpochMs = SimklPlatformClock.nowEpochMs(),
+            )
+        }
+    }
+
+    /**
+     * CW sync #3 (review): a stop of [contentId] reached Simkl, so the in-flight hold that
+     * [holdOptimisticProgress] set up to [heldUntilEpochMs] is released. The rows go back to the
+     * plain TTL, counted from now, like Trakt's `releaseOptimisticProgressHold`. Returns how many
+     * rows it released.
+     */
+    internal fun releaseOptimisticProgressHold(profileId: Int, contentId: String, heldUntilEpochMs: Long): Int {
+        val canonicalId = runCatching {
+            SimklSyncRepository.state.value.snapshot.resolveCanonicalContentId(contentId)
+        }.getOrNull()
+        return synchronized(publicationLock) {
+            optimisticProgress.release(
+                profileId = profileId,
+                contentIds = listOfNotNull(contentId, canonicalId),
+                untilEpochMs = SimklPlatformClock.nowEpochMs() + TrackerOptimisticProgressTtlMs,
+                heldUntilEpochMs = heldUntilEpochMs,
+            )
+        }
+    }
+
+    /** Profile switch, sign-out, or Simkl becoming the source again: no local rows carry over. */
+    fun clearOptimisticProgress() {
+        synchronized(publicationLock) {
+            if (optimisticProgress.clear()) {
+                publishLocked(SimklSyncRepository.state.value, overlayChanged = true)
+            }
+        }
+    }
+
     // Upstream 73005d996: the same sync state is published once, and its progress projection and
     // hidden ids are computed once per snapshot instead of on every read.
     private fun publish(syncState: SimklSyncUiState) {
         synchronized(publicationLock) {
-            if (syncState === publishedSyncState || syncState !== SimklSyncRepository.state.value) return
-            _uiState.value = SimklProgressUiState(
-                entries = projectionCache.get(syncState),
-                isLoading = syncState.isLoading,
-                hasLoadedRemoteProgress = syncState.hasLoaded && syncState.errorMessage == null,
-                errorMessage = syncState.errorMessage,
-                hiddenContentIds = syncState.snapshot.hiddenFromContinueWatchingContentIds(),
-            )
-            publishedSyncState = syncState
+            publishLocked(syncState, overlayChanged = false)
         }
+    }
+
+    /**
+     * Caller holds [publicationLock]. The same sync state is published again only when the local
+     * rows changed; a new one first reconciles them with its projection (CW sync #3).
+     */
+    private fun publishLocked(syncState: SimklSyncUiState, overlayChanged: Boolean) {
+        if (syncState !== SimklSyncRepository.state.value) return
+        val snapshotChanged = syncState !== publishedSyncState
+        if (!snapshotChanged && !overlayChanged) return
+        val nowEpochMs = SimklPlatformClock.nowEpochMs()
+        val projected = projectionCache.get(syncState)
+        if (snapshotChanged) optimisticProgress.reconcile(projected, nowEpochMs)
+        _uiState.value = SimklProgressUiState(
+            entries = optimisticProgress.merge(
+                profileId = ProfileRepository.activeProfileId,
+                snapshotEntries = projected,
+                nowEpochMs = nowEpochMs,
+            ),
+            isLoading = syncState.isLoading,
+            hasLoadedRemoteProgress = syncState.hasLoaded && syncState.errorMessage == null,
+            errorMessage = syncState.errorMessage,
+            hiddenContentIds = syncState.snapshot.hiddenFromContinueWatchingContentIds(),
+        )
+        publishedSyncState = syncState
     }
 }
 
@@ -282,7 +388,14 @@ object SimklTrackingProgressProvider : TrackingProgressProvider {
 
     override fun ensureLoaded() = SimklProgressRepository.ensureLoaded()
 
-    override fun onProfileChanged() = SimklProgressRepository.ensureLoaded()
+    override fun onProfileChanged() {
+        SimklProgressRepository.clearOptimisticProgress()
+        SimklProgressRepository.ensureLoaded()
+    }
+
+    override fun clearLocalState() = SimklProgressRepository.clearOptimisticProgress()
+
+    override fun onActivated() = SimklProgressRepository.clearOptimisticProgress()
 
     override suspend fun refresh(force: Boolean, sourceChanged: Boolean) =
         SimklProgressRepository.refresh(simklProgressRefreshIntent)
@@ -299,6 +412,15 @@ object SimklTrackingProgressProvider : TrackingProgressProvider {
 
     override suspend fun removeProgress(entries: Collection<WatchProgressEntry>) =
         SimklProgressRepository.removeProgress(entries)
+
+    override fun applyOptimisticProgress(entry: WatchProgressEntry) =
+        SimklProgressRepository.applyOptimisticProgress(entry)
+
+    override fun applyOptimisticRemoval(entries: Collection<WatchProgressEntry>) =
+        SimklProgressRepository.applyOptimisticRemoval(entries)
+
+    override fun applyOptimisticRemovalByVideoIds(videoIds: Collection<String>) =
+        SimklProgressRepository.applyOptimisticRemovalByVideoIds(videoIds)
 
     override fun isHiddenFromProgress(contentId: String): Boolean =
         SimklSyncRepository.state.value.snapshot.isHiddenFromContinueWatching(contentId)

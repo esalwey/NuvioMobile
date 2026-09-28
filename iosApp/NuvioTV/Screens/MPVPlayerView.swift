@@ -173,6 +173,11 @@ final class MPVTVPlayerViewController: UIViewController {
     /// Trakt scrobbling (no-ops while Trakt is disconnected — the shared repo checks auth).
     private var traktScrobbleItem: TraktScrobbleItem?
     private var traktScrobbleRequested = false
+    /// The other trackers' scrobble (Simkl — every connected tracker but Trakt, through
+    /// `TrackingScrobbleCoordinator.scrobbleOtherTrackers`) is open: started with the Trakt session
+    /// but independently of its item build, which returns nil for `kitsu:`/`mal:` ids. Cleared by the
+    /// one stop, so the `deinit` fallback after `viewDidDisappear` sends no second one.
+    private var otherTrackersOpen = false
     /// Set once the player is going away. `buildItem` completes asynchronously — if the user backs
     /// out before it returns, the late completion must not start a scrobble that nothing will ever
     /// stop (ME-004).
@@ -1105,7 +1110,8 @@ final class MPVTVPlayerViewController: UIViewController {
     // Simplified vs. mobile: scrobble "start" once the file has loaded and its duration is known
     // (PLY-6), "stop" once with the final progress when the player goes away (Trakt marks the item
     // watched at >= 80%). The shared repo resolves IMDB/TMDB ids itself and silently no-ops when
-    // Trakt isn't connected.
+    // Trakt isn't connected. The other connected trackers (Simkl) get the same start and stop
+    // through the shared coordinator — see `otherTrackersOpen`.
 
     private func startTraktScrobble() {
         guard !traktScrobbleRequested else { return }
@@ -1113,6 +1119,13 @@ final class MPVTVPlayerViewController: UIViewController {
         // open a Trakt session — mirrors the shared short-placeholder guard.
         if WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(state.durationSec * 1000)) { return }
         traktScrobbleRequested = true
+        // Not behind the Trakt item build below: it returns nil for ids Trakt can't address
+        // (`kitsu:`, `mal:` …), which Simkl can. Never once the session is closed (the Trakt start
+        // below is refused then too): nothing would stop it.
+        if !otherTrackersOpen, !traktSessionClosed {
+            otherTrackersOpen = true
+            scrobbleOtherTrackers(TrackingScrobbleAction.start, percent: traktStartPercent())
+        }
         TraktScrobbleRepository.shared.buildItem(
             contentType: context.contentType,
             parentMetaId: context.parentMetaId,
@@ -1139,17 +1152,43 @@ final class MPVTVPlayerViewController: UIViewController {
 
     private func stopTraktScrobble() {
         traktSessionClosed = true
-        guard let item = traktScrobbleItem else { return }
-        traktScrobbleItem = nil
         // A session can open before a placeholder's short duration is known; close
         // it at 0% so Trakt never marks the stub watched.
         let short = WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(state.durationSec * 1000))
-        // A stream that stopped short of its duration is NOT watched — only a real end or a hand-off.
+        // A stream that stopped short of its duration is NOT watched — only a real end or a hand-off
+        // (an autoplayed episode left during its credits closes at 100 %).
         let finished = (state.isEnded && state.endedNaturally) || state.completedByHandOff
+        let percent: Float = short ? 0 : (finished ? 100 : currentProgressPercent())
+        if otherTrackersOpen {
+            otherTrackersOpen = false
+            // Not for a placeholder clip, nor with the duration unknown (the percentage would read
+            // 0): Simkl keeps one paused session per show, so a stop at 0 % would replace the
+            // show's real resume point.
+            if !short, state.durationSec > 0 { scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent) }
+        }
+        guard let item = traktScrobbleItem else { return }
+        traktScrobbleItem = nil
         TraktScrobbleRepository.shared.scrobbleStop(
             profileId: ActiveProfileProvider.shared.activeProfileId,
             item: item,
-            progressPercent: short ? 0 : (finished ? 100 : currentProgressPercent())
+            progressPercent: percent
+        ) { _ in }
+    }
+
+    /// Start/stop for every connected tracker but Trakt (Simkl). The shared coordinator catches every
+    /// failure itself (nothing escapes into Swift) and no-ops when no such tracker is connected.
+    private func scrobbleOtherTrackers(_ action: TrackingScrobbleAction, percent: Float) {
+        TrackingScrobbleCoordinator.shared.scrobbleOtherTrackers(
+            profileId: ActiveProfileProvider.shared.activeProfileId,
+            action: action,
+            contentType: context.contentType,
+            parentMetaId: context.parentMetaId,
+            videoId: context.videoId,
+            title: context.progressTitle,
+            seasonNumber: context.season.map { KotlinInt(int: Int32($0)) },
+            episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) },
+            episodeTitle: context.episodeTitle,
+            progressPercent: Double(percent)
         ) { _ in }
     }
 
@@ -1725,10 +1764,11 @@ final class MPVTVPlayerViewController: UIViewController {
         state.positionSec = 0            // the next poll tick reports the real position
         loadStartPositionSec = 0
         // The end screen's presentation closed the Trakt session (viewDidDisappear): a replay is a
-        // new viewing, so it scrobbles again from the start.
+        // new viewing, so it scrobbles again from the start — the other trackers too.
         traktSessionClosed = false
         traktScrobbleRequested = false
         traktScrobbleItem = nil
+        otherTrackersOpen = false
         traktStartPending = false
         resumeTargetSec = nil
         startTraktScrobble()

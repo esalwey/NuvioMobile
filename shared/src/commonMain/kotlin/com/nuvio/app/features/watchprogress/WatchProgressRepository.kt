@@ -55,6 +55,89 @@ private const val WATCH_PROGRESS_DELTA_PAGE_SIZE = 900
 private const val WATCH_PROGRESS_DELTA_OPERATION_UPSERT = "upsert"
 private const val WATCH_PROGRESS_DELTA_OPERATION_DELETE = "delete"
 private const val WATCH_PROGRESS_REMOTE_WRITE_DEDUP_WINDOW_MS = 5_000L
+internal const val WATCH_PROGRESS_BACKLOG_PUSH_LIMIT = 200
+
+/**
+ * CW sync (REMAINING_FIX #2): the rows the one-time post-pull backlog push sends — local rows whose
+ * key is still dirty, newest first, at most [limit]. Rows without a content or video id are left
+ * out: the server needs both, and one malformed row would fail the whole batch.
+ *
+ * Run right after a successful Nuvio pull, "still dirty" means the local row is newer than the
+ * account's copy or the account has none (the pull merges acknowledge every key the server already
+ * matches): up to build 130 every tvOS write passed `syncRemote = false`, and PLY-4 only pushes new
+ * saves, so those rows would otherwise never reach the account.
+ *
+ * "The account has none" can also mean the account deleted it. The deletes a delta pull brings
+ * withdraw the rows they supersede ([dirtyProgressKeysWithdrawnByServerDeletes]), so those are not
+ * selected here. Two cases stay out of reach, a known effect on the other devices:
+ * - a delete that builds 130/131 consumed before this pass existed;
+ * - a snapshot pull, which carries no deletes: a row is only missing, and the snapshot holds at
+ *   most the account's 200 newest rows.
+ * Rows like these are still pushed, so a show removed from Continue Watching on another device can
+ * come back there.
+ */
+internal fun selectDirtyWatchProgressBacklog(
+    entries: Collection<WatchProgressEntry>,
+    dirtyProgressKeys: Set<String>,
+    limit: Int = WATCH_PROGRESS_BACKLOG_PUSH_LIMIT,
+): List<WatchProgressEntry> {
+    if (dirtyProgressKeys.isEmpty() || limit <= 0) return emptyList()
+    return entries.newestByProgressKey()
+        .filter { (key, entry) ->
+            key in dirtyProgressKeys && entry.parentMetaId.isNotBlank() && entry.videoId.isNotBlank()
+        }
+        .values
+        .sortedWith(
+            compareByDescending<WatchProgressEntry> { entry -> entry.lastUpdatedEpochMs }
+                .thenBy { entry -> entry.resolvedProgressKey() },
+        )
+        .take(limit)
+}
+
+/**
+ * CW sync #2 (review): the dirty keys that the server deletes of one delta pull withdraw from sync.
+ * [entries] and [dirtyProgressKeys] are the local state once the pull has applied those deletes.
+ *
+ * A dirty row written before [writtenBeforeEpochMs] (the start of that pull) is withdrawn when:
+ * - its own key was deleted ([deletedProgressKeys]): the merge keeps the row, but the other
+ *   device removed that episode from Continue Watching, or marked it watched or unwatched (both
+ *   clear its progress), after this row was written;
+ * - or its show was deleted ([deletedContentIds]) and no synced row of the show is left on this
+ *   device: the account no longer holds any progress of it, which is what a removal of the show
+ *   from Continue Watching on another device looks like. The account only held the episodes that
+ *   device knew, so rows of other episodes are withdrawn too. While a synced row of the show is
+ *   left, the delete was about single episodes and the show's other rows are kept.
+ *
+ * A row written during the pull is left alone: it is a local update the delete cannot know about,
+ * which is also why the merge preserves it.
+ *
+ * Only the backlog would push such a row again and put back what the user just removed: a row
+ * still being played is written again and marked dirty again. The rows stay on this device and are
+ * only no longer dirty. No push re-sends them, and the next snapshot pull (which only keeps the
+ * dirty rows the server lacks) lets them go, as the account did.
+ */
+internal fun dirtyProgressKeysWithdrawnByServerDeletes(
+    entries: Collection<WatchProgressEntry>,
+    dirtyProgressKeys: Set<String>,
+    deletedProgressKeys: Set<String>,
+    deletedContentIds: Set<String>,
+    writtenBeforeEpochMs: Long,
+): Set<String> {
+    if (dirtyProgressKeys.isEmpty() || (deletedProgressKeys.isEmpty() && deletedContentIds.isEmpty())) {
+        return emptySet()
+    }
+    val entriesByKey = entries.newestByProgressKey()
+    val showsGoneFromAccount = deletedContentIds.filterTo(mutableSetOf()) { contentId ->
+        entriesByKey.none { (key, entry) -> key !in dirtyProgressKeys && entry.parentMetaId.trim() == contentId }
+    }
+    return entriesByKey
+        .filter { (key, entry) ->
+            key in dirtyProgressKeys &&
+                entry.lastUpdatedEpochMs < writtenBeforeEpochMs &&
+                (key in deletedProgressKeys || entry.parentMetaId.trim() in showsGoneFromAccount)
+        }
+        .keys
+}
 
 private data class RemoteMetadataResolutionResult(
     val key: WatchProgressMetadataKey,
@@ -167,6 +250,8 @@ private data class WatchProgressDeltaApplyResult(
     val appliedDeletes: Int,
     val preservedLocalItems: Boolean,
     val changed: Boolean,
+    /** Dirty keys the page's deletes withdrew from sync ([dirtyProgressKeysWithdrawnByServerDeletes]). */
+    val withdrawnDirtyKeys: Int = 0,
 )
 
 // Fork: public (upstream: internal) — composeApp WatchProgressIdentityTest consumes these cross-module.
@@ -327,6 +412,9 @@ object WatchProgressRepository {
     private var deltaInitialized = false
     private val remoteWriteDeduplicator = RemoteProgressWriteDeduplicator()
     internal var syncAdapter: ProgressSyncAdapter = SupabaseProgressSyncAdapter
+    /** Profiles whose dirty-row backlog was already pushed (or tried) by this process (#2). */
+    private val backlogPushLock = SynchronizedObject()
+    private val backlogPushedProfileIds = mutableSetOf<Int>()
 
     init {
         ensureTrackingProvidersRegistered()
@@ -418,6 +506,8 @@ object WatchProgressRepository {
         deltaCursorEventId = 0L
         deltaInitialized = false
         remoteWriteDeduplicator.clear()
+        // Another account's profiles reuse the same ids: they get their own backlog push.
+        synchronized(backlogPushLock) { backlogPushedProfileIds.clear() }
         TrackingProviderRegistry.progressProviders().forEach(TrackingProgressProvider::clearLocalState)
         TrackingSettingsRepository.clearLocalState()
         _uiState.value = WatchProgressUiState()
@@ -633,6 +723,11 @@ object WatchProgressRepository {
                         operationGeneration = operationGeneration,
                     )
                 }
+                // Picks and pushes under the pull mutex, once this pull has released it.
+                pushDirtyProgressBacklogOnce(
+                    profileId = profileId,
+                    operationGeneration = operationGeneration,
+                )
                 true
             } catch (error: CancellationException) {
                 throw error
@@ -722,8 +817,11 @@ object WatchProgressRepository {
         var totalUpserts = 0
         var totalDeletes = 0
         var preservedLocalItems = false
+        var withdrawnDirtyKeys = 0
         var cursorAdvanced = false
         var page = 1
+        // A local row written from here on is an update this pull's deletes cannot know about.
+        val pullStartedAtEpochMs = WatchProgressClock.nowEpochMs()
 
         while (true) {
             log.d { "Pulling watch progress delta page $page for profile $profileId from cursor $cursor" }
@@ -759,11 +857,15 @@ object WatchProgressRepository {
                     "first=$firstEvent last=$lastEvent upserts=$eventUpserts deletes=$eventDeletes"
             }
 
-            val pageResult = applyWatchProgressDeltaEvents(events = events)
+            val pageResult = applyWatchProgressDeltaEvents(
+                events = events,
+                withdrawWrittenBeforeEpochMs = pullStartedAtEpochMs,
+            )
             changed = pageResult.changed || changed
             totalUpserts += pageResult.appliedUpserts
             totalDeletes += pageResult.appliedDeletes
             preservedLocalItems = preservedLocalItems || pageResult.preservedLocalItems
+            withdrawnDirtyKeys += pageResult.withdrawnDirtyKeys
             val previousCursor = cursor
             cursor = maxOf(cursor, events.maxOf { it.eventId })
             cursorAdvanced = cursorAdvanced || cursor > previousCursor
@@ -772,7 +874,8 @@ object WatchProgressRepository {
             log.d {
                 "Watch progress delta page $page applied for profile $profileId: " +
                     "appliedUpserts=${pageResult.appliedUpserts} appliedDeletes=${pageResult.appliedDeletes} " +
-                    "preservedLocal=${pageResult.preservedLocalItems} newCursor=$cursor"
+                    "preservedLocal=${pageResult.preservedLocalItems} withdrawnDirty=${pageResult.withdrawnDirtyKeys} " +
+                    "newCursor=$cursor"
             }
 
             if (events.size < WATCH_PROGRESS_DELTA_PAGE_SIZE) break
@@ -785,11 +888,17 @@ object WatchProgressRepository {
         if (changed || remoteReadinessChanged) {
             publish()
         }
-        if (changed || cursorAdvanced) {
+        if (changed || cursorAdvanced || withdrawnDirtyKeys > 0) {
             persist()
         }
         if (changed) {
             resolveRemoteMetadata()
+        }
+        if (withdrawnDirtyKeys > 0) {
+            log.i {
+                "Watch progress delta for profile $profileId: $withdrawnDirtyKeys unsynced row(s) older than " +
+                    "a delete from another device are no longer pushed"
+            }
         }
         log.d {
             "Watch progress delta sync finished for profile $profileId: changed=$changed " +
@@ -856,14 +965,23 @@ object WatchProgressRepository {
         }
     }
 
+    /**
+     * [withdrawWrittenBeforeEpochMs]: the start of the pull. The dirty rows older than it that the
+     * page's deletes supersede are withdrawn from sync ([dirtyProgressKeysWithdrawnByServerDeletes]).
+     */
     private fun applyWatchProgressDeltaEvents(
         events: Collection<ProgressDeltaEvent>,
+        withdrawWrittenBeforeEpochMs: Long,
     ): WatchProgressDeltaApplyResult {
         var changed = false
         var appliedUpserts = 0
         var appliedDeletes = 0
         var preservedLocalItems = false
         val latestEventByProgressKey = linkedMapOf<String, ProgressDeltaEvent>()
+        // Every delete of the page, even one a later upsert of the same key supersedes: each is
+        // activity on the show on another device.
+        val deletedProgressKeys = mutableSetOf<String>()
+        val deletedContentIds = mutableSetOf<String>()
         events.sortedBy(ProgressDeltaEvent::eventId).forEach { event ->
             val progressKey = event.resolvedProgressKey()
             if (progressKey.isBlank()) {
@@ -872,6 +990,11 @@ object WatchProgressRepository {
             when (event.operation.lowercase()) {
                 WATCH_PROGRESS_DELTA_OPERATION_DELETE -> {
                     latestEventByProgressKey[progressKey] = event
+                    deletedProgressKeys += progressKey
+                    event.contentId.trim()
+                        .ifEmpty { localEntry(progressKey)?.parentMetaId?.trim().orEmpty() }
+                        .takeIf(String::isNotEmpty)
+                        ?.let(deletedContentIds::add)
                 }
                 WATCH_PROGRESS_DELTA_OPERATION_UPSERT -> {
                     if (event.videoId.isNotBlank()) {
@@ -910,11 +1033,24 @@ object WatchProgressRepository {
                 clearProgressDirty(progressKey)
             }
         }
+        val withdrawnKeys = if (deletedProgressKeys.isEmpty()) {
+            emptySet()
+        } else {
+            dirtyProgressKeysWithdrawnByServerDeletes(
+                entries = localEntriesSnapshot(),
+                dirtyProgressKeys = dirtyProgressKeysSnapshot(),
+                deletedProgressKeys = deletedProgressKeys,
+                deletedContentIds = deletedContentIds,
+                writtenBeforeEpochMs = withdrawWrittenBeforeEpochMs,
+            )
+        }
+        withdrawnKeys.forEach(::clearProgressDirty)
         return WatchProgressDeltaApplyResult(
             appliedUpserts = appliedUpserts,
             appliedDeletes = appliedDeletes,
             preservedLocalItems = preservedLocalItems,
             changed = changed,
+            withdrawnDirtyKeys = withdrawnKeys.size,
         )
     }
 
@@ -1606,6 +1742,61 @@ object WatchProgressRepository {
                     if (latestEntry != null) {
                         pushScrobbleToServer(entry = latestEntry, profileId = profileId, isRetry = true)
                     }
+                }
+            }
+        }
+    }
+
+    /**
+     * CW sync (REMAINING_FIX #2): once per profile per process, right after a successful Nuvio pull,
+     * push the rows that are still dirty ([selectDirtyWatchProgressBacklog]) — progress recorded
+     * while every tvOS write stayed local (builds up to 130) never reached the account, and nothing
+     * else ever re-sends a dirty row. A successful push acknowledges them like any other push
+     * ([recordSuccessfulPush]); a failed one is logged and tried again on the next launch.
+     *
+     * Only after a Nuvio pull, so only while Nuvio Sync is the Watch Progress Source. With Trakt
+     * (the default whenever it is connected) or Simkl as the source, the old rows reach the
+     * account once the source is switched to Nuvio Sync. Pushing without a pull could overwrite
+     * rows the account has since moved past.
+     *
+     * The selection, the push and its acknowledgement all run under [nuvioPullMutex]. The pull
+     * that called this holds the mutex, so the work starts once that pull is done. Keeping them
+     * under the mutex means no later pull can apply a newer account row, and acknowledge the key,
+     * between the moment a row is picked and the push that would overwrite that newer row with it.
+     */
+    private fun pushDirtyProgressBacklogOnce(profileId: Int, operationGeneration: Long) {
+        if (!isActiveOperation(profileId, operationGeneration) || !hasLoadedNuvioRemoteProgress) return
+        if (!synchronized(backlogPushLock) { backlogPushedProfileIds.add(profileId) }) return
+        accountScopeSnapshot().launch {
+            var pushedRows = 0
+            try {
+                nuvioPullMutex.withLock {
+                    if (!isActiveOperation(profileId, operationGeneration)) return@withLock
+                    val dirtyKeys = dirtyProgressKeysSnapshot()
+                    val backlog = selectDirtyWatchProgressBacklog(
+                        entries = localEntriesSnapshot(),
+                        dirtyProgressKeys = dirtyKeys,
+                    )
+                    if (backlog.isEmpty()) return@withLock
+                    pushedRows = backlog.size
+                    log.i {
+                        "Pushing the watch-progress backlog for profile $profileId: ${backlog.size} of " +
+                            "${dirtyKeys.size} unsynced rows, newest first"
+                    }
+                    syncAdapter.push(profileId = profileId, entries = backlog)
+                    recordSuccessfulPush(
+                        profileId = profileId,
+                        operationGeneration = operationGeneration,
+                        entries = backlog,
+                    )
+                    log.i { "Pushed the watch-progress backlog for profile $profileId (${backlog.size} rows)" }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                log.e(error) {
+                    "Failed to push the watch-progress backlog for profile $profileId ($pushedRows rows); " +
+                        "it is tried again on the next launch"
                 }
             }
         }

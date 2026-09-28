@@ -7,12 +7,14 @@ import com.nuvio.app.features.details.MetaDetails
 import com.nuvio.app.features.details.MetaDetailsRepository
 import com.nuvio.app.features.tmdb.TmdbService
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesRepository
+import com.nuvio.app.features.watchprogress.TrackerOptimisticProgressTtlMs
 import com.nuvio.app.features.watchprogress.WatchProgressEntry
 import com.nuvio.app.features.watchprogress.WatchProgressSourceTraktHistory
 import com.nuvio.app.features.watchprogress.WatchProgressSourceTraktPlayback
 import com.nuvio.app.features.watchprogress.WatchProgressSourceTraktShowProgress
 import com.nuvio.app.features.watchprogress.buildPlaybackVideoId
 import com.nuvio.app.features.watchprogress.shouldReplaceProgressSnapshotEntry
+import com.nuvio.app.features.watchprogress.trackerSnapshotConfirmsOptimisticProgress
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -42,7 +44,6 @@ import com.nuvio.app.core.i18n.StringKey
 import com.nuvio.app.core.i18n.resourceString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
-import kotlin.math.abs
 
 private const val BASE_URL = "https://api.trakt.tv"
 private const val TRAKT_COMPLETION_PERCENT_THRESHOLD = 90f
@@ -56,7 +57,7 @@ private const val METADATA_HYDRATION_LIMIT = 110
 private const val REFRESH_BASE_INTERVAL_MS = 60L * 1000L
 private const val EPISODE_PROGRESS_CACHE_TTL_MS = 30L * 60L * 1000L
 private const val EPISODE_PROGRESS_FETCH_THROTTLE_MS = 60L * 1000L
-private const val OPTIMISTIC_PROGRESS_TTL_MS = 3L * 60L * 1000L
+private const val OPTIMISTIC_PROGRESS_TTL_MS = TrackerOptimisticProgressTtlMs
 private const val MILLIS_PER_DAY = 24L * 60L * 60L * 1000L
 private const val AMBIGUOUS_ID_MARKER = "__ambiguous__"
 
@@ -482,15 +483,77 @@ object TraktProgressRepository {
             val active = current
                 .filterValues { optimistic -> optimistic.expiresAtMs > now }
                 .toMutableMap()
-            val existing = active[entry.videoId]?.progress
-            if (existing == null || shouldReplaceProgressSnapshotEntry(existing = existing, candidate = entry)) {
+            val existing = active[entry.videoId]
+            if (existing == null || shouldReplaceProgressSnapshotEntry(existing = existing.progress, candidate = entry)) {
                 active[entry.videoId] = OptimisticProgressEntry(
                     progress = entry,
-                    expiresAtMs = now + OPTIMISTIC_PROGRESS_TTL_MS,
+                    // CW sync #4: a newer write never shortens a hold ([holdOptimisticProgress]) —
+                    // an end-screen background flush after a failed stop would otherwise bring the
+                    // stale Trakt state back 3 minutes later.
+                    expiresAtMs = maxOf(now + OPTIMISTIC_PROGRESS_TTL_MS, existing?.expiresAtMs ?: 0L),
                 )
             }
             active
         }
+    }
+
+    /**
+     * CW sync #4: keeps the live optimistic rows of [item]'s title (a show's episodes included —
+     * Trakt may number them differently from the add-on) until at least [untilEpochMs]. Called
+     * while a scrobble stop is in flight, and after one failed (`TraktScrobbleRepository`): Trakt
+     * never recorded that viewing, so its snapshot would otherwise put Continue Watching back on the
+     * episode it last knew about once the 3-minute rows expire. The usual reconciliation still drops
+     * each row as soon as a Trakt snapshot confirms it, and a newer Trakt row still wins the merge.
+     * Returns how many rows it holds.
+     */
+    internal fun holdOptimisticProgress(item: TraktScrobbleItem, untilEpochMs: Long): Int {
+        val now = TraktPlatformClock.nowEpochMs()
+        var held = 0
+        optimisticProgress.update { current ->
+            held = 0
+            current.mapValues { (_, optimistic) ->
+                if (optimistic.expiresAtMs > now && optimistic.progress.isOfTraktScrobbleTitle(item)) {
+                    held += 1
+                    optimistic.copy(expiresAtMs = maxOf(optimistic.expiresAtMs, untilEpochMs))
+                } else {
+                    optimistic
+                }
+            }
+        }
+        return held
+    }
+
+    /**
+     * CW sync #4 (review): Trakt accepted a scrobble stop of [item]'s title, so its in-flight hold
+     * ([holdOptimisticProgress] up to [heldUntilEpochMs]) is no longer needed. The title's rows held
+     * past the plain TTL, up to that deadline, go back to the TTL counted from now.
+     *
+     * Without this, a delivered stop would still keep every row of the show for the 10 minutes of
+     * the hold, unless a snapshot confirmed them, and a completed row rarely gets confirmed.
+     *
+     * Left alone: rows due to expire sooner, and rows held longer. The longer holds are a failed
+     * stop's 24 h, which stops finishing out of order must not cut short, and a later stop still in
+     * flight. Returns how many rows it released.
+     */
+    internal fun releaseOptimisticProgressHold(item: TraktScrobbleItem, heldUntilEpochMs: Long): Int {
+        val until = TraktPlatformClock.nowEpochMs() + OPTIMISTIC_PROGRESS_TTL_MS
+        var released = 0
+        optimisticProgress.update { current ->
+            released = 0
+            current.mapValues { (_, optimistic) ->
+                if (
+                    optimistic.expiresAtMs > until &&
+                    optimistic.expiresAtMs <= heldUntilEpochMs &&
+                    optimistic.progress.isOfTraktScrobbleTitle(item)
+                ) {
+                    released += 1
+                    optimistic.copy(expiresAtMs = until)
+                } else {
+                    optimistic
+                }
+            }
+        }
+        return released
     }
 
     private fun removeOptimisticProgress(
@@ -509,27 +572,13 @@ object TraktProgressRepository {
             current.filter { (videoId, optimistic) ->
                 if (optimistic.expiresAtMs <= now) return@filter false
                 val remoteEntry = remoteByVideoId[videoId] ?: return@filter true
-                !remoteConfirmsOptimisticEntry(
+                // The rule Simkl's overlay uses too (CW sync #3).
+                !trackerSnapshotConfirmsOptimisticProgress(
                     remote = remoteEntry,
                     optimistic = optimistic.progress,
                 )
             }
         }
-    }
-
-    private fun remoteConfirmsOptimisticEntry(
-        remote: WatchProgressEntry,
-        optimistic: WatchProgressEntry,
-    ): Boolean {
-        val normalizedRemote = remote.normalizedCompletion()
-        val normalizedOptimistic = optimistic.normalizedCompletion()
-        val remoteNewEnough = normalizedRemote.lastUpdatedEpochMs >= normalizedOptimistic.lastUpdatedEpochMs - 60_000L
-        if (normalizedOptimistic.isEffectivelyCompleted) {
-            return normalizedRemote.isEffectivelyCompleted && remoteNewEnough
-        }
-
-        val closeEnough = abs(normalizedRemote.progressFraction - normalizedOptimistic.progressFraction) <= 0.03f
-        return closeEnough && remoteNewEnough
     }
 
     fun applyOptimisticProgress(entry: WatchProgressEntry) {
@@ -1577,6 +1626,23 @@ fun WatchProgressEntry.matchesTraktRemovalContext(
     return seasonNumber == null || (
         this.seasonNumber == seasonNumber && this.episodeNumber == episodeNumber
     )
+}
+
+/**
+ * CW sync #4: whether this (optimistic) progress row belongs to the title [item] scrobbles — the
+ * same movie, or any episode of the same show (Trakt may number the episodes differently from the
+ * add-on the row was recorded with). Matched on the ids Trakt addresses: IMDB, TMDB, Trakt.
+ */
+internal fun WatchProgressEntry.isOfTraktScrobbleTitle(item: TraktScrobbleItem): Boolean {
+    val itemIds = when (item) {
+        is TraktScrobbleItem.Movie -> item.ids
+        is TraktScrobbleItem.Episode -> item.showIds
+    }
+    if (isEpisode != (item is TraktScrobbleItem.Episode)) return false
+    val rowIds = parseTraktContentIds(parentMetaId)
+    return (!rowIds.imdb.isNullOrBlank() && rowIds.imdb.equals(itemIds.imdb, ignoreCase = true)) ||
+        (rowIds.tmdb != null && rowIds.tmdb == itemIds.tmdb) ||
+        (rowIds.trakt != null && rowIds.trakt == itemIds.trakt)
 }
 
 @Serializable

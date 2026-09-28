@@ -2,7 +2,8 @@ import Foundation
 import SharedCore
 import UIKit
 
-/// Engine-agnostic watch-progress + Trakt scrobbling for a `PlaybackContext`. Mirrors the logic in
+/// Engine-agnostic watch-progress + tracker scrobbling (Trakt directly, Simkl and any other connected
+/// tracker through `TrackingScrobbleCoordinator.scrobbleOtherTrackers`) for a `PlaybackContext`. Mirrors the logic in
 /// `MPVTVPlayerViewController` exactly so both engines record identically; the native AVPlayer path
 /// (Phase 3) uses it. The mpv controller can be migrated onto this later — it still has its own copy
 /// for now to avoid touching the shipping player. See docs/tvos-hybrid-player-plan.md.
@@ -80,6 +81,9 @@ final class PlaybackProgressRecorder {
             lastTickWasPlaying = false
         } else {
             observeBackgroundIfNeeded()
+            // A session requested before the file knew its duration (an HLS item at readyToPlay)
+            // reaches the other trackers with the first tick that knows it.
+            openOtherTrackersIfReady(positionSec: positionSec, durationSec: durationSec)
             if isPaused && !isBuffering && lastTickWasPlaying { flush = true }
             if !isBuffering { lastTickWasPlaying = !isPaused }
             lastTick = (positionSec: positionSec, durationSec: durationSec, speed: speed)
@@ -132,6 +136,11 @@ final class PlaybackProgressRecorder {
     private var traktItem: TraktScrobbleItem?
     private var traktRequested = false
     private var traktClosed = false
+    /// The other trackers' scrobble (Simkl — every connected tracker but Trakt, through
+    /// `TrackingScrobbleCoordinator.scrobbleOtherTrackers`) is open: started with the Trakt session
+    /// but independently of its item build, which returns nil for `kitsu:`/`mal:` ids. Cleared by the
+    /// one stop, so a second `stop()` of the coordinator sends nothing.
+    private var otherTrackersOpen = false
 
     func startTrakt(positionSec: Double, durationSec: Double) {
         guard !traktRequested else { return }
@@ -139,6 +148,9 @@ final class PlaybackProgressRecorder {
         // open a Trakt session — mirrors the shared short-placeholder guard.
         if WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(durationSec * 1000)) { return }
         traktRequested = true
+        // Not behind the Trakt item build below: it returns nil for ids Trakt can't address
+        // (`kitsu:`, `mal:` …), which Simkl can.
+        openOtherTrackersIfReady(positionSec: positionSec, durationSec: durationSec)
         TraktScrobbleRepository.shared.buildItem(
             contentType: context.contentType,
             parentMetaId: context.parentMetaId,
@@ -161,25 +173,69 @@ final class PlaybackProgressRecorder {
         }
     }
 
+    /// Opens the other trackers' session once the Trakt session is requested and the file's
+    /// duration is known. That is at `startTrakt`, or at the first tick that knows the duration
+    /// when an HLS item did not know it at readyToPlay.
+    ///
+    /// Why wait for the duration: a start sent at 0 % would end with a stop at 0 %, and that stop
+    /// replaces the show's real Simkl resume point.
+    ///
+    /// Never once the session is closed: a start that lands after the viewer left, while the resume
+    /// seek was still in flight, would have no stop.
+    private func openOtherTrackersIfReady(positionSec: Double, durationSec: Double) {
+        guard traktRequested, !traktClosed, !otherTrackersOpen, durationSec > 0,
+              !WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(durationSec * 1000)) else { return }
+        otherTrackersOpen = true
+        scrobbleOtherTrackers(TrackingScrobbleAction.start, percent: Self.percent(positionSec, durationSec))
+    }
+
     /// A new viewing on this recorder ("Play Again" after the session was stopped): the next
     /// `startTrakt` opens a fresh scrobble instead of being ignored as a repeat.
     func reopenTrakt() {
         traktItem = nil
         traktRequested = false
         traktClosed = false
+        otherTrackersOpen = false
     }
 
+    /// `positionSec` is the duration for a finished or handed-off episode
+    /// (`NativePlaybackCoordinator.stop()`), so an autoplayed episode closes at 100 %.
     func stopTrakt(positionSec: Double, durationSec: Double) {
         traktClosed = true
-        guard let item = traktItem else { return }
-        traktItem = nil
         // A session can open before a placeholder's short duration is known; close
         // it at 0% so Trakt never marks the stub watched.
         let short = WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(durationSec * 1000))
+        let percent: Float = short ? 0 : Self.percent(positionSec, durationSec)
+        if otherTrackersOpen {
+            otherTrackersOpen = false
+            // Not for a placeholder clip, nor with the duration unknown (the percentage would read
+            // 0): Simkl keeps one paused session per show, so a stop at 0 % would replace the
+            // show's real resume point.
+            if !short, durationSec > 0 { scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent) }
+        }
+        guard let item = traktItem else { return }
+        traktItem = nil
         TraktScrobbleRepository.shared.scrobbleStop(
             profileId: ActiveProfileProvider.shared.activeProfileId,
             item: item,
-            progressPercent: short ? 0 : Self.percent(positionSec, durationSec)
+            progressPercent: percent
+        ) { _ in }
+    }
+
+    /// Start/stop for every connected tracker but Trakt (Simkl). The shared coordinator catches every
+    /// failure itself (nothing escapes into Swift) and no-ops when no such tracker is connected.
+    private func scrobbleOtherTrackers(_ action: TrackingScrobbleAction, percent: Float) {
+        TrackingScrobbleCoordinator.shared.scrobbleOtherTrackers(
+            profileId: ActiveProfileProvider.shared.activeProfileId,
+            action: action,
+            contentType: context.contentType,
+            parentMetaId: context.parentMetaId,
+            videoId: context.videoId,
+            title: context.progressTitle,
+            seasonNumber: context.season.map { KotlinInt(int: Int32($0)) },
+            episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) },
+            episodeTitle: context.episodeTitle,
+            progressPercent: Double(percent)
         ) { _ in }
     }
 

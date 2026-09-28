@@ -152,6 +152,83 @@ internal fun extraWatchedKeysChanged(
     current: Set<String>,
 ): Boolean = previous.orEmpty() != current
 
+internal const val WATCHED_BACKLOG_PUSH_LIMIT = 200
+
+/**
+ * CW sync (REMAINING_FIX #2): the watched marks the one-time post-pull backlog push sends — Nuvio
+ * marks whose key is still dirty, most recently marked first, at most [limit]. Up to build 130 a
+ * finished episode was marked with `syncRemote = false`, so its mark never reached the account;
+ * right after a successful pull, a key that is still dirty is a mark the account lacks or holds
+ * older (the pull merges acknowledge every key the server already matches).
+ *
+ * "The account lacks it" can also mean another device unmarked it. The deletes a delta pull brings
+ * withdraw the marks they supersede ([dirtyWatchedKeysWithdrawnByServerDeletes]), so those are not
+ * selected here. Two cases stay out of reach, a known effect on the other devices:
+ * - a delete that builds 130/131 consumed before this pass existed;
+ * - a snapshot pull, which carries no deletes: a mark is only missing.
+ * Marks like these are still pushed, so an episode unmarked on another device can come back as
+ * watched there.
+ */
+internal fun selectDirtyWatchedBacklog(
+    items: Map<String, WatchedItem>,
+    dirtyKeys: Set<String>,
+    limit: Int = WATCHED_BACKLOG_PUSH_LIMIT,
+): List<WatchedItem> {
+    if (dirtyKeys.isEmpty() || limit <= 0) return emptyList()
+    return dirtyKeys
+        .mapNotNull { key ->
+            items[key]
+                ?.takeIf { item -> item.id.isNotBlank() }
+                ?.let { item -> key to item.normalizedMarkedAt() }
+        }
+        .sortedWith(
+            compareByDescending<Pair<String, WatchedItem>> { (_, item) -> item.markedAtEpochMs }
+                .thenBy { (key, _) -> key },
+        )
+        .take(limit)
+        .map { (_, item) -> item }
+}
+
+/**
+ * CW sync #2 (review): the dirty Nuvio marks that the server deletes of one delta pull withdraw from
+ * sync. [items] and [dirtyKeys] are the local state once the pull has applied those deletes.
+ *
+ * A dirty mark made before [markedBeforeEpochMs] (the start of that pull) is withdrawn when:
+ * - its own key was deleted ([deletedKeys]): the merge keeps the mark, but another device
+ *   unmarked that episode after it was made;
+ * - or its title was deleted ([deletedContentIds]) and no synced mark of it is left on this
+ *   device: the account no longer holds any mark of it, which is what "mark the show unwatched" on
+ *   another device looks like. The account only held the episodes that device knew, so marks of
+ *   other episodes are withdrawn too. While a synced mark of the title is left, the delete was
+ *   about single episodes and the title's other marks are kept.
+ *
+ * A mark made during the pull is left alone: it is a local change the delete cannot know about.
+ *
+ * Only the backlog would push such a mark again and mark the episode watched again on the account.
+ * The marks stay on this device and are only no longer dirty. No push re-sends them, and the next
+ * snapshot pull (which only keeps the dirty marks the server lacks) lets them go, as the account
+ * did.
+ */
+internal fun dirtyWatchedKeysWithdrawnByServerDeletes(
+    items: Map<String, WatchedItem>,
+    dirtyKeys: Set<String>,
+    deletedKeys: Set<String>,
+    deletedContentIds: Set<String>,
+    markedBeforeEpochMs: Long,
+): Set<String> {
+    if (dirtyKeys.isEmpty() || (deletedKeys.isEmpty() && deletedContentIds.isEmpty())) return emptySet()
+    val titlesGoneFromAccount = deletedContentIds.filterTo(mutableSetOf()) { contentId ->
+        items.none { (key, item) -> key !in dirtyKeys && item.id.trim() == contentId }
+    }
+    return items
+        .filter { (key, item) ->
+            key in dirtyKeys &&
+                item.normalizedMarkedAt().markedAtEpochMs < markedBeforeEpochMs &&
+                (key in deletedKeys || item.id.trim() in titlesGoneFromAccount)
+        }
+        .keys
+}
+
 private const val maxRestorableWatchedPayloadChars = 4 * 1024 * 1024
 
 internal fun shouldRestoreWatchedPayload(payloadLength: Int): Boolean =
@@ -203,6 +280,9 @@ object WatchedRepository {
     private var deltaInitialized: Boolean = false
     internal var syncAdapter: WatchedSyncAdapter = SupabaseWatchedSyncAdapter
     private var extraKeysObserverJob: Job? = null
+    /** Profiles whose dirty-mark backlog was already pushed (or tried) by this process (#2). */
+    private val backlogPushLock = SynchronizedObject()
+    private val backlogPushedProfileIds = mutableSetOf<Int>()
 
     fun ensureLoaded() {
         ensureTrackingProvidersRegistered()
@@ -255,6 +335,8 @@ object WatchedRepository {
         lastSuccessfulPushEpochMs = 0L
         deltaCursorEventId = 0L
         deltaInitialized = false
+        // Another account's profiles reuse the same ids: they get their own backlog push.
+        synchronized(backlogPushLock) { backlogPushedProfileIds.clear() }
         _fullyWatchedSeriesKeys.value = emptySet()
         _uiState.value = WatchedUiState()
     }
@@ -440,16 +522,20 @@ object WatchedRepository {
                     profileId = profileId,
                     resetDeltaState = true,
                 )
-            } ?: if (forceSnapshot) {
-                refreshNuvioSnapshot(
-                    operation = operation,
-                    profileId = profileId,
-                )
-            } else {
-                pullSupabaseDeltaFromServer(
-                    operation = operation,
-                    profileId = profileId,
-                )
+            } ?: run {
+                val pulled = if (forceSnapshot) {
+                    refreshNuvioSnapshot(
+                        operation = operation,
+                        profileId = profileId,
+                    )
+                } else {
+                    pullSupabaseDeltaFromServer(
+                        operation = operation,
+                        profileId = profileId,
+                    )
+                }
+                if (pulled) pushDirtyWatchedBacklogOnce(operation)
+                pulled
             }
         } catch (error: CancellationException) {
             throw error
@@ -579,6 +665,8 @@ object WatchedRepository {
 
         var cursor = deltaCursorEventId
         var changed = false
+        // A mark made from here on is a change this pull's deletes cannot know about.
+        val pullStartedAtEpochMs = WatchedClock.nowEpochMs()
 
         while (true) {
             val events = syncAdapter.pullDelta(
@@ -594,6 +682,7 @@ object WatchedRepository {
                     targetItems = nuvioItems,
                     dirtyKeys = dirtyNuvioKeys,
                     events = events,
+                    withdrawMarkedBeforeEpochMs = pullStartedAtEpochMs,
                 )
             }
             cursor = maxOf(cursor, events.maxOf { it.eventId })
@@ -617,10 +706,15 @@ object WatchedRepository {
         return true
     }
 
+    /**
+     * [withdrawMarkedBeforeEpochMs]: the start of the pull. The dirty marks older than it that the
+     * page's deletes supersede are withdrawn from sync ([dirtyWatchedKeysWithdrawnByServerDeletes]).
+     */
     private fun applyWatchedDeltaEvents(
         targetItems: MutableMap<String, WatchedItem>,
         dirtyKeys: MutableSet<String>,
         events: Collection<WatchedDeltaEvent>,
+        withdrawMarkedBeforeEpochMs: Long,
     ) {
         var upsertCount = 0
         var deleteCount = 0
@@ -629,6 +723,8 @@ object WatchedRepository {
         var preservedDirtyCount = 0
         var acknowledgedDirtyCount = 0
         var ignoredCount = 0
+        val deletedKeys = mutableSetOf<String>()
+        val deletedContentIds = mutableSetOf<String>()
 
         events.forEach { event ->
             val key = watchedItemKey(event.contentType, event.contentId, event.season, event.episode)
@@ -659,6 +755,7 @@ object WatchedRepository {
                 }
                 watchedDeltaOperationDelete -> {
                     deleteCount += 1
+                    event.contentId.trim().takeIf(String::isNotEmpty)?.let(deletedContentIds::add)
                     val matchingKey = if (key in targetItems) {
                         key
                     } else {
@@ -673,6 +770,7 @@ object WatchedRepository {
                     if (matchingKey == null) {
                         return@forEach
                     }
+                    deletedKeys += matchingKey
                     if (matchingKey in dirtyKeys) {
                         preservedDirtyCount += 1
                         return@forEach
@@ -691,11 +789,20 @@ object WatchedRepository {
             }
         }
 
+        val withdrawnKeys = dirtyWatchedKeysWithdrawnByServerDeletes(
+            items = targetItems,
+            dirtyKeys = dirtyKeys,
+            deletedKeys = deletedKeys,
+            deletedContentIds = deletedContentIds,
+            markedBeforeEpochMs = withdrawMarkedBeforeEpochMs,
+        )
+        dirtyKeys -= withdrawnKeys
+
         log.i {
             "Applied watched delta events total=${events.size} upserts=$upsertCount deletes=$deleteCount " +
                 "removed=$removedCount removedByFallbackKey=$removedByFallbackKeyCount " +
                 "preservedDirty=$preservedDirtyCount acknowledgedDirty=$acknowledgedDirtyCount " +
-                "ignored=$ignoredCount"
+                "withdrawnDirty=${withdrawnKeys.size} ignored=$ignoredCount"
         }
     }
 
@@ -1036,6 +1143,46 @@ object WatchedRepository {
                 }
             }.onFailure { e ->
                 log.e(e) { "Failed to push watched items" }
+            }
+        }
+    }
+
+    /**
+     * CW sync (REMAINING_FIX #2): once per profile per process, right after a successful Nuvio pull,
+     * push the Nuvio marks that are still dirty ([selectDirtyWatchedBacklog]) to the account only —
+     * never to a tracker: playback completions reach trackers through their scrobbles. A successful
+     * push acknowledges them like any other ([recordSuccessfulPush]); a failed one is logged and
+     * tried again on the next launch.
+     */
+    private fun pushDirtyWatchedBacklogOnce(operation: WatchedRefreshOperation) {
+        if (operation.sourceOperation.source.providerId != null || !isActiveOperation(operation)) return
+        val profileId = operation.profileId
+        val (backlog, dirtyCount) = itemsStore.read { nuvioItems, _, dirtyNuvioKeys, _ ->
+            selectDirtyWatchedBacklog(items = nuvioItems, dirtyKeys = dirtyNuvioKeys) to dirtyNuvioKeys.size
+        }
+        if (!synchronized(backlogPushLock) { backlogPushedProfileIds.add(profileId) }) return
+        if (backlog.isEmpty()) return
+        log.i {
+            "Pushing the watched-mark backlog for profile $profileId: ${backlog.size} of $dirtyCount " +
+                "unsynced marks, most recent first"
+        }
+        val operationGeneration = operation.profileGeneration
+        accountScopeSnapshot().launch {
+            try {
+                syncAdapter.push(profileId = profileId, items = backlog)
+                recordSuccessfulPush(
+                    profileId = profileId,
+                    operationGeneration = operationGeneration,
+                    items = backlog,
+                )
+                log.i { "Pushed the watched-mark backlog for profile $profileId (${backlog.size} marks)" }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                log.e(error) {
+                    "Failed to push the watched-mark backlog for profile $profileId (${backlog.size} marks); " +
+                        "it is tried again on the next launch"
+                }
             }
         }
     }
