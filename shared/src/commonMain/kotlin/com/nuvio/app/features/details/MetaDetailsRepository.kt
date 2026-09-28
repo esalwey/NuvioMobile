@@ -230,6 +230,19 @@ object MetaDetailsRepository {
         }
     }
 
+    /**
+     * The addon's own `imdb_id` for the title [id] (upstream 90054b7b9), from the title on screen or
+     * the metadata cache: the IMDB id a kitsu/mal/custom-id title is enriched and skipped with.
+     * Best effort — a title whose details were never loaded this session has none.
+     */
+    internal fun addonImdbId(id: String): String? {
+        val meta = _uiState.value.meta?.takeIf { it.id == id }
+            ?: cachedMetaByRequestKey.values.firstNotNullOfOrNull { entry ->
+                entry.baseMeta.takeIf { it.id == id }
+            }
+        return meta?.imdbId?.trim()?.takeIf { it.startsWith("tt", ignoreCase = true) }
+    }
+
     fun peek(type: String, id: String): MetaDetails? {
         val requestKey = MetaRequestResolution.requestKey(type, id)
         val currentMeta = _uiState.value.meta?.takeIf { it.type == type && it.id == id }

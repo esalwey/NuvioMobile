@@ -32,6 +32,7 @@ object MetaDetailsParser {
             id = meta.requiredString("id"),
             type = meta.requiredString("type"),
             name = meta.requiredString("name"),
+            imdbId = meta.string("imdb_id"),
             poster = meta.string("poster"),
             background = meta.string("background"),
             logo = meta.string("logo"),

@@ -9,6 +9,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class MetaDetailsParserTest {
@@ -243,5 +244,25 @@ class MetaDetailsParserTest {
         )
 
         assertEquals("PG-13", result.ageRating)
+    }
+
+    // Upstream 90054b7b9.
+    @Test
+    fun `parse keeps the addon imdb id for non IMDB content`() {
+        val result = MetaDetailsParser.parse(
+            """
+            {
+              "meta": {
+                "id": "kitsu:7442",
+                "type": "series",
+                "name": "Attack on Titan",
+                "imdb_id": "tt2560140"
+              }
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals("tt2560140", result.imdbId)
+        assertNull(MetaDetailsParser.parse("""{"meta":{"id":"tt1","type":"movie","name":"Movie"}}""").imdbId)
     }
 }

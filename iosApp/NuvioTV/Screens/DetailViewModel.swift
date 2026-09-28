@@ -341,8 +341,11 @@ final class DetailViewModel: ObservableObject {
     /// "season:episode" for the episode list to badge. Movies and titles without a tt/tmdb id skip.
     private func fetchEpisodeRatingsIfNeeded(_ meta: MetaDetails) {
         guard !didRequestRatings, EpisodesSection.isSeriesLike(meta) else { return }
+        // Upstream 90054b7b9: the addon's own `imdb_id` rates kitsu/mal/custom-id titles.
+        let addonImdbId: String? = meta.imdbId
         let imdbId = ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: meta.id)
             ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: id)
+            ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: addonImdbId)
         let tmdbId = ParentalGuideRepositoryKt.extractParentalGuideTmdbId(value: meta.id)
             ?? ParentalGuideRepositoryKt.extractParentalGuideTmdbId(value: id)
         guard imdbId != nil || tmdbId != nil else { return }
@@ -370,8 +373,10 @@ final class DetailViewModel: ObservableObject {
     /// `buildParentalWarnings` (labels supplied here — tvOS is English-only).
     private func fetchParentalGuideIfNeeded(_ meta: MetaDetails) {
         guard !didRequestGuide else { return }
+        let addonImdbId: String? = meta.imdbId
         guard let imdbId = ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: meta.id)
-            ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: id) else { return }
+            ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: id)
+            ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: addonImdbId) else { return }
         didRequestGuide = true
 
         ParentalGuideRepository.shared.getParentalGuide(imdbId: imdbId) { [weak self] result, _ in
