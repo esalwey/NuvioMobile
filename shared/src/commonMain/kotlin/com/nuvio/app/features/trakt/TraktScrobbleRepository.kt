@@ -272,7 +272,11 @@ object TraktScrobbleRepository : TrackingScrobbler {
             return
         }
         if (ActiveProfileProvider.activeProfileId != profileId) return
-        if (shouldSkip(profileId, action, item.itemKey, clampedProgress)) return
+        if (shouldSkip(profileId, action, item.itemKey, clampedProgress)) {
+            // The same stop reached Trakt moments ago: nothing is in flight.
+            if (isStop) TraktProgressRepository.releaseOptimisticProgressHold(item)
+            return
+        }
 
         val url = "$BASE_URL/scrobble/$action"
         val requestBody = json.encodeToString(buildRequestBody(item, clampedProgress))
@@ -375,6 +379,8 @@ object TraktScrobbleRepository : TrackingScrobbler {
         )
 
         if (action == "stop") {
+            // Delivered: the title's rows go back to the plain TTL (CW sync #4).
+            TraktProgressRepository.releaseOptimisticProgressHold(item)
             runCatching { TraktProgressRepository.invalidateAndRefresh() }
                 .onFailure { error ->
                     if (error is CancellationException) throw error

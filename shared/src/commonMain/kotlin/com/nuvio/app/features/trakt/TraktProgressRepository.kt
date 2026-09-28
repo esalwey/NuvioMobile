@@ -7,12 +7,14 @@ import com.nuvio.app.features.details.MetaDetails
 import com.nuvio.app.features.details.MetaDetailsRepository
 import com.nuvio.app.features.tmdb.TmdbService
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesRepository
+import com.nuvio.app.features.watchprogress.TrackerOptimisticProgressTtlMs
 import com.nuvio.app.features.watchprogress.WatchProgressEntry
 import com.nuvio.app.features.watchprogress.WatchProgressSourceTraktHistory
 import com.nuvio.app.features.watchprogress.WatchProgressSourceTraktPlayback
 import com.nuvio.app.features.watchprogress.WatchProgressSourceTraktShowProgress
 import com.nuvio.app.features.watchprogress.buildPlaybackVideoId
 import com.nuvio.app.features.watchprogress.shouldReplaceProgressSnapshotEntry
+import com.nuvio.app.features.watchprogress.trackerSnapshotConfirmsOptimisticProgress
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -42,7 +44,6 @@ import com.nuvio.app.core.i18n.StringKey
 import com.nuvio.app.core.i18n.resourceString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
-import kotlin.math.abs
 
 private const val BASE_URL = "https://api.trakt.tv"
 private const val TRAKT_COMPLETION_PERCENT_THRESHOLD = 90f
@@ -56,7 +57,7 @@ private const val METADATA_HYDRATION_LIMIT = 110
 private const val REFRESH_BASE_INTERVAL_MS = 60L * 1000L
 private const val EPISODE_PROGRESS_CACHE_TTL_MS = 30L * 60L * 1000L
 private const val EPISODE_PROGRESS_FETCH_THROTTLE_MS = 60L * 1000L
-private const val OPTIMISTIC_PROGRESS_TTL_MS = 3L * 60L * 1000L
+private const val OPTIMISTIC_PROGRESS_TTL_MS = TrackerOptimisticProgressTtlMs
 private const val MILLIS_PER_DAY = 24L * 60L * 60L * 1000L
 private const val AMBIGUOUS_ID_MARKER = "__ambiguous__"
 
@@ -522,6 +523,32 @@ object TraktProgressRepository {
         return held
     }
 
+    /**
+     * CW sync #4 (review): Trakt accepted a scrobble stop of [item]'s title, so nothing about it
+     * is in flight any more. The rows that [holdOptimisticProgress] kept past the plain TTL go back
+     * to it, counted from now. Rows due to expire sooner are left alone. Without this, a delivered
+     * stop would still keep every row of the show for the 10 minutes of the in-flight hold, unless a
+     * snapshot confirmed them, and a completed row rarely gets confirmed. A hold left by an earlier
+     * stop of the title that failed is released as well: Trakt now has this newer viewing of the
+     * title. Returns how many rows it released.
+     */
+    internal fun releaseOptimisticProgressHold(item: TraktScrobbleItem): Int {
+        val until = TraktPlatformClock.nowEpochMs() + OPTIMISTIC_PROGRESS_TTL_MS
+        var released = 0
+        optimisticProgress.update { current ->
+            released = 0
+            current.mapValues { (_, optimistic) ->
+                if (optimistic.expiresAtMs > until && optimistic.progress.isOfTraktScrobbleTitle(item)) {
+                    released += 1
+                    optimistic.copy(expiresAtMs = until)
+                } else {
+                    optimistic
+                }
+            }
+        }
+        return released
+    }
+
     private fun removeOptimisticProgress(
         shouldRemove: (WatchProgressEntry) -> Boolean,
     ) {
@@ -538,27 +565,13 @@ object TraktProgressRepository {
             current.filter { (videoId, optimistic) ->
                 if (optimistic.expiresAtMs <= now) return@filter false
                 val remoteEntry = remoteByVideoId[videoId] ?: return@filter true
-                !remoteConfirmsOptimisticEntry(
+                // The rule Simkl's overlay uses too (CW sync #3).
+                !trackerSnapshotConfirmsOptimisticProgress(
                     remote = remoteEntry,
                     optimistic = optimistic.progress,
                 )
             }
         }
-    }
-
-    private fun remoteConfirmsOptimisticEntry(
-        remote: WatchProgressEntry,
-        optimistic: WatchProgressEntry,
-    ): Boolean {
-        val normalizedRemote = remote.normalizedCompletion()
-        val normalizedOptimistic = optimistic.normalizedCompletion()
-        val remoteNewEnough = normalizedRemote.lastUpdatedEpochMs >= normalizedOptimistic.lastUpdatedEpochMs - 60_000L
-        if (normalizedOptimistic.isEffectivelyCompleted) {
-            return normalizedRemote.isEffectivelyCompleted && remoteNewEnough
-        }
-
-        val closeEnough = abs(normalizedRemote.progressFraction - normalizedOptimistic.progressFraction) <= 0.03f
-        return closeEnough && remoteNewEnough
     }
 
     fun applyOptimisticProgress(entry: WatchProgressEntry) {

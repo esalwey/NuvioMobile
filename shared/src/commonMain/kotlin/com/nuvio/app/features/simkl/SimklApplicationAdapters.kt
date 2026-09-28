@@ -9,6 +9,7 @@ import com.nuvio.app.features.tracking.TrackingProgressSnapshot
 import com.nuvio.app.features.tracking.TrackingRefreshIntent
 import com.nuvio.app.features.tracking.TrackingWatchedProvider
 import com.nuvio.app.features.watched.WatchedItem
+import com.nuvio.app.features.watchprogress.TrackerOptimisticProgressTtlMs
 import com.nuvio.app.features.watchprogress.WatchProgressEntry
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -294,6 +295,24 @@ object SimklProgressRepository {
                 contentIds = listOfNotNull(contentId, canonicalId),
                 untilEpochMs = now + forMs,
                 nowEpochMs = now,
+            )
+        }
+    }
+
+    /**
+     * CW sync #3 (review): a stop of [contentId] reached Simkl. The rows [holdOptimisticProgress]
+     * kept for it go back to the plain TTL, counted from now, like Trakt's
+     * `releaseOptimisticProgressHold`. Returns how many rows it released.
+     */
+    internal fun releaseOptimisticProgressHold(profileId: Int, contentId: String): Int {
+        val canonicalId = runCatching {
+            SimklSyncRepository.state.value.snapshot.resolveCanonicalContentId(contentId)
+        }.getOrNull()
+        return synchronized(publicationLock) {
+            optimisticProgress.release(
+                profileId = profileId,
+                contentIds = listOfNotNull(contentId, canonicalId),
+                untilEpochMs = SimklPlatformClock.nowEpochMs() + TrackerOptimisticProgressTtlMs,
             )
         }
     }

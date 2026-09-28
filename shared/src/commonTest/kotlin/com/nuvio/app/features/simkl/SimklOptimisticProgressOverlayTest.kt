@@ -122,6 +122,27 @@ class SimklOptimisticProgressOverlayTest {
     }
 
     @Test
+    fun `a delivered stop brings the held rows back to the plain TTL`() {
+        val snapshot = listOf(simklRow(episode = 1, percent = 40f, updatedAt = minutes(10)))
+        val overlay = SimklOptimisticProgressOverlay()
+        val now = minutes(100)
+        overlay.put(PROFILE, localRow(episode = 2, completed = true, updatedAt = now), now)
+        overlay.put(PROFILE, localRow(episode = 1, positionMin = 3, updatedAt = now, contentId = "tt0903747"), now)
+        overlay.hold(PROFILE, listOf("tt0944947", "tt0903747"), now + TrackerOptimisticStopInFlightHoldMs, now)
+
+        val deliveredAt = now + 30_000L
+        assertEquals(0, overlay.release(OTHER_PROFILE, listOf("tt0944947"), deliveredAt + TrackerOptimisticProgressTtlMs))
+        assertEquals(1, overlay.release(PROFILE, listOf("tt0944947"), deliveredAt + TrackerOptimisticProgressTtlMs))
+
+        // The delivered title is gone once the TTL has run from the delivery; the other title is
+        // still held, because its stop is still on the way.
+        val afterTtl = deliveredAt + TrackerOptimisticProgressTtlMs
+        assertEquals(listOf("tt0903747", "tt0944947"), overlay.merge(PROFILE, snapshot, afterTtl).map { it.parentMetaId })
+        // A row due to expire sooner is not extended.
+        assertEquals(0, overlay.release(PROFILE, listOf("tt0903747"), now + TrackerOptimisticStopInFlightHoldMs + 60_000L))
+    }
+
+    @Test
     fun `rows belong to the profile that wrote them`() {
         val snapshot = listOf(simklRow(episode = 1, percent = 40f, updatedAt = minutes(10)))
         val overlay = SimklOptimisticProgressOverlay()

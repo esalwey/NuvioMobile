@@ -244,6 +244,13 @@ object SimklMutationRepository : TrackingListWriter, TrackingHistoryWriter, Trac
             }
             throw error
         }
+        // Delivered: the in-flight hold is released, and the title's rows go back to the plain TTL.
+        if (playedContentId != null) {
+            SimklProgressRepository.releaseOptimisticProgressHold(
+                profileId = profileId,
+                contentId = playedContentId,
+            )
+        }
         if (action != TrackingScrobbleAction.START) {
             SimklSyncRepository.commitScrobble(result)
         }

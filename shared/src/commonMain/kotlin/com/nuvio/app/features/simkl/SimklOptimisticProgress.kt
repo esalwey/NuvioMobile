@@ -15,7 +15,8 @@ import com.nuvio.app.features.watchprogress.trackerSnapshotConfirmsOptimisticPro
  * network refresh lands. Every local progress write therefore lands here too
  * (`SimklTrackingProgressProvider.applyOptimisticProgress`):
  * - a row lives [ttlMs] past its last write, and longer while [hold] says so (a scrobble stop in
- *   flight, or one that failed — `SimklMutationRepository.scrobble`);
+ *   flight, or one that failed — `SimklMutationRepository.scrobble`); a delivered stop ends its
+ *   hold again ([release]);
  * - it is keyed by episode (content id, season, episode — the content id was normalized to Simkl's
  *   canonical id when the row was written), not by progress key: Simkl's rows carry session keys
  *   (`simkl-playback:<id>`), the local ones `<id>_s<n>e<n>`;
@@ -137,6 +138,27 @@ internal class SimklOptimisticProgressOverlay(
             if (key.contentId in ids && row.expiresAtMs > nowEpochMs) {
                 count += 1
                 row.copy(expiresAtMs = maxOf(row.expiresAtMs, untilEpochMs))
+            } else {
+                row
+            }
+        }
+        return count
+    }
+
+    /**
+     * Brings the live rows of [contentIds] that expire after [untilEpochMs] back to it: a stop
+     * was delivered, so the in-flight hold that [hold] set is no longer needed. Rows due to expire
+     * sooner are left alone. Returns how many rows it released.
+     */
+    fun release(profileId: Int, contentIds: Collection<String>, untilEpochMs: Long): Int {
+        if (held.isEmpty() || ownerProfileId != profileId) return 0
+        val ids = contentIds.mapNotNullTo(mutableSetOf()) { id -> id.trim().takeIf(String::isNotEmpty) }
+        if (ids.isEmpty()) return 0
+        var count = 0
+        held = held.mapValues { (key, row) ->
+            if (key.contentId in ids && row.expiresAtMs > untilEpochMs) {
+                count += 1
+                row.copy(expiresAtMs = untilEpochMs)
             } else {
                 row
             }

@@ -18,6 +18,8 @@ internal const val TrackerOptimisticProgressTtlMs: Long = 3L * 60L * 1_000L
 /**
  * A scrobble stop for the title is in flight (with its retries and timeouts): its rows are held at
  * least this long, so a stop that fails slowly still finds them to keep ([TrackerOptimisticFailedStopRetentionMs]).
+ * A delivered stop releases the hold again: the rows go back to [TrackerOptimisticProgressTtlMs],
+ * counted from the delivery.
  */
 internal const val TrackerOptimisticStopInFlightHoldMs: Long = 10L * 60L * 1_000L
 
@@ -30,9 +32,9 @@ internal const val TrackerOptimisticStopInFlightHoldMs: Long = 10L * 60L * 1_000
 internal const val TrackerOptimisticFailedStopRetentionMs: Long = 24L * 60L * 60L * 1_000L
 
 /**
- * True when [remote], the tracker's snapshot row for the same episode, confirms [optimistic] — the
- * rule of Trakt's `remoteConfirmsOptimisticEntry`: at least as recent (a minute's slack), and
- * completed for a completed row, or within 3 % of its position for one in progress.
+ * True when [remote], the tracker's snapshot row for the same episode, confirms [optimistic]: at
+ * least as recent (a minute's slack), and completed for a completed row, or within 3 % of its
+ * position for one in progress. Trakt's and Simkl's overlays both reconcile with it.
  */
 internal fun trackerSnapshotConfirmsOptimisticProgress(
     remote: WatchProgressEntry,
