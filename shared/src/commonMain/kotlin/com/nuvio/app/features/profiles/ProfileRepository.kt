@@ -222,6 +222,12 @@ object ProfileRepository {
     }
 
     suspend fun deleteProfile(profileIndex: Int) {
+        // PRF-1: the primary profile (index 1) owns the account's shared add-ons and can't be
+        // deleted — upstream's UI only offers deletion above index 1; guard the call too.
+        if (profileIndex <= 1) {
+            log.w { "deleteProfile($profileIndex) ignored: the primary profile can't be deleted" }
+            return
+        }
         if (AuthRepository.state.value.isAnonymous) {
             val remaining = _state.value.profiles.filter { it.profileIndex != profileIndex }
             ProfilePinCacheStorage.removePayload(profileIndex)

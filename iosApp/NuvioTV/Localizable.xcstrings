@@ -7214,6 +7214,26 @@
         }
       }
     },
+    "Delete": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Supprimer"
+          }
+        }
+      }
+    },
+    "Delete %@?": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Supprimer %@ ?"
+          }
+        }
+      }
+    },
     "Delete Profile": {
       "localizations": {
         "de": {
@@ -10556,6 +10576,16 @@
         }
       }
     },
+    "Hold to manage profile · Menu to go back": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maintenez pour gérer le profil · Menu pour revenir"
+          }
+        }
+      }
+    },
     "Home": {
       "localizations": {
         "de": {
@@ -11447,6 +11477,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Các danh mục và luồng của nó sẽ không còn hiển thị."
+          }
+        }
+      }
+    },
+    "Its library, watch progress and settings will be removed. This can’t be undone.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sa bibliothèque, sa progression de lecture et ses réglages seront supprimés. Cette action est irréversible."
           }
         }
       }
