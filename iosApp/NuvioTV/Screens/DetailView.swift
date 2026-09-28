@@ -521,7 +521,8 @@ struct DetailView: View {
                         EpisodesSection(
                             meta: meta,
                             episodeRatings: model.episodeRatings,
-                            watchedEpisodeKeys: model.watchedEpisodeKeys
+                            watchedEpisodeKeys: model.watchedEpisodeKeys,
+                            episodeRatingsVisibility: model.episodeRatingsVisibility
                         )
                         // A discrete focus region: vertical D-pad moves must land here instead of
                         // geometrically skipping from the info/network chips down to the cast row.
@@ -1318,7 +1319,8 @@ struct DetailView: View {
             if let runtime = model.meta?.runtime, !runtime.isEmpty {
                 metaChip { Text(runtime) }
             }
-            if let rating = model.meta?.imdbRating ?? preview.imdbRating, !rating.isEmpty {
+            // SET-2: Settings → Appearance → Ratings → Overall Ratings.
+            if model.showOverallRatings, let rating = model.meta?.imdbRating ?? preview.imdbRating, !rating.isEmpty {
                 metaChip {
                     HStack(spacing: Theme.Spacing.xs - 2) {
                         Image(systemName: "star.fill").foregroundStyle(Theme.Palette.star)

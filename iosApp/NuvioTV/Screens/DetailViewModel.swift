@@ -35,6 +35,11 @@ final class DetailViewModel: ObservableObject {
     @Published private(set) var seriesAction: SeriesPrimaryAction?
     /// IMDb parental-guide severities (empty when the title has no tt-id or no guide data).
     @Published private(set) var parentalWarnings: [ParentalWarning] = []
+    /// SET-2 / upstream 6fb46976b (Settings → Appearance → Ratings, synced per profile): whether the
+    /// meta line shows the title's IMDb rating, and which episode badges carry a rating —
+    /// `EpisodeRatingsVisibility.name` ("SHOW_ALL" / "HIDE_EPISODES" / "HIDE_UNWATCHED_EPISODES").
+    @Published private(set) var showOverallRatings = true
+    @Published private(set) var episodeRatingsVisibility = "SHOW_ALL"
     /// Resolved full-screen trailer (from the Trailers row); drives a player cover with sound.
     @Published var trailerPlayback: TrailerPlaybackItem?
     /// Trailer currently resolving (spinner on its row card).
@@ -52,6 +57,7 @@ final class DetailViewModel: ObservableObject {
     private var libraryWatcher: FlowWatcher?
     private var progressWatcher: FlowWatcher?
     private var cwPrefsWatcher: FlowWatcher?
+    private var ratingsSettingsWatcher: FlowWatcher?
     // Latest shared-state emissions (the exported StateFlow interface has no `value` accessor,
     // so the watchers below capture what the series primary action needs).
     private var latestProgressEntries: [WatchProgressEntry] = []
@@ -144,6 +150,13 @@ final class DetailViewModel: ObservableObject {
         }
         refreshFlags()
 
+        MetaScreenSettingsRepository.shared.ensureLoaded()
+        ratingsSettingsWatcher = FlowWatcherKt.watch(MetaScreenSettingsRepository.shared.uiState) { [weak self] emitted in
+            guard let self, let state = emitted as? MetaScreenSettingsUiState else { return }
+            self.showOverallRatings = state.showOverallRatings
+            self.episodeRatingsVisibility = state.episodeRatingsVisibility.name
+        }
+
         MetaDetailsRepository.shared.load(type: type, id: id)
     }
 
@@ -153,6 +166,7 @@ final class DetailViewModel: ObservableObject {
         libraryWatcher?.cancel(); libraryWatcher = nil
         progressWatcher?.cancel(); progressWatcher = nil
         cwPrefsWatcher?.cancel(); cwPrefsWatcher = nil
+        ratingsSettingsWatcher?.cancel(); ratingsSettingsWatcher = nil
         trailerVideoURL = nil
         trailerVideoId = nil
         didRequestTrailer = false
@@ -462,6 +476,7 @@ final class DetailViewModel: ObservableObject {
         libraryWatcher?.cancel()
         progressWatcher?.cancel()
         cwPrefsWatcher?.cancel()
+        ratingsSettingsWatcher?.cancel()
     }
 }
 

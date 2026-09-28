@@ -22,6 +22,10 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var hideDiscover = false
     /// Upstream 7c1c6578: keep and show recent searches (per profile, this Apple TV; default on).
     @Published private(set) var recentSearchesEnabled = true
+    /// SET-2 / upstream 6fb46976b: rating visibility on detail pages (synced per profile).
+    @Published private(set) var showOverallRatings = true
+    /// `EpisodeRatingsVisibility.name`: "SHOW_ALL", "HIDE_EPISODES" or "HIDE_UNWATCHED_EPISODES".
+    @Published private(set) var episodeRatingsVisibility = "SHOW_ALL"
     /// TMDB enrichment (cast profiles, studios/networks, collections, artwork). Gated on a user key.
     @Published private(set) var tmdbEnabled = false
     @Published private(set) var tmdbHasKey = false
@@ -103,6 +107,7 @@ final class SettingsViewModel: ObservableObject {
     private var trackingSettingsWatcher: FlowWatcher?
     private var searchStateWatcher: FlowWatcher?
     private var searchHistoryWatcher: FlowWatcher?
+    private var metaScreenWatcher: FlowWatcher?
     private var enabledAddons: [ManagedAddon] = []
 
     func start() {
@@ -213,6 +218,13 @@ final class SettingsViewModel: ObservableObject {
             self.recentSearchesEnabled = enabled.boolValue
         }
 
+        MetaScreenSettingsRepository.shared.ensureLoaded()
+        metaScreenWatcher = FlowWatcherKt.watch(MetaScreenSettingsRepository.shared.uiState) { [weak self] emitted in
+            guard let self, let state = emitted as? MetaScreenSettingsUiState else { return }
+            self.showOverallRatings = state.showOverallRatings
+            self.episodeRatingsVisibility = state.episodeRatingsVisibility.name
+        }
+
         // "Home Rows blank" bug: Settings must not depend on Home/Search having mounted first to
         // hydrate the addon list. Without this call, entering Settings directly — post-wipe or
         // post-profile-switch, before Home ever ran its own `AddonRepository.initialize()` — left
@@ -233,6 +245,7 @@ final class SettingsViewModel: ObservableObject {
         trackingSettingsWatcher?.cancel(); trackingSettingsWatcher = nil
         searchStateWatcher?.cancel(); searchStateWatcher = nil
         searchHistoryWatcher?.cancel(); searchHistoryWatcher = nil
+        metaScreenWatcher?.cancel(); metaScreenWatcher = nil
     }
 
     // MARK: - Actions
@@ -427,6 +440,25 @@ final class SettingsViewModel: ObservableObject {
     /// saved list is kept and comes back when switched on again.
     func setRecentSearchesEnabled(_ enabled: Bool) {
         SearchHistoryRepository.shared.setEnabled(enabled: enabled)
+    }
+
+    // MARK: - Ratings visibility (SET-2 / upstream 6fb46976b)
+
+    /// Standard (add-on IMDb) and TMDB ratings on detail pages. MDBList scores follow the MDBList
+    /// switch in Content Sources.
+    func setShowOverallRatings(_ enabled: Bool) {
+        MetaScreenSettingsRepository.shared.setShowOverallRatings(enabled: enabled)
+    }
+
+    /// Keys are `EpisodeRatingsVisibility.name`.
+    func setEpisodeRatingsVisibility(_ key: String) {
+        let visibility: EpisodeRatingsVisibility
+        switch key {
+        case "HIDE_EPISODES": visibility = .hideEpisodes
+        case "HIDE_UNWATCHED_EPISODES": visibility = .hideUnwatchedEpisodes
+        default: visibility = .showAll
+        }
+        MetaScreenSettingsRepository.shared.setEpisodeRatingsVisibility(visibility: visibility)
     }
 
     /// Clearing the key also disables enrichment (handled inside the repo).
@@ -642,5 +674,6 @@ final class SettingsViewModel: ObservableObject {
         trackingSettingsWatcher?.cancel()
         searchStateWatcher?.cancel()
         searchHistoryWatcher?.cancel()
+        metaScreenWatcher?.cancel()
     }
 }

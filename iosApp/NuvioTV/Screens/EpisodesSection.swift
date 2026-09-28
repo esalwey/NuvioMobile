@@ -12,6 +12,9 @@ struct EpisodesSection: View {
     var episodeRatings: [String: Double] = [:]
     /// Episodes to badge as watched, keyed "season:episode" (from `DetailViewModel.watchedEpisodeKeys`).
     var watchedEpisodeKeys: Set<String> = []
+    /// SET-2: `EpisodeRatingsVisibility.name` — "HIDE_EPISODES" drops every rating badge,
+    /// "HIDE_UNWATCHED_EPISODES" keeps them only on watched episodes (no spoilers).
+    var episodeRatingsVisibility: String = "SHOW_ALL"
 
     @State private var selectedSeason: Int?
     @State private var episodeForStreams: EpisodeRoute?
@@ -260,6 +263,11 @@ struct EpisodesSection: View {
     }
 
     private func rating(for episode: MetaVideo) -> Double? {
+        switch episodeRatingsVisibility {
+        case "HIDE_EPISODES": return nil
+        case "HIDE_UNWATCHED_EPISODES": if !isWatched(episode) { return nil }
+        default: break
+        }
         guard let s = episode.season?.value, let e = episode.episode?.value else { return episode.rating?.doubleValue }
         return episodeRatings["\(s):\(e)"] ?? episode.rating?.doubleValue
     }

@@ -5117,6 +5117,16 @@
         }
       }
     },
+    "Choose which episode ratings are visible.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choisissez quelles notes d’épisode sont visibles."
+          }
+        }
+      }
+    },
     "Classic layout with the logo on the lower left": {},
     "Clear All Filters": {
       "localizations": {
@@ -8836,6 +8846,16 @@
         }
       }
     },
+    "Episode Ratings": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes des épisodes"
+          }
+        }
+      }
+    },
     "Episode thumbnails": {
       "localizations": {
         "de": {
@@ -10277,6 +10297,16 @@
         }
       }
     },
+    "Hide": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Masquer"
+          }
+        }
+      }
+    },
     "Hide Discover": {
       "localizations": {
         "de": {
@@ -10410,6 +10440,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ẩn tiêu đề"
+          }
+        }
+      }
+    },
+    "Hide Unwatched": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Masquer les non vus"
           }
         }
       }
@@ -16742,6 +16782,16 @@
         }
       }
     },
+    "Overall Ratings": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes générales"
+          }
+        }
+      }
+    },
     "PRIMARY": {
       "localizations": {
         "de": {
@@ -21031,6 +21081,16 @@
         }
       }
     },
+    "Show": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Afficher"
+          }
+        }
+      }
+    },
     "Show Add-on Logo": {
       "localizations": {
         "de": {
@@ -22638,6 +22698,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Gián đoạn"
+          }
+        }
+      }
+    },
+    "Standard and TMDB ratings are hidden. MDBList provider settings take priority on detail pages.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les notes standard et TMDB sont masquées. Sur les fiches, les réglages MDBList ont la priorité."
+          }
+        }
+      }
+    },
+    "Standard and TMDB ratings are shown.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les notes standard et TMDB sont affichées."
           }
         }
       }

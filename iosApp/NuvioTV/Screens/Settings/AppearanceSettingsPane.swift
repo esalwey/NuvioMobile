@@ -74,6 +74,12 @@ struct AppearanceSettingsPane: View {
         (90, String(localized: "90s")),
         (0, String(localized: "Always")),
     ]
+    /// SET-2 row options. Values are `EpisodeRatingsVisibility.name`.
+    private static let episodeRatingsOptions: [(value: String, label: String)] = [
+        ("SHOW_ALL", String(localized: "Show")),
+        ("HIDE_EPISODES", String(localized: "Hide")),
+        ("HIDE_UNWATCHED_EPISODES", String(localized: "Hide Unwatched")),
+    ]
     /// FEAT-30 row options. Values are the raw `sidebar_style` UserDefaults strings.
     private static let navigationOptions: [(value: String, label: String)] = [
         ("tabs", String(localized: "Top Tabs")),
@@ -269,6 +275,24 @@ struct AppearanceSettingsPane: View {
                 title: String(localized: "Icon-Only Detail Buttons"),
                 subtitle: String(localized: "Buttons show icons only"),
                 isOn: $detailActionIconsOnly
+            )
+        }
+
+        // SET-2 / upstream 6fb46976b. Synced per profile (meta-screen settings).
+        SettingsSection(String(localized: "Ratings")) {
+            SettingsToggleRow(
+                title: String(localized: "Overall Ratings"),
+                subtitle: model.showOverallRatings
+                    ? String(localized: "Standard and TMDB ratings are shown.")
+                    : String(localized: "Standard and TMDB ratings are hidden. MDBList provider settings take priority on detail pages."),
+                isOn: Binding(get: { model.showOverallRatings }, set: { model.setShowOverallRatings($0) })
+            )
+            SettingsPickerRow(
+                title: String(localized: "Episode Ratings"),
+                subtitle: String(localized: "Choose which episode ratings are visible."),
+                selection: Binding(get: { model.episodeRatingsVisibility }, set: { model.setEpisodeRatingsVisibility($0) }),
+                options: Self.episodeRatingsOptions.map(\.value),
+                label: { value in Self.episodeRatingsOptions.first { $0.value == value }?.label ?? value }
             )
         }
 
