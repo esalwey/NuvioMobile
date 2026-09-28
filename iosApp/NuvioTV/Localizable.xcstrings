@@ -71,7 +71,37 @@
         }
       }
     },
+    "%@ API key": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clé API %@"
+          }
+        }
+      }
+    },
+    "%@ didn't accept this key. Check it and try again.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ n’a pas accepté cette clé. Vérifiez-la et réessayez."
+          }
+        }
+      }
+    },
     "%@ f=%lld t=%lld y=%lld i=%lld r=%lld": {},
+    "%@ has no device sign-in here: paste the API key from your %@ account. It resolves the links of add-ons that hand them to %@.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ n’a pas de connexion par code ici : collez la clé API de votre compte %@. Elle résout les liens des addons qui les confient à %@."
+          }
+        }
+      }
+    },
     "%@ of the episode": {
       "localizations": {
         "fr": {
@@ -1590,6 +1620,16 @@
         }
       }
     },
+    "1080p Standard": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1080p standard"
+          }
+        }
+      }
+    },
     "120 s": {
       "localizations": {
         "de": {
@@ -2032,6 +2072,16 @@
         }
       }
     },
+    "4K / Remux": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "4K / Remux"
+          }
+        }
+      }
+    },
     "512 MB": {
       "localizations": {
         "de": {
@@ -2164,6 +2214,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "7"
+          }
+        }
+      }
+    },
+    "720p / Smaller": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "720p / plus petit"
           }
         }
       }
@@ -2308,6 +2368,16 @@
     "A rotating banner built from up to 2 of your catalogs, switching to the focused title as you browse": {},
     "A row under Continue Watching with your shows' next episodes airing in the next 14 days": {},
     "API key saved": {},
+    "AVC / x264": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AVC / x264"
+          }
+        }
+      }
+    },
     "About": {
       "localizations": {
         "fr": {
@@ -2751,6 +2821,16 @@
         }
       }
     },
+    "Add-on": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Addon"
+          }
+        }
+      }
+    },
     "Add-ons": {
       "localizations": {
         "de": {
@@ -2965,6 +3045,16 @@
         }
       }
     },
+    "All sources": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toutes les sources"
+          }
+        }
+      }
+    },
     "Always": {
       "localizations": {
         "de": {
@@ -3097,6 +3187,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tùy chọn ID anime"
+          }
+        }
+      }
+    },
+    "Any 1080p+": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "N’importe quel 1080p+"
+          }
+        }
+      }
+    },
+    "Any Source": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "N’importe quelle source"
           }
         }
       }
@@ -3939,6 +4049,16 @@
         }
       }
     },
+    "Backspace": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retour arrière"
+          }
+        }
+      }
+    },
     "Badge chips render above the stream name.": {
       "localizations": {
         "de": {
@@ -4251,6 +4371,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tốc độ bit"
+          }
+        }
+      }
+    },
+    "BluRay Quality": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Qualité BluRay"
           }
         }
       }
@@ -4912,6 +5042,16 @@
         }
       }
     },
+    "Checking the key…": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vérification de la clé…"
+          }
+        }
+      }
+    },
     "Checking…": {
       "localizations": {
         "de": {
@@ -5137,7 +5277,37 @@
         }
       }
     },
+    "Choose which catalogs Search looks through. Fewer sources means faster, more focused results. Applies to this profile, on this Apple TV only.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choisissez les catalogues consultés par la recherche. Moins de sources donne des résultats plus rapides et plus précis. S’applique à ce profil, sur cette Apple TV uniquement."
+          }
+        }
+      }
+    },
+    "Choose which episode ratings are visible.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choisissez quelles notes d’épisode sont visibles."
+          }
+        }
+      }
+    },
     "Classic layout with the logo on the lower left": {},
+    "Clear All": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tout effacer"
+          }
+        }
+      }
+    },
     "Clear All Filters": {
       "localizations": {
         "de": {
@@ -6328,6 +6498,16 @@
         }
       }
     },
+    "Couldn't load the manifest: %@": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Impossible de charger le manifeste : %@"
+          }
+        }
+      }
+    },
     "Couldn't load this catalog. Try another genre or catalog.": {
       "localizations": {
         "de": {
@@ -6363,6 +6543,16 @@
       }
     },
     "Couldn't load your add-ons.": {},
+    "Couldn't reach %@ to check this key. Check the connection and try again.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Impossible de joindre %@ pour vérifier cette clé. Vérifiez la connexion et réessayez."
+          }
+        }
+      }
+    },
     "Couldn't resolve a playback link.": {
       "localizations": {
         "de": {
@@ -6986,6 +7176,26 @@
         }
       }
     },
+    "Custom": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personnalisé"
+          }
+        }
+      }
+    },
+    "Custom pattern, e.g. 4K|2160p|Remux": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modèle personnalisé, p. ex. 4K|2160p|Remux"
+          }
+        }
+      }
+    },
     "Dates & Ratings": {
       "localizations": {
         "de": {
@@ -7220,6 +7430,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Trình phát mặc định"
+          }
+        }
+      }
+    },
+    "Delete": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Supprimer"
+          }
+        }
+      }
+    },
+    "Delete %@?": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Supprimer %@ ?"
           }
         }
       }
@@ -7972,6 +8202,16 @@
         }
       }
     },
+    "Dolby Atmos / DTS": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dolby Atmos / DTS"
+          }
+        }
+      }
+    },
     "Draw an outline around text for readability": {
       "localizations": {
         "de": {
@@ -8550,6 +8790,16 @@
         }
       }
     },
+    "Enabled plugins only": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plugins activés uniquement"
+          }
+        }
+      }
+    },
     "Engine": {
       "localizations": {
         "de": {
@@ -8852,6 +9102,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nhập URL backend do quản trị viên máy chủ của bạn cung cấp. Nuvio đọc /.well-known/nuvio trên máy chủ đó để khám phá cài đặt của nó."
+          }
+        }
+      }
+    },
+    "Episode Ratings": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes des épisodes"
           }
         }
       }
@@ -9338,6 +9598,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Đang tìm nguồn phát…"
+          }
+        }
+      }
+    },
+    "First Stream in Scope": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Premier stream du périmètre"
           }
         }
       }
@@ -10034,6 +10304,26 @@
         }
       }
     },
+    "HDR / Dolby Vision": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HDR / Dolby Vision"
+          }
+        }
+      }
+    },
+    "HEVC / x265": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HEVC / x265"
+          }
+        }
+      }
+    },
     "Half": {
       "localizations": {
         "de": {
@@ -10307,6 +10597,16 @@
         }
       }
     },
+    "Hide": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Masquer"
+          }
+        }
+      }
+    },
     "Hide Discover": {
       "localizations": {
         "de": {
@@ -10444,6 +10744,16 @@
         }
       }
     },
+    "Hide Unwatched": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Masquer les non vus"
+          }
+        }
+      }
+    },
     "Hide sound descriptions and speaker labels from text subtitles.": {
       "localizations": {
         "de": {
@@ -10542,6 +10852,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Giữ để quản lý hồ sơ"
+          }
+        }
+      }
+    },
+    "Hold to manage profile · Menu to go back": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maintenez pour gérer le profil · Menu pour revenir"
           }
         }
       }
@@ -11372,6 +11692,26 @@
         }
       }
     },
+    "Installed add-ons only": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Addons installés uniquement"
+          }
+        }
+      }
+    },
+    "Invalid regex pattern": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modèle regex invalide"
+          }
+        }
+      }
+    },
     "It was opened from a TMDB source and has no matching IMDb id, which is what stream addons need. Opening it from search or a different row usually works.": {},
     "Italian": {
       "localizations": {
@@ -11437,6 +11777,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Các danh mục và luồng của nó sẽ không còn hiển thị."
+          }
+        }
+      }
+    },
+    "Its library, watch progress and settings will be removed. This can’t be undone.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sa bibliothèque, sa progression de lecture et ses réglages seront supprimés. Cette action est irréversible."
           }
         }
       }
@@ -12438,6 +12788,16 @@
         }
       }
     },
+    "Managed by the main profile": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Géré par le profil principal"
+          }
+        }
+      }
+    },
     "Mark Unwatched": {
       "localizations": {
         "fr": {
@@ -12512,6 +12872,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Khớp tốc độ khung hình nội dung"
+          }
+        }
+      }
+    },
+    "Matches against stream name, title, description, add-on and URL: %@": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Correspond au nom du stream, à l’étiquette, à la description, à l’addon et à l’URL : %@"
           }
         }
       }
@@ -13455,6 +13825,36 @@
         }
       }
     },
+    "Next Episode Stream": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stream de l’épisode suivant"
+          }
+        }
+      }
+    },
+    "No CAM/TS": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sans CAM/TS"
+          }
+        }
+      }
+    },
+    "No REMUX/HDR": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sans REMUX/HDR"
+          }
+        }
+      }
+    },
     "No Upcoming row on Home": {},
     "No Zoom on Focus": {
       "localizations": {
@@ -13759,6 +14159,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Không có kết nối Internet"
+          }
+        }
+      }
+    },
+    "No pattern set: the first stream is picked.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aucun modèle défini : le premier stream est choisi."
           }
         }
       }
@@ -14173,6 +14583,16 @@
         }
       }
     },
+    "None": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aucun"
+          }
+        }
+      }
+    },
     "None of your addons provide streams for this title.": {},
     "Not available": {
       "localizations": {
@@ -14578,6 +14998,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "NuvioTV (Tích hợp)"
+          }
+        }
+      }
+    },
+    "OK": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OK"
           }
         }
       }
@@ -16860,6 +17290,16 @@
         }
       }
     },
+    "Overall Ratings": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes générales"
+          }
+        }
+      }
+    },
     "PRIMARY": {
       "localizations": {
         "de": {
@@ -18731,6 +19171,26 @@
         }
       }
     },
+    "Regex Match": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Correspondance regex"
+          }
+        }
+      }
+    },
+    "Regex Pattern": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modèle regex"
+          }
+        }
+      }
+    },
     "Region": {
       "localizations": {
         "de": {
@@ -20125,6 +20585,26 @@
         }
       }
     },
+    "Save Pattern": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enregistrer le modèle"
+          }
+        }
+      }
+    },
+    "Save recent searches and show them on the Search screen.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enregistrer les recherches récentes et les afficher dans l’écran Recherche."
+          }
+        }
+      }
+    },
     "Saved": {
       "localizations": {
         "de": {
@@ -21179,6 +21659,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Độ phản chiếu"
+          }
+        }
+      }
+    },
+    "Show": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Afficher"
           }
         }
       }
@@ -22590,6 +23080,16 @@
         }
       }
     },
+    "Source Scope": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Périmètre des sources"
+          }
+        }
+      }
+    },
     "Sources": {
       "localizations": {
         "de": {
@@ -22620,6 +23120,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nguồn"
+          }
+        }
+      }
+    },
+    "Space": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Espace"
           }
         }
       }
@@ -22790,6 +23300,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Gián đoạn"
+          }
+        }
+      }
+    },
+    "Standard and TMDB ratings are hidden. MDBList provider settings take priority on detail pages.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les notes standard et TMDB sont masquées. Sur les fiches, les réglages MDBList ont la priorité."
+          }
+        }
+      }
+    },
+    "Standard and TMDB ratings are shown.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les notes standard et TMDB sont affichées."
           }
         }
       }
@@ -23107,6 +23637,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Thông tin luồng"
+          }
+        }
+      }
+    },
+    "Stream Selection": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sélection du stream"
           }
         }
       }
@@ -24759,6 +25299,16 @@
     "The hero plays a muted trailer preview after a moment of focus on a poster": {},
     "The hero plays its trailer by itself, without waiting for focus": {},
     "The hero shows artwork only": {},
+    "The profile changed before this sign-in finished, so the key wasn't saved. Connect again on this profile.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le profil a changé avant la fin de la connexion : la clé n’a pas été enregistrée. Reconnectez-vous sur ce profil."
+          }
+        }
+      }
+    },
     "The provider returned an unplayable link.": {
       "localizations": {
         "de": {
@@ -25243,6 +25793,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Hồ sơ này đã bị khóa."
+          }
+        }
+      }
+    },
+    "This profile uses the add-ons of %@. To install, remove or turn off an add-on, switch to %@.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ce profil utilise les addons de %@. Pour installer, supprimer ou désactiver un addon, passez sur %@."
+          }
+        }
+      }
+    },
+    "This profile uses the main profile’s add-ons. To install, remove or turn off an add-on, switch to the main profile.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ce profil utilise les addons du profil principal. Pour installer, supprimer ou désactiver un addon, passez sur le profil principal."
           }
         }
       }
@@ -26770,6 +27340,36 @@
         }
       }
     },
+    "Up Next plays the first stream found from any source.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’épisode suivant lit le premier stream trouvé, toutes sources confondues."
+          }
+        }
+      }
+    },
+    "Up Next plays the first stream found within the source scope below.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’épisode suivant lit le premier stream trouvé dans le périmètre des sources ci-dessous."
+          }
+        }
+      }
+    },
+    "Up Next plays the first stream whose text matches your pattern.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’épisode suivant lit le premier stream dont le texte correspond à votre modèle."
+          }
+        }
+      }
+    },
     "Up Next": {
       "localizations": {
         "fr": {
@@ -27524,6 +28124,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Số lượt bình chọn"
+          }
+        }
+      }
+    },
+    "WEB Sources": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sources WEB"
           }
         }
       }
@@ -28351,6 +28961,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Z–A"
+          }
+        }
+      }
+    },
+    "add-on changes not applied (this profile uses the main profile’s add-ons)": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "modifications des addons non appliquées (ce profil utilise les addons du profil principal)"
           }
         }
       }

@@ -442,6 +442,14 @@ struct SettingsDestructiveRow: View {
 struct DebridKeyEntryRow: View {
     let providerName: String
     var placeholder: String?
+    /// DEB-2: false when the caller checks the key asynchronously before saving it — the typed key
+    /// then stays in the field (a rejected key can be corrected) and the row disappears on its own
+    /// once the key is saved.
+    var clearsOnSave: Bool = true
+    /// DEB-2: the key is being checked with the provider.
+    var isValidating: Bool = false
+    /// DEB-2: why the last key was not saved.
+    var errorMessage: String?
     let onSave: (String) -> Void
     @State private var key = ""
 
@@ -459,13 +467,29 @@ struct DebridKeyEntryRow: View {
             Button {
                 if !key.isEmpty {
                     onSave(key)
-                    key = ""
+                    if clearsOnSave { key = "" }
                 }
             } label: {
-                Label("Save Key", systemImage: "checkmark")
-                    .font(SettingsRowFont.subtitle)
+                if isValidating {
+                    HStack(spacing: Theme.Spacing.sm) {
+                        ProgressView()
+                        Text("Checking the key\u{2026}")
+                            .font(SettingsRowFont.subtitle)
+                    }
+                } else {
+                    Label("Save Key", systemImage: "checkmark")
+                        .font(SettingsRowFont.subtitle)
+                }
             }
+            // Not disabled while checking: disabling the focused row would throw focus elsewhere
+            // (see SimklSyncNowRow); the view model ignores a second press instead.
             .disabled(key.isEmpty)
+
+            if let errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(SettingsRowFont.subtitle)
+                    .foregroundStyle(.red)
+            }
         }
     }
 }

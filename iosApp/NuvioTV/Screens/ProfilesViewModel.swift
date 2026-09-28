@@ -21,6 +21,10 @@ final class ProfilesViewModel: ObservableObject {
     /// Fed by a watcher on `AuthRepository.state` (the exported StateFlow has no sync `.value`).
     @Published private(set) var isCloudAccount = false
 
+    /// The profile the app was last entered with (set by `select`). When "Who's watching?" is
+    /// opened from inside the app, picking this profile goes straight back (upstream 519510591).
+    @Published private(set) var sessionProfileIndex: Int32?
+
     private var watcher: FlowWatcher?
     private var avatarsWatcher: FlowWatcher?
     private var authWatcher: FlowWatcher?
@@ -70,7 +74,26 @@ final class ProfilesViewModel: ObservableObject {
         // Periodic activity polling (library + watch progress) for the session. Self-guarding the
         // same way; a profile switch re-targets the loop, sign-out cancels it via cancelAccountSync.
         SyncManager.shared.startPeriodicNuvioSyncPull(profileId: profile.profileIndex)
+        sessionProfileIndex = profile.profileIndex
         print("[ProfileSelect] full pull requested — tap complete")
+    }
+
+    /// Upstream 519510591 + 6761ebabb: back into the app on the profile it is already running —
+    /// no PIN, no repository fan-out, no cloud pull. Only the periodic activity poll, stopped when
+    /// the picker opened, is re-armed (it waits a full interval before its first pull).
+    func resumeSessionProfile() {
+        guard let index = sessionProfileIndex else { return }
+        print("[ProfileSelect] back to the running profile \(index) — no fan-out, no pull")
+        SyncManager.shared.startPeriodicNuvioSyncPull(profileId: index)
+    }
+
+    /// Whether the app is still running `sessionProfileIndex` and that profile still exists (a
+    /// deletion in the picker re-points the repository at another profile without a fan-out,
+    /// and then only a real selection may enter the app).
+    func canResumeSessionProfile() -> Bool {
+        guard let index = sessionProfileIndex else { return false }
+        return ProfileRepository.shared.activeProfileId == index
+            && profiles.contains(where: { $0.profileIndex == index })
     }
 
     func createProfile(

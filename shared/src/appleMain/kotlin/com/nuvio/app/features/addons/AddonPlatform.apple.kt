@@ -29,6 +29,7 @@ import platform.Foundation.NSUserDefaults
 actual object AddonStorage {
     private const val addonUrlsKey = "installed_manifest_urls"
     private const val addonEnabledStatesKey = "installed_manifest_enabled_states"
+    private const val addonListKnownKey = "installed_manifest_list_known"
 
     actual fun loadInstalledAddonUrls(profileId: Int): List<String> =
         NSUserDefaults.standardUserDefaults
@@ -38,6 +39,16 @@ actual object AddonStorage {
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .toList()
+
+    actual fun loadAddonListKnown(profileId: Int): Boolean? {
+        val defaults = NSUserDefaults.standardUserDefaults
+        val key = "${addonListKnownKey}_$profileId"
+        return if (defaults.objectForKey(key) != null) defaults.boolForKey(key) else null
+    }
+
+    actual fun saveAddonListKnown(profileId: Int, known: Boolean) {
+        NSUserDefaults.standardUserDefaults.setBool(known, forKey = "${addonListKnownKey}_$profileId")
+    }
 
     actual fun saveInstalledAddonUrls(profileId: Int, urls: List<String>) {
         NSUserDefaults.standardUserDefaults.setObject(

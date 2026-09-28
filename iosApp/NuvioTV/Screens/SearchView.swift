@@ -4,13 +4,20 @@ import SharedCore
 /// Search screen. Uses a plain `TextField` rather than `.searchable` — on tvOS `.searchable` inside a
 /// `TabView` leaves a persistent keyboard panel that bleeds over results and pushed screens. A
 /// `TextField` instead opens tvOS's self-contained full-screen keyboard which dismisses on commit,
-/// then shows results inline. Results push the detail screen via a normal NavigationLink.
+/// then shows results inline. Results push the detail screen onto this tab's navigation path.
+///
+/// SRC-1 (FEAT-37): under the field sits `SearchKeyboard`, an on-screen 10-foot keyboard that edits
+/// the query directly, so results appear while typing (debounced in `SearchViewModel`) instead of
+/// only after the full-screen keyboard is dismissed. A query is saved to Recent Searches when it is
+/// submitted from the system keyboard or when one of its results is opened — never per keystroke.
 ///
 /// While the query is empty the screen doubles as **Discover**: recent-search chips plus shared
 /// `SearchRepository.discoverUiState`-driven browsing (type → catalog → genre → paginated grid).
 struct SearchView: View {
     @StateObject private var model = SearchViewModel()
     @State private var query = ""
+    /// SRC-1: explicit so opening a result can record the query before pushing it.
+    @State private var path = NavigationPath()
     @Environment(\.posterStyle) private var posterStyle
 
     private var gridColumns: [GridItem] {
@@ -21,7 +28,7 @@ struct SearchView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ZStack {
                 Theme.Palette.background.ignoresSafeArea()
 
@@ -38,6 +45,10 @@ struct SearchView: View {
                         }
                         .padding(Theme.Spacing.lg)
                         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+
+                        // SRC-1: type-as-you-go keyboard (see the type comment).
+                        SearchKeyboard(text: $query)
+                            .focusSection()
 
                         if queryIsEmpty {
                             historyChips
@@ -84,6 +95,13 @@ struct SearchView: View {
         query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// SRC-1: typing no longer ends in a keyboard "submit", so a query goes to Recent Searches
+    /// when one of its results is actually opened.
+    private func openResult(_ item: MetaPreview) {
+        model.recordSearch(query)
+        path.append(TitleRoute(preview: item))
+    }
+
     // MARK: - Search results (query non-empty)
 
     @ViewBuilder
@@ -115,7 +133,7 @@ struct SearchView: View {
         }
 
         ForEach(model.sections, id: \.key) { section in
-            CatalogRowView(section: section)
+            CatalogRowView(section: section, onSelect: { item in openResult(item) })
         }
     }
 

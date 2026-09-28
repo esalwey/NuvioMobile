@@ -32,8 +32,13 @@ final class DebridViewModel: ObservableObject {
     /// `DebridCredentialHealth` (cache checks, resolves, and the pane-open revalidation below
     /// all record into it). Drives the "Session expired" row state.
     @Published private(set) var authFailedIds: Set<String> = []
+    /// DEB-2: provider whose manually entered key is being checked with the provider right now.
+    @Published private(set) var validatingKeyProviderId: String?
+    /// DEB-2: why the last manual key was not saved, per provider id.
+    @Published private(set) var keyErrors: [String: String] = [:]
 
-    /// UI-visible providers (Torbox, Premiumize — Real-Debrid is `visibleInUi = false` upstream).
+    /// UI-visible providers: Torbox, Premiumize, AllDebrid, and Real-Debrid — hidden upstream,
+    /// listed on tvOS through `DebridProviders.platformVisibleProviderIds` (DEB-1).
     let providers: [DebridProvider] = DebridProviders.shared.visible()
 
     private var settingsWatcher: FlowWatcher?
@@ -66,7 +71,10 @@ final class DebridViewModel: ObservableObject {
         healthWatcher?.cancel()
         healthWatcher = nil
         revalidatedThisVisit = []
-        cancelActivation()
+        // DEB-3: leaving the Settings tab no longer aborts a device sign-in in progress (the code
+        // is usually being typed on a phone at that moment). The poll keeps running — bounded by
+        // `pollDeadlineSeconds`, like Trakt's — and saves the token itself; this view model is a
+        // tab's @StateObject, so the pane shows the flow again when the tab comes back.
     }
 
     /// BUG-21 follow-up: probe every connected provider's stored credential against its whoami
@@ -117,10 +125,50 @@ final class DebridViewModel: ObservableObject {
         DebridSettingsRepository.shared.setPreferredResolverProviderId(providerId: providerId)
     }
 
+    /// Whether the provider signs in with a device code (else: API key only, e.g. Real-Debrid).
+    func supportsDeviceSignIn(_ provider: DebridProvider) -> Bool {
+        provider.authMethod.name == "DeviceCode"
+    }
+
+    /// DEB-2: a manually entered key is checked with the provider BEFORE it is saved — it used to be
+    /// saved as-is, so a typo read "Connected" until the pane was reopened. Rejected or
+    /// uncheckable keys are not saved; the entry row keeps the typed key so it can be corrected.
+    ///
+    /// Goes through `validateApiKeyChecked`, never `DebridProviderApi.validateApiKey`: the latter
+    /// has no `@Throws`, so an offline or timed-out check would abort the app instead of reaching
+    /// the `error` branch below.
     func saveManualKey(_ providerId: String, key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        DebridSettingsRepository.shared.setProviderApiKey(providerId: providerId, value: trimmed)
+        guard !trimmed.isEmpty, validatingKeyProviderId == nil else { return }
+        guard DebridProviderApis.shared.apiFor(providerId: providerId) != nil else {
+            storeManualKey(trimmed, for: providerId)
+            return
+        }
+        let name = DebridProviders.shared.displayName(id: providerId)
+        let owner = CredentialOwner.current
+        validatingKeyProviderId = providerId
+        keyErrors[providerId] = nil
+        DebridProviderApis.shared.validateApiKeyChecked(providerId: providerId, apiKey: trimmed) { [weak self] valid, error in
+            DispatchQueue.main.async {
+                guard let self, self.validatingKeyProviderId == providerId else { return }
+                self.validatingKeyProviderId = nil
+                // The check outlived a profile switch or sign-out: the key belongs to the profile it
+                // was typed on, not to whichever one is active now.
+                guard CredentialOwner.current == owner else { return }
+                if valid?.boolValue == true {
+                    self.storeManualKey(trimmed, for: providerId)
+                } else if error != nil {
+                    self.keyErrors[providerId] = String(localized: "Couldn't reach \(name) to check this key. Check the connection and try again.")
+                } else {
+                    self.keyErrors[providerId] = String(localized: "\(name) didn't accept this key. Check it and try again.")
+                }
+            }
+        }
+    }
+
+    private func storeManualKey(_ key: String, for providerId: String) {
+        keyErrors[providerId] = nil
+        DebridSettingsRepository.shared.setProviderApiKey(providerId: providerId, value: key)
         DebridSettingsRepository.shared.setEnabled(value: true)
     }
 
@@ -131,8 +179,12 @@ final class DebridViewModel: ObservableObject {
     // MARK: - Device-code authorization
 
     func connect(_ provider: DebridProvider) {
-        guard authProviderId == nil else { return }
-        guard let api = DebridProviderApis.shared.apiFor(providerId: provider.id) else {
+        // A second press while this provider's own flow is starting or waiting changes nothing.
+        if authProviderId == provider.id, authPhase == .starting || authPhase == .waiting { return }
+        // DEB-3: a flow left waiting or failed on ANOTHER provider no longer swallows this press —
+        // connecting a different provider replaces it.
+        if authProviderId != nil { cancelActivation() }
+        guard DebridProviderApis.shared.apiFor(providerId: provider.id) != nil else {
             authProviderId = provider.id
             authPhase = .failed(String(localized: "Device sign-in isn't available for \(provider.displayName). Use manual API key entry below."))
             return
@@ -140,8 +192,11 @@ final class DebridViewModel: ObservableObject {
         authProviderId = provider.id
         authPhase = .starting
         activeSession = nil
+        let owner = CredentialOwner.current
 
-        api.startDeviceAuthorization(appName: "Nuvio") { [weak self] session, error in
+        // `...Checked`: a thrown start (offline, or Premiumize without a client id) reaches `error`
+        // below instead of aborting the app.
+        DebridProviderApis.shared.startDeviceAuthorizationChecked(providerId: provider.id, appName: "Nuvio") { [weak self] session, error in
             DispatchQueue.main.async {
                 guard let self, self.authProviderId == provider.id else { return }
                 guard let session else {
@@ -155,7 +210,7 @@ final class DebridViewModel: ObservableObject {
                 }
                 self.activeSession = session
                 self.authPhase = .waiting
-                self.beginPolling(session: session, providerId: provider.id)
+                self.beginPolling(session: session, providerId: provider.id, owner: owner)
             }
         }
     }
@@ -175,7 +230,22 @@ final class DebridViewModel: ObservableObject {
         case failed(String?)
     }
 
-    private func beginPolling(session: DebridDeviceAuthorization, providerId: String) {
+    /// The account and profile a key check or device sign-in was started for. Both can now finish
+    /// after the user has left the pane (DEB-3) — and so after a profile switch or a sign-out — and
+    /// a key is only ever saved into the profile it was entered on.
+    private struct CredentialOwner: Equatable {
+        let profileId: Int32
+        let userId: String?
+
+        static var current: CredentialOwner {
+            CredentialOwner(
+                profileId: ProfileRepository.shared.activeProfileId,
+                userId: (AuthRepository.shared.state.value_ as? AuthStateAuthenticated)?.userId
+            )
+        }
+    }
+
+    private func beginPolling(session: DebridDeviceAuthorization, providerId: String, owner: CredentialOwner) {
         pollTask?.cancel()
         let intervalSeconds = max(Int(session.intervalSeconds), 1)
         pollTask = Task { [weak self] in
@@ -188,6 +258,15 @@ final class DebridViewModel: ObservableObject {
 
                 switch outcome {
                 case .authorized(let token):
+                    // DEB-3 follow-up: the poll now outlives the Settings tab, so the approval can
+                    // land after a profile switch or sign-out. The token belongs to the profile
+                    // that started the sign-in; never write it into another one.
+                    guard CredentialOwner.current == owner else {
+                        self.cancelActivation()
+                        self.authProviderId = providerId
+                        self.authPhase = .failed(String(localized: "The profile changed before this sign-in finished, so the key wasn't saved. Connect again on this profile."))
+                        return
+                    }
                     DebridSettingsRepository.shared.setProviderApiKey(providerId: providerId, value: token)
                     DebridSettingsRepository.shared.setEnabled(value: true)
                     self.cancelActivation()
@@ -213,13 +292,14 @@ final class DebridViewModel: ObservableObject {
 
     /// One redeem attempt. A completion error (thrown Kotlin exception → NSError) is treated as
     /// Pending — mobile-parity: transient connectivity mid-approval shouldn't kill the flow; the
-    /// poll deadline bounds persistent failure.
+    /// poll deadline bounds persistent failure. `...Checked` is what makes that error reach this
+    /// completion: the unchecked interface method aborted the app on a throw.
     private func redeem(providerId: String, deviceCode: String) async -> RedeemOutcome {
-        guard let api = DebridProviderApis.shared.apiFor(providerId: providerId) else {
+        guard DebridProviderApis.shared.apiFor(providerId: providerId) != nil else {
             return .failed(nil)
         }
         return await withCheckedContinuation { continuation in
-            api.redeemDeviceAuthorization(deviceCode: deviceCode) { result, _ in
+            DebridProviderApis.shared.redeemDeviceAuthorizationChecked(providerId: providerId, deviceCode: deviceCode) { result, _ in
                 let outcome: RedeemOutcome
                 if let authorized = result as? DebridDeviceAuthorizationTokenResultAuthorized {
                     outcome = .authorized(authorized.accessToken)

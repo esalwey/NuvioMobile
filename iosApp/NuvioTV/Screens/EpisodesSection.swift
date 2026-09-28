@@ -19,6 +19,11 @@ struct EpisodesSection: View {
     /// that season, scrolled to that episode, and follows it until the viewer reaches the shelf.
     var preferredSeason: Int? = nil
     var preferredEpisode: Int? = nil
+    /// SET-2: `EpisodeRatingsVisibility.name` — "HIDE_EPISODES" drops every rating badge,
+    /// "HIDE_UNWATCHED_EPISODES" keeps them only on watched episodes (no spoilers).
+    var episodeRatingsVisibility: String = "SHOW_ALL"
+    /// SET-2: Settings → Appearance → Ratings → Overall Ratings (the player's Info-tab rating chip).
+    var showOverallRatings: Bool = true
     /// EP-2: mark / unmark one episode (long press → context menu). nil = no menu.
     var onToggleWatched: ((MetaVideo) -> Void)? = nil
 
@@ -185,7 +190,7 @@ struct EpisodesSection: View {
                 poster: route.meta.poster,
                 episodeStill: route.episodeStill,
                 synopsis: route.synopsis,
-                meta: PlaybackMeta(details: route.meta),
+                meta: playbackMeta(for: route.meta),
                 // CW-1: progress is filed under the series, with the episode's own name beside it.
                 seriesTitle: route.meta.name,
                 episodeTitle: route.episode.title,
@@ -193,6 +198,13 @@ struct EpisodesSection: View {
                 logo: route.meta.logo
             )
         }
+    }
+
+    /// SET-2: with Overall Ratings off the player's Info tab shows no rating chip either.
+    private func playbackMeta(for details: MetaDetails) -> PlaybackMeta {
+        var meta = PlaybackMeta(details: details)
+        if !showOverallRatings { meta.imdbRating = nil }
+        return meta
     }
 
     /// Fixed-height synopsis for the focused episode (falls back to the episode the shelf rests on
@@ -319,6 +331,11 @@ struct EpisodesSection: View {
     }
 
     private func rating(for episode: MetaVideo) -> Double? {
+        switch episodeRatingsVisibility {
+        case "HIDE_EPISODES": return nil
+        case "HIDE_UNWATCHED_EPISODES": if !isWatched(episode) { return nil }
+        default: break
+        }
         guard let s = episode.season?.value, let e = episode.episode?.value else { return episode.rating?.doubleValue }
         return episodeRatings["\(s):\(e)"] ?? episode.rating?.doubleValue
     }

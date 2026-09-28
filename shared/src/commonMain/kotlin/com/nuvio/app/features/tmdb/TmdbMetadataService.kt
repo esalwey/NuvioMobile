@@ -706,7 +706,7 @@ object TmdbMetadataService {
         val franchiseLevelMatch = isFranchiseLevelTmdbMatch(metaId = meta.id, fallbackItemId = fallbackItemId)
 
         val needsEpisodes = !franchiseLevelMatch && (
-            settings.useEpisodes || settings.useReleaseDates || settings.useSeasonPosters
+            settings.useEpisodes || settings.useSeasonPosters
         ) && tmdbType == "tv"
         val (enrichment, episodeMap) = coroutineScope {
             val enrichmentDeferred = async {
@@ -881,20 +881,6 @@ object TmdbMetadataService {
             )
         }
 
-        if (enrichment != null && settings.useReleaseDates) {
-            updated = if (franchiseLevelMatch) {
-                updated.copy(
-                    releaseInfo = updated.releaseInfo ?: enrichment.releaseInfo,
-                    lastAirDate = updated.lastAirDate ?: enrichment.lastAirDate,
-                )
-            } else {
-                updated.copy(
-                    releaseInfo = enrichment.releaseInfo ?: updated.releaseInfo,
-                    lastAirDate = enrichment.lastAirDate ?: updated.lastAirDate,
-                )
-            }
-        }
-
         if (enrichment != null && settings.useCredits) {
             updated = updated.copy(
                 director = enrichment.director.ifEmpty { updated.director },
@@ -932,11 +918,8 @@ object TmdbMetadataService {
                             } else {
                                 video.overview
                             },
-                            released = if (settings.useReleaseDates) {
-                                enrichmentForEpisode.airDate ?: video.released
-                            } else {
-                                video.released
-                            },
+                            // Upstream 3555bd07b: episode dates always come from the add-on.
+                            released = video.released,
                             thumbnail = if (settings.useEpisodes) {
                                 enrichmentForEpisode.thumbnail ?: video.thumbnail
                             } else {

@@ -124,6 +124,9 @@ object AccountDataStores {
                 AppleKeySpec.ProfileIndexed("installed_manifest_urls_"),
                 // Written by saveAddonEnabledStates; covered by NO existing cleaner.
                 AppleKeySpec.ProfileIndexed("installed_manifest_enabled_states_"),
+                // ADD-1 saveAddonListKnown: left alive, the next account's same-numbered profile
+                // would inherit "list known" and never get the default add-on.
+                AppleKeySpec.ProfileIndexed("installed_manifest_list_known_"),
             ),
         ),
         AccountDataStore(
@@ -225,7 +228,20 @@ object AccountDataStores {
         AccountDataStore(
             name = "SearchHistoryStorage",
             androidPreferences = "nuvio_search_history",
-            appleKeys = listOf(AppleKeySpec.ProfileScoped("search_history_payload")),
+            appleKeys = listOf(
+                AppleKeySpec.ProfileScoped("search_history_payload"),
+                AppleKeySpec.ProfileScoped("recent_searches_enabled"),
+            ),
+        ),
+        AccountDataStore(
+            // tvOS Swift store (SearchViewModel.SearchSourceSettings): per profile since SRC-2; the
+            // Plain key is the older device-wide choice every profile starts from.
+            name = "SearchSourceSettings (tvOS)",
+            androidPreferences = null,
+            appleKeys = listOf(
+                AppleKeySpec.ProfileScoped("search_disabled_catalog_keys"),
+                AppleKeySpec.Plain("search_disabled_catalog_keys"),
+            ),
         ),
         AccountDataStore(
             name = "DiscoverSelectionStorage",
@@ -479,6 +495,7 @@ object AccountDataStores {
                 AppleKeySpec.ProfileScoped("tmdb_use_artwork"),
                 AppleKeySpec.ProfileScoped("tmdb_use_basic_info"),
                 AppleKeySpec.ProfileScoped("tmdb_use_details"),
+                // Setting removed (upstream 3555bd07b); kept so a value stored by an older build is still wiped.
                 AppleKeySpec.ProfileScoped("tmdb_use_release_dates"),
                 AppleKeySpec.ProfileScoped("tmdb_use_credits"),
                 AppleKeySpec.ProfileScoped("tmdb_use_productions"),

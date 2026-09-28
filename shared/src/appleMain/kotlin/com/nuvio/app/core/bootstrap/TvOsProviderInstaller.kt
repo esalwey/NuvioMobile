@@ -24,6 +24,7 @@ import com.nuvio.app.features.collection.CollectionMobileSettingsRepository
 import com.nuvio.app.features.collection.CollectionRepository
 import com.nuvio.app.features.collection.CollectionSyncService
 import com.nuvio.app.features.collection.FolderDetailRepository
+import com.nuvio.app.features.debrid.DebridProviders
 import com.nuvio.app.features.debrid.DebridSettingsRepository
 import com.nuvio.app.features.details.MetaDetailsRepository
 import com.nuvio.app.features.details.MetaScreenSettingsRepository
@@ -129,6 +130,10 @@ fun installTvOsSharedProviders() {
     // migration seed if "tvos" has no blob yet, and never written.
     SyncPlatformProvider.platform = TVOS_SYNC_PLATFORM
     SyncPlatformProvider.legacySettingsPlatforms = listOf(TV_SYNC_PLATFORM)
+
+    // DEB-1: list Real-Debrid (API key; no device sign-in) and resolve its add-on links, instead of
+    // ignoring an RD key synced from another device. See DebridProviders.platformVisibleProviderIds.
+    DebridProviders.platformVisibleProviderIds = setOf(DebridProviders.REAL_DEBRID_ID)
 
     // Theme persistence: the shared default ThemeSettingsStore is a no-op (theme would reset every
     // launch). The tvOS adapter persists to NSUserDefaults (profile-scoped keys) and defaults to
@@ -421,6 +426,10 @@ private object TvOsProfileLifecycleCoordinator : ProfileLifecycleCoordinator {
         // out of its adapter) — without this a guest profile switch (no cloud pull) would keep
         // the previous profile's keys in memory.
         step("debridSettings") { DebridSettingsRepository.onProfileChanged() }
+        // Upstream 1854dfc3 (profile-switch race): LAST, once every repository above has reloaded
+        // the new profile — re-baselines the settings-blob observer and the provider-credential
+        // sync so this reload is not mistaken for a local edit and pushed over the new profile.
+        step("profileSettingsSync") { ProfileSettingsSync.onProfileChanged() }
         log.i { "Profile-select fan-out complete for profile $profileIndex" }
     }
 

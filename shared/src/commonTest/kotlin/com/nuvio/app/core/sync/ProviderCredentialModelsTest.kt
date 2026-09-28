@@ -73,7 +73,53 @@ class ProviderCredentialModelsTest {
         val merged = local.mergeRemote(remote)
 
         assertEquals("remote-torbox", merged.values[0].value)
-        assertEquals("local-anime", merged.values[1].value)
+        // Upstream 1854dfc3: no remote row = cleared elsewhere, so the cached value goes too.
+        assertEquals("", merged.values[1].value)
+    }
+
+    @Test
+    fun `missing remote provider clears its cached credential`() {
+        val local = ProviderCredentialSnapshot(
+            profileId = 1,
+            values = listOf(
+                ProviderCredentialValue("debrid:torbox", "api_key", "local-torbox"),
+                ProviderCredentialValue("animeskip", "client_id", "local-anime"),
+            ),
+        )
+        val remote = listOf(
+            SupabaseProviderCredential("DEBRID:TORBOX", buildJsonObject { put("api_key", "remote") }),
+        )
+
+        assertEquals(listOf("remote", ""), local.mergeRemote(remote).values.map { it.value })
+    }
+
+    @Test
+    fun `empty remote snapshot clears all cached credentials`() {
+        val local = ProviderCredentialSnapshot(
+            profileId = 1,
+            values = listOf(
+                ProviderCredentialValue("debrid:torbox", "api_key", "local-torbox"),
+                ProviderCredentialValue("animeskip", "client_id", "local-anime"),
+            ),
+        )
+
+        assertEquals(listOf("", ""), local.mergeRemote(emptyList()).values.map { it.value })
+    }
+
+    // Fork: a provider the backend refuses can never have a row, so its local key must survive.
+    @Test
+    fun `device-local provider keeps its key without a remote row`() {
+        val local = ProviderCredentialSnapshot(
+            profileId = 1,
+            values = listOf(
+                ProviderCredentialValue("debrid:alldebrid", "api_key", "local-alldebrid"),
+                ProviderCredentialValue("mdblist", "api_key", "local-mdblist"),
+            ),
+        )
+
+        val merged = local.mergeRemote(emptyList(), deviceLocalProviders = setOf("debrid:alldebrid"))
+
+        assertEquals(listOf("local-alldebrid", ""), merged.values.map { it.value })
     }
 
     @Test

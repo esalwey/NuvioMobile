@@ -525,6 +525,8 @@ struct DetailView: View {
                             episodeProgress: model.episodeProgress,
                             preferredSeason: model.seriesAction?.seasonNumber?.value,
                             preferredEpisode: model.seriesAction?.episodeNumber?.value,
+                            episodeRatingsVisibility: model.episodeRatingsVisibility,
+                            showOverallRatings: model.showOverallRatings,
                             onToggleWatched: { model.toggleEpisodeWatched($0) }
                         )
                         // A discrete focus region: vertical D-pad moves must land here instead of
@@ -1311,10 +1313,12 @@ struct DetailView: View {
 
     /// Title facts handed to the player for its Info tab chips (same sources as `metaLine`).
     private var playbackMeta: PlaybackMeta {
-        PlaybackMeta(
+        let rating: String? = model.meta?.imdbRating ?? preview.imdbRating
+        return PlaybackMeta(
             year: { let s: String? = model.meta?.releaseInfo ?? preview.releaseInfo; return (s ?? "").isEmpty ? nil : s }(),
             runtime: { let s: String? = model.meta?.runtime; return (s ?? "").isEmpty ? nil : s }(),
-            imdbRating: { let s: String? = model.meta?.imdbRating ?? preview.imdbRating; return (s ?? "").isEmpty ? nil : s }(),
+            // SET-2: Overall Ratings off also keeps the rating chip out of the player's Info tab.
+            imdbRating: model.showOverallRatings && !(rating ?? "").isEmpty ? rating : nil,
             ageRating: { let s: String? = model.meta?.ageRating; return (s ?? "").isEmpty ? nil : s }(),
             genres: genres
         )
@@ -1328,7 +1332,8 @@ struct DetailView: View {
             if let runtime = model.meta?.runtime, !runtime.isEmpty {
                 metaChip { Text(runtime) }
             }
-            if let rating = model.meta?.imdbRating ?? preview.imdbRating, !rating.isEmpty {
+            // SET-2: Settings → Appearance → Ratings → Overall Ratings.
+            if model.showOverallRatings, let rating = model.meta?.imdbRating ?? preview.imdbRating, !rating.isEmpty {
                 metaChip {
                     HStack(spacing: Theme.Spacing.xs - 2) {
                         Image(systemName: "star.fill").foregroundStyle(Theme.Palette.star)

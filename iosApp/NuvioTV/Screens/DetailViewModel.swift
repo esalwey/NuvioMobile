@@ -42,6 +42,11 @@ final class DetailViewModel: ObservableObject {
     @Published private(set) var isPlaybackAvailable = true
     /// IMDb parental-guide severities (empty when the title has no tt-id or no guide data).
     @Published private(set) var parentalWarnings: [ParentalWarning] = []
+    /// SET-2 / upstream 6fb46976b (Settings → Appearance → Ratings, synced per profile): whether the
+    /// meta line shows the title's IMDb rating, and which episode badges carry a rating —
+    /// `EpisodeRatingsVisibility.name` ("SHOW_ALL" / "HIDE_EPISODES" / "HIDE_UNWATCHED_EPISODES").
+    @Published private(set) var showOverallRatings = true
+    @Published private(set) var episodeRatingsVisibility = "SHOW_ALL"
     /// Resolved full-screen trailer (from the Trailers row); drives a player cover with sound.
     @Published var trailerPlayback: TrailerPlaybackItem?
     /// Trailer currently resolving (spinner on its row card).
@@ -67,6 +72,7 @@ final class DetailViewModel: ObservableObject {
     private var watchedToggleInFlight = false
     private var progressWatcher: FlowWatcher?
     private var cwPrefsWatcher: FlowWatcher?
+    private var ratingsSettingsWatcher: FlowWatcher?
     // Latest shared-state emissions (the exported StateFlow interface has no `value` accessor,
     // so the watchers below capture what the series primary action needs).
     private var latestProgressEntries: [WatchProgressEntry] = []
@@ -128,6 +134,14 @@ final class DetailViewModel: ObservableObject {
     func start() {
         guard detailWatcher == nil else { return }
         Self.currentOwner = ownerToken
+
+        // SET-2: the rating settings are read BEFORE the detail watcher can deliver a meta, so a
+        // title opened with episode ratings hidden never fetches them (the watcher below takes over).
+        MetaScreenSettingsRepository.shared.ensureLoaded()
+        if let state = MetaScreenSettingsRepository.shared.uiState.value_ as? MetaScreenSettingsUiState {
+            showOverallRatings = state.showOverallRatings
+            episodeRatingsVisibility = state.episodeRatingsVisibility.name
+        }
 
         detailWatcher = FlowWatcherKt.watch(MetaDetailsRepository.shared.uiState) { [weak self] emitted in
             guard let self, let state = emitted as? MetaDetailsUiState else { return }
@@ -199,6 +213,14 @@ final class DetailViewModel: ObservableObject {
         }
         refreshFlags()
 
+        ratingsSettingsWatcher = FlowWatcherKt.watch(MetaScreenSettingsRepository.shared.uiState) { [weak self] emitted in
+            guard let self, let state = emitted as? MetaScreenSettingsUiState else { return }
+            self.showOverallRatings = state.showOverallRatings
+            self.episodeRatingsVisibility = state.episodeRatingsVisibility.name
+            // Episode ratings shown again after the title loaded with them hidden: fetch them now.
+            if let m = self.meta { self.fetchEpisodeRatingsIfNeeded(m) }
+        }
+
         MetaDetailsRepository.shared.load(type: type, id: id)
     }
 
@@ -211,6 +233,7 @@ final class DetailViewModel: ObservableObject {
         pluginsWatcher?.cancel(); pluginsWatcher = nil
         progressWatcher?.cancel(); progressWatcher = nil
         cwPrefsWatcher?.cancel(); cwPrefsWatcher = nil
+        ratingsSettingsWatcher?.cancel(); ratingsSettingsWatcher = nil
         episodeProgressRequestedFor = nil
         lastReconcileSignature = nil
         trailerVideoURL = nil
@@ -400,7 +423,10 @@ final class DetailViewModel: ObservableObject {
     /// Once per series: per-episode IMDb ratings from api.imdbapi.dev (keyless), keyed
     /// "season:episode" for the episode list to badge. Movies and titles without a tt/tmdb id skip.
     private func fetchEpisodeRatingsIfNeeded(_ meta: MetaDetails) {
-        guard !didRequestRatings, EpisodesSection.isSeriesLike(meta) else { return }
+        // SET-2 (upstream 6fb46976b): no request while episode ratings are hidden; the settings
+        // watcher calls back in here once they are shown again.
+        guard !didRequestRatings, episodeRatingsVisibility != "HIDE_EPISODES",
+              EpisodesSection.isSeriesLike(meta) else { return }
         // Upstream 90054b7b9: the addon's own `imdb_id` rates kitsu/mal/custom-id titles.
         let addonImdbId: String? = meta.imdbId
         let imdbId = ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: meta.id)
@@ -690,6 +716,7 @@ final class DetailViewModel: ObservableObject {
         pluginsWatcher?.cancel()
         progressWatcher?.cancel()
         cwPrefsWatcher?.cancel()
+        ratingsSettingsWatcher?.cancel()
     }
 }
 

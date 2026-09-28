@@ -745,7 +745,11 @@ final class HomeViewModel: ObservableObject {
             let settled = (emitted as? KotlinBoolean)?.boolValue == true
             guard settled else { return }
             guard let state = AddonRepository.shared.uiState.value_ as? AddonsUiState, state.addons.isEmpty else { return }
+            let seedWasSettled = self.seedFailed
             self.maybeSeedDefaultAddon()
+            // ADD-1: a declined seed (see maybeSeedDefaultAddon) triggers no add-on emission of its
+            // own, so re-run the bootstrap decision here, as the failed-seed completion does.
+            if !seedWasSettled, self.seedFailed { self.onAddonsChanged(state) }
         }
 
         // Watch progress → Continue Watching row.
@@ -1174,7 +1178,14 @@ final class HomeViewModel: ObservableObject {
     /// `serverPullSettled` watcher below re-attempting once the pull lands on a still-empty list.
     private func maybeSeedDefaultAddon() {
         guard !didSeed else { return }
-        guard AddonRepository.shared.seedingAllowed() else { return }
+        guard AddonRepository.shared.seedingAllowed() else {
+            // ADD-1 (upstream 1854dfc3 follow-up): a signed-in account whose add-on list this Apple
+            // TV already knew is never re-seeded — an empty list there is the user's own deletion,
+            // and the seed's push would bring Cinemeta back on every device. Settle the seed the
+            // way a failed one does, so the rows gate opens instead of waiting for it.
+            if !seedFailed, AddonRepository.shared.defaultSeedDeclined() { seedFailed = true }
+            return
+        }
         didSeed = true
         seedAttempt += 1
         let attempt = seedAttempt

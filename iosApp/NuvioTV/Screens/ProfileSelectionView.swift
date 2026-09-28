@@ -42,9 +42,15 @@ struct ProfileAvatar: View {
 struct ProfileSelectionView: View {
     @ObservedObject var model: ProfilesViewModel
     var onSelected: () -> Void
+    /// Upstream 519510591 + 6761ebabb: set when the picker was opened from inside the app
+    /// ("Switch Profile") rather than as the launch gate. Picking the profile the app is already
+    /// running then goes straight back — no PIN, no fan-out, no cloud pull — and so does Menu.
+    var onReturnToApp: (() -> Void)? = nil
 
     @State private var editing: ProfileEditTarget?
     @State private var pinPrompt: PinPrompt?
+    /// PRF-1: profile awaiting the delete confirmation alert.
+    @State private var profilePendingDeletion: NuvioProfile?
 
     /// Anchors `.prefersDefaultFocus` so initial D-pad focus lands on the user's own (first)
     /// profile tile instead of the Add-profile tile, regardless of layout order.
@@ -80,7 +86,11 @@ struct ProfileSelectionView: View {
                 HStack(alignment: .top, spacing: Theme.Spacing.xl) {
                         ForEach(model.profiles, id: \.profileIndex) { profile in
                             Button {
-                                requirePin(for: profile, action: .select)
+                                if let back = returnToApp, profile.profileIndex == model.sessionProfileIndex {
+                                    back()
+                                } else {
+                                    requirePin(for: profile, action: .select)
+                                }
                             } label: {
                                 profileTile(name: profile.name, isPrimary: profile.profileIndex == 1) {
                                     ZStack(alignment: .bottomTrailing) {
@@ -112,7 +122,9 @@ struct ProfileSelectionView: View {
                                 Button {
                                     requirePin(for: profile, action: .edit)
                                 } label: { Label("Edit Profile", systemImage: "pencil") }
-                                if model.profiles.count > 1 {
+                                // PRF-1: never the primary profile (upstream shows Delete only
+                                // above index 1), and always behind a confirmation.
+                                if Self.canDelete(profile, among: model.profiles) {
                                     Button(role: .destructive) {
                                         requirePin(for: profile, action: .delete)
                                     } label: { Label("Delete Profile", systemImage: "trash") }
@@ -143,7 +155,7 @@ struct ProfileSelectionView: View {
                     .focusSection()
                     .focusScope(defaultFocusNamespace)
 
-                Text("Hold to manage profile")
+                Text(returnToApp == nil ? String(localized: "Hold to manage profile") : String(localized: "Hold to manage profile \u{00B7} Menu to go back"))
                     .font(Theme.Font.caption)
                     .foregroundStyle(Theme.Palette.textSecondary)
                     .padding(.horizontal, Theme.Spacing.lg)
@@ -152,6 +164,24 @@ struct ProfileSelectionView: View {
             }
         }
         .onAppear { model.start() }
+        // Switch mode only: Menu returns to the running profile (6761ebabb's back button). Nil —
+        // the launch gate, or the running profile was just deleted — keeps the system default.
+        .onExitCommand(perform: returnToApp)
+        .alert(
+            "Delete \(profilePendingDeletion?.name ?? "")?",
+            isPresented: Binding(
+                get: { profilePendingDeletion != nil },
+                set: { if !$0 { profilePendingDeletion = nil } }
+            )
+        ) {
+            Button("Delete", role: .destructive) {
+                if let profile = profilePendingDeletion { model.deleteProfile(profile) }
+                profilePendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its library, watch progress and settings will be removed. This can\u{2019}t be undone.")
+        }
         .onChange(of: model.profiles.count) { oldCount, newCount in
             // One-shot: profiles land after initial focus may have already settled on Add, so
             // nudge focus onto the first real profile the moment they arrive (empty → non-empty).
@@ -174,7 +204,7 @@ struct ProfileSelectionView: View {
                     model.verifyPin(prompt.profile, pin: pin) { result in
                         if result?.unlocked == true {
                             pinPrompt = nil
-                            perform(prompt.action, on: prompt.profile)
+                            perform(prompt.action, on: prompt.profile, afterPinCover: true)
                         } else {
                             done(pinErrorMessage(result))
                         }
@@ -201,7 +231,7 @@ struct ProfileSelectionView: View {
         }
     }
 
-    private func perform(_ action: PinPrompt.Action, on profile: NuvioProfile) {
+    private func perform(_ action: PinPrompt.Action, on profile: NuvioProfile, afterPinCover: Bool = false) {
         switch action {
         case .select:
             model.select(profile)
@@ -209,8 +239,25 @@ struct ProfileSelectionView: View {
         case .edit:
             editing = ProfileEditTarget(profile: profile)
         case .delete:
-            model.deleteProfile(profile)
+            // PRF-1: confirm before deleting. Straight after the PIN cover, wait for it to finish
+            // going away — an alert requested while a full-screen cover is dismissing is dropped.
+            if afterPinCover {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { profilePendingDeletion = profile }
+            } else {
+                profilePendingDeletion = profile
+            }
         }
+    }
+
+    /// Switch mode's way back, offered only while the app still runs a profile that exists.
+    private var returnToApp: (() -> Void)? {
+        guard let onReturnToApp, model.canResumeSessionProfile() else { return nil }
+        return onReturnToApp
+    }
+
+    /// PRF-1: the primary profile (index 1) is never deletable, nor the last remaining profile.
+    static func canDelete(_ profile: NuvioProfile, among profiles: [NuvioProfile]) -> Bool {
+        profile.profileIndex > 1 && profiles.count > 1
     }
 
     private func profileTile<Content: View>(
@@ -287,6 +334,8 @@ struct ProfileEditView: View {
     @State private var colorHex: String
     @State private var avatarId: String?
     @State private var pinFlow: PinFlow?
+    /// PRF-1: drives the delete confirmation.
+    @State private var confirmingDelete = false
 
     /// A custom avatar URL set elsewhere (e.g. on mobile); preserved unless a catalog avatar or
     /// the color tile is picked here.
@@ -466,9 +515,9 @@ struct ProfileEditView: View {
                     .tint(Theme.Palette.accent)
                     .disabled(model.isBusy)
 
-                    if let profile = target.profile, model.profiles.count > 1 {
+                    if let profile = target.profile, ProfileSelectionView.canDelete(profile, among: model.profiles) {
                         Button(role: .destructive) {
-                            model.deleteProfile(profile) { dismiss() }
+                            confirmingDelete = true
                         } label: {
                             Label("Delete Profile", systemImage: "trash")
                                 .font(Theme.Font.body)
@@ -482,6 +531,14 @@ struct ProfileEditView: View {
         }
         .fullScreenCover(item: $pinFlow) { flow in
             pinFlowView(flow)
+        }
+        .alert("Delete \(target.profile?.name ?? "")?", isPresented: $confirmingDelete) {
+            Button("Delete", role: .destructive) {
+                if let profile = target.profile { model.deleteProfile(profile) { dismiss() } }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its library, watch progress and settings will be removed. This can\u{2019}t be undone.")
         }
     }
 

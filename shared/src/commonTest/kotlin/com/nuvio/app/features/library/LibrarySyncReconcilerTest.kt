@@ -9,8 +9,10 @@ import kotlin.test.assertTrue
 
 class LibrarySyncReconcilerTest {
 
+    // Upstream 1854dfc3: an empty snapshot is the account's real state (the library was emptied
+    // elsewhere), not a legacy account to migrate — nothing local survives or gets re-uploaded.
     @Test
-    fun `legacy empty snapshot queues local items for incremental migration`() {
+    fun `empty snapshot removes cached items without queuing an upload`() {
         val localItem = libraryItem(id = "local", savedAtEpochMs = 1L)
 
         val result = reconcileLibrarySnapshot(
@@ -18,14 +20,27 @@ class LibrarySyncReconcilerTest {
             localItemsByKey = mapOf(libraryItemKey(localItem.id, localItem.type) to localItem),
             pendingUpsertKeysByKey = emptyMap(),
             pendingDeleteKeysByKey = emptyMap(),
-            preserveLegacyLocalWhenServerEmpty = true,
+        )
+
+        assertTrue(result.itemsByKey.isEmpty())
+        assertTrue(result.pendingUpsertKeysByKey.isEmpty())
+        assertTrue(result.pendingDeleteKeysByKey.isEmpty())
+        assertFalse(result.preservedLocalItems)
+    }
+
+    @Test
+    fun `empty snapshot keeps this device's own pending upsert`() {
+        val localItem = libraryItem(id = "local", savedAtEpochMs = 1L)
+        val key = libraryItemKey(localItem.id, localItem.type)
+
+        val result = reconcileLibrarySnapshot(
+            serverItems = emptyList(),
+            localItemsByKey = mapOf(key to localItem),
+            pendingUpsertKeysByKey = mapOf(key to LibrarySyncKey(localItem.id, localItem.type)),
+            pendingDeleteKeysByKey = emptyMap(),
         )
 
         assertEquals(listOf(localItem), result.itemsByKey.values.toList())
-        assertEquals(
-            listOf(LibrarySyncKey(contentId = "local", contentType = "movie")),
-            result.pendingUpsertKeysByKey.values.toList(),
-        )
         assertTrue(result.preservedLocalItems)
     }
 
@@ -47,7 +62,6 @@ class LibrarySyncReconcilerTest {
                 libraryItemKey(remoteDeleted.id, remoteDeleted.type) to
                     LibrarySyncKey(remoteDeleted.id, remoteDeleted.type),
             ),
-            preserveLegacyLocalWhenServerEmpty = false,
         )
 
         assertEquals(

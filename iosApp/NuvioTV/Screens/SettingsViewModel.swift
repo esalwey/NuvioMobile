@@ -20,10 +20,15 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var showCatalogType = true
     /// UX-8: hide the entire Discover section on the Search screen (synced; default off).
     @Published private(set) var hideDiscover = false
+    /// Upstream 7c1c6578: keep and show recent searches (per profile, this Apple TV; default on).
+    @Published private(set) var recentSearchesEnabled = true
+    /// SET-2 / upstream 6fb46976b: rating visibility on detail pages (synced per profile).
+    @Published private(set) var showOverallRatings = true
+    /// `EpisodeRatingsVisibility.name`: "SHOW_ALL", "HIDE_EPISODES" or "HIDE_UNWATCHED_EPISODES".
+    @Published private(set) var episodeRatingsVisibility = "SHOW_ALL"
     /// TMDB enrichment (cast profiles, studios/networks, collections, artwork). Gated on a user key.
     @Published private(set) var tmdbEnabled = false
     @Published private(set) var tmdbHasKey = false
-    @Published private(set) var tmdbUseReleaseDates = false
     /// Chip code for the metadata-language row: "device" while no language is stored (the shared
     /// repo derives it from the device language), else the stored code's primary subtag.
     @Published private(set) var tmdbLanguageSelection = "device"
@@ -36,6 +41,12 @@ final class SettingsViewModel: ObservableObject {
     /// Preferred track languages (player auto-selects a matching track on load).
     @Published private(set) var preferredAudioLanguage = "device"
     @Published private(set) var preferredSubtitleLanguage = "none"
+    /// Stream auto-play (shared `PlayerSettings`, this Apple TV's settings namespace). The stream
+    /// picker is always manual on tvOS, so these decide how Up Next picks the NEXT episode's
+    /// stream (`NextEpisodeAutoPlay.select`). Values are the Kotlin enum names.
+    @Published private(set) var streamAutoPlayMode = "MANUAL"
+    @Published private(set) var streamAutoPlaySource = "ALL_SOURCES"
+    @Published private(set) var streamAutoPlayRegex = ""
     /// Poster card style (size in dp, corner radius in dp, hide titles, landscape catalog rows).
     @Published private(set) var posterWidthDp: Int32 = 126
     @Published private(set) var posterCornerRadiusDp: Int32 = 12
@@ -101,6 +112,8 @@ final class SettingsViewModel: ObservableObject {
     private var cardDepthWatcher: FlowWatcher?
     private var trackingSettingsWatcher: FlowWatcher?
     private var searchStateWatcher: FlowWatcher?
+    private var searchHistoryWatcher: FlowWatcher?
+    private var metaScreenWatcher: FlowWatcher?
     private var enabledAddons: [ManagedAddon] = []
 
     func start() {
@@ -121,6 +134,9 @@ final class SettingsViewModel: ObservableObject {
             self.subtitleStyle = state.subtitleStyle
             self.preferredAudioLanguage = state.preferredAudioLanguage
             self.preferredSubtitleLanguage = state.preferredSubtitleLanguage
+            self.streamAutoPlayMode = state.streamAutoPlayMode.name
+            self.streamAutoPlaySource = state.streamAutoPlaySource.name
+            self.streamAutoPlayRegex = state.streamAutoPlayRegex
             // The shared (synced) Up Next threshold — may change through profile sync.
             self.upNextThreshold = UpNextPreferences.threshold(settings: state)
         }
@@ -130,7 +146,6 @@ final class SettingsViewModel: ObservableObject {
             guard let self, let state = emitted as? TmdbSettings else { return }
             self.tmdbEnabled = state.enabled
             self.tmdbHasKey = state.hasApiKey
-            self.tmdbUseReleaseDates = state.useReleaseDates
             // Stored languages may carry a region ("de-DE" from the phone's field); the chip row
             // keys on the primary subtag.
             self.tmdbLanguageSelection = TmdbSettingsRepository.shared.hasExplicitLanguage()
@@ -206,6 +221,19 @@ final class SettingsViewModel: ObservableObject {
             self.lastSearchFanOut = state.lastFanOut
         }
 
+        SearchHistoryRepository.shared.ensureLoaded()
+        searchHistoryWatcher = FlowWatcherKt.watch(SearchHistoryRepository.shared.enabled) { [weak self] emitted in
+            guard let self, let enabled = emitted as? KotlinBoolean else { return }
+            self.recentSearchesEnabled = enabled.boolValue
+        }
+
+        MetaScreenSettingsRepository.shared.ensureLoaded()
+        metaScreenWatcher = FlowWatcherKt.watch(MetaScreenSettingsRepository.shared.uiState) { [weak self] emitted in
+            guard let self, let state = emitted as? MetaScreenSettingsUiState else { return }
+            self.showOverallRatings = state.showOverallRatings
+            self.episodeRatingsVisibility = state.episodeRatingsVisibility.name
+        }
+
         // "Home Rows blank" bug: Settings must not depend on Home/Search having mounted first to
         // hydrate the addon list. Without this call, entering Settings directly — post-wipe or
         // post-profile-switch, before Home ever ran its own `AddonRepository.initialize()` — left
@@ -225,6 +253,8 @@ final class SettingsViewModel: ObservableObject {
         cardDepthWatcher?.cancel(); cardDepthWatcher = nil
         trackingSettingsWatcher?.cancel(); trackingSettingsWatcher = nil
         searchStateWatcher?.cancel(); searchStateWatcher = nil
+        searchHistoryWatcher?.cancel(); searchHistoryWatcher = nil
+        metaScreenWatcher?.cancel(); metaScreenWatcher = nil
     }
 
     // MARK: - Actions
@@ -358,6 +388,43 @@ final class SettingsViewModel: ObservableObject {
         upNextThreshold = .secondsBeforeEnd(Double(seconds))
     }
 
+    // MARK: - Stream auto-play (Settings → Playback → Next Episode Stream)
+
+    func setStreamAutoPlayMode(_ key: String) {
+        let mode: StreamAutoPlayMode
+        switch key {
+        case "FIRST_STREAM": mode = .firstStream
+        case "REGEX_MATCH": mode = .regexMatch
+        default: mode = .manual
+        }
+        PlayerSettingsRepository.shared.setStreamAutoPlayMode(mode: mode)
+    }
+
+    func setStreamAutoPlaySource(_ key: String) {
+        let source: StreamAutoPlaySource
+        switch key {
+        case "INSTALLED_ADDONS_ONLY": source = .installedAddonsOnly
+        case "ENABLED_PLUGINS_ONLY": source = .enabledPluginsOnly
+        default: source = .allSources
+        }
+        PlayerSettingsRepository.shared.setStreamAutoPlaySource(source: source)
+    }
+
+    /// Saves the "Regex match" pattern; false (nothing saved) when the shared selector could not use
+    /// it — it would then match nothing and Up Next would find no stream. Checked by the shared
+    /// policy itself (Kotlin `Regex`, case-insensitive — the engine the selector compiles with, not
+    /// ICU's NSRegularExpression), which also refuses a pattern with no letter or digit. Empty is
+    /// the explicit "None" choice.
+    @discardableResult
+    func setStreamAutoPlayRegex(_ pattern: String) -> Bool {
+        let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, !StreamAutoPlayPolicy.shared.isRegexSelectionConfigured(regexPattern: trimmed) {
+            return false
+        }
+        PlayerSettingsRepository.shared.setStreamAutoPlayRegex(regex: trimmed)
+        return true
+    }
+
     // MARK: - TMDB
 
     /// Save a key and turn enrichment on. Order matters: `setEnabled(true)` is a no-op while the key
@@ -389,13 +456,6 @@ final class SettingsViewModel: ObservableObject {
         TmdbSettingsRepository.shared.setEnabled(value: enabled)
     }
 
-    /// TMDB air dates override add-on release dates (upstream v0.3.0 moved this out of
-    /// `useDetails` behind its own default-off toggle; surfacing it restores the old behavior
-    /// for users who want it).
-    func setTmdbUseReleaseDates(_ enabled: Bool) {
-        TmdbSettingsRepository.shared.setUseReleaseDates(value: enabled)
-    }
-
     /// "device" clears the stored metadata language (the shared repo then follows this Apple TV's
     /// language); any other code stores it explicitly. Either way the Home hero's TMDB enrichment
     /// refetches. Assigned directly too because clearing to an identical derived language doesn't
@@ -420,6 +480,31 @@ final class SettingsViewModel: ObservableObject {
     /// home-catalog namespace, same channel as Show Catalog Type).
     func setHideDiscover(_ enabled: Bool) {
         HomeCatalogSettingsRepository.shared.setHideDiscover(enabled: enabled)
+    }
+
+    /// Upstream 7c1c6578 (#1934): off stops recording and hides the Recent Searches chips; the
+    /// saved list is kept and comes back when switched on again.
+    func setRecentSearchesEnabled(_ enabled: Bool) {
+        SearchHistoryRepository.shared.setEnabled(enabled: enabled)
+    }
+
+    // MARK: - Ratings visibility (SET-2 / upstream 6fb46976b)
+
+    /// Standard (add-on IMDb) and TMDB ratings on detail pages. MDBList scores follow the MDBList
+    /// switch in Content Sources.
+    func setShowOverallRatings(_ enabled: Bool) {
+        MetaScreenSettingsRepository.shared.setShowOverallRatings(enabled: enabled)
+    }
+
+    /// Keys are `EpisodeRatingsVisibility.name`.
+    func setEpisodeRatingsVisibility(_ key: String) {
+        let visibility: EpisodeRatingsVisibility
+        switch key {
+        case "HIDE_EPISODES": visibility = .hideEpisodes
+        case "HIDE_UNWATCHED_EPISODES": visibility = .hideUnwatchedEpisodes
+        default: visibility = .showAll
+        }
+        MetaScreenSettingsRepository.shared.setEpisodeRatingsVisibility(visibility: visibility)
     }
 
     /// Clearing the key also disables enrichment (handled inside the repo).
@@ -634,5 +719,7 @@ final class SettingsViewModel: ObservableObject {
         cardDepthWatcher?.cancel()
         trackingSettingsWatcher?.cancel()
         searchStateWatcher?.cancel()
+        searchHistoryWatcher?.cancel()
+        metaScreenWatcher?.cancel()
     }
 }

@@ -193,6 +193,22 @@ object ProfileSettingsSync {
         HomeCatalogSettingsSyncService.clearAccountState()
     }
 
+    /**
+     * Upstream 1854dfc3 (profile-switch race). The profile fan-out has just reloaded every observed
+     * repository from the new profile's storage; that reload is not a user edit, so its signature
+     * becomes the skip signature. The fork's settle gate already holds a switch to a profile whose
+     * pull has not settled yet; this covers a fan-out that lands while the gate is OPEN for the
+     * selected identity (the active profile selected again), whose emission would otherwise push
+     * local state over newer remote settings. A new identity's first pull resets the skip
+     * signature (see `lastPullToken` in [pull]), so this never swallows a pull's echo.
+     * Also re-baselines the provider credentials. Called last in the tvOS profile fan-out.
+     */
+    fun onProfileChanged() {
+        if (observeJob?.isActive != true) return
+        skipNextPushSignature = currentObservedStateSignature()
+        ProviderCredentialSync.onProfileChanged()
+    }
+
     suspend fun pull(profileId: Int): Boolean {
         ensureRepositoriesLoaded()
         return syncMutex.withLock {
@@ -403,8 +419,11 @@ object ProfileSettingsSync {
 
         observeJob = scope.launch {
             combine(signatureFlows) { currentObservedStateSignature() }
-                .drop(1)
+                // Upstream 1854dfc3: distinct BEFORE drop(1). The other way round, the first
+                // emission after the initial one passed even when its signature was unchanged
+                // (any repository re-publishing an identical state) and pushed the blob for nothing.
                 .distinctUntilChanged()
+                .drop(1)
                 .debounce(PUSH_DEBOUNCE_MS)
                 .collect { signature ->
                     val authState = AuthRepository.state.value
@@ -434,6 +453,9 @@ object ProfileSettingsSync {
                         return@collect
                     }
                     if (isApplyingRemoteBlob || isServerSyncInFlight) return@collect
+                    // Upstream 1854dfc3: a stale emission (the state moved on during the debounce,
+                    // e.g. mid profile fan-out) is dropped — the newer state emits on its own.
+                    if (signature != currentObservedStateSignature()) return@collect
                     if (signature == skipNextPushSignature) {
                         skipNextPushSignature = null
                         return@collect

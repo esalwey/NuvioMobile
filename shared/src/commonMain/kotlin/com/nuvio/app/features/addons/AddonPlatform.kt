@@ -2,6 +2,11 @@ package com.nuvio.app.features.addons
 
 expect object AddonStorage {
     fun loadInstalledAddonUrls(profileId: Int): List<String>
+    /// ADD-1: whether this device has seen [profileId]'s add-on list non-empty AND in step with the
+    /// account (pulled from the server, or pushed to it) — AddonRepository's `addonListKnown`.
+    /// Null when never recorded (a build older than this marker). The account wipe removes it.
+    fun loadAddonListKnown(profileId: Int): Boolean?
+    fun saveAddonListKnown(profileId: Int, known: Boolean)
     fun saveInstalledAddonUrls(profileId: Int, urls: List<String>)
     fun loadAddonEnabledStates(profileId: Int): Map<String, Boolean>
     fun saveAddonEnabledStates(profileId: Int, states: Map<String, Boolean>)

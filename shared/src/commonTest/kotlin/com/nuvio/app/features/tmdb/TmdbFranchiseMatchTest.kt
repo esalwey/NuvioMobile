@@ -68,7 +68,6 @@ class TmdbFranchiseMatchTest {
     private val allOn = TmdbSettings(
         enabled = true,
         apiKey = "key",
-        useReleaseDates = true,
     )
 
     @Test
@@ -123,8 +122,9 @@ class TmdbFranchiseMatchTest {
 
         assertEquals("L'Attaque des Titans", enriched.name)
         assertEquals("https://tmdb.example/poster.jpg", enriched.poster)
-        assertEquals("2013", enriched.releaseInfo)
+        // Upstream 3555bd07b: release dates always come from the add-on.
+        assertEquals("2018", enriched.releaseInfo)
         assertEquals("To You, in 2000 Years", enriched.videos.single().title)
-        assertEquals("2013-04-07", enriched.videos.single().released)
+        assertEquals("2018-07-23T00:00:00.000Z", enriched.videos.single().released)
     }
 }

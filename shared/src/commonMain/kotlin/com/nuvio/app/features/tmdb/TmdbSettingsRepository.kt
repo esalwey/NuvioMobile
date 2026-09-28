@@ -3,8 +3,6 @@ package com.nuvio.app.features.tmdb
 import com.nuvio.app.features.details.MetaDetailsRepository
 import com.nuvio.app.features.home.HomeRepository
 import com.nuvio.app.features.player.DeviceLanguagePreferences
-import com.nuvio.app.features.profiles.ProfileRepository
-import com.nuvio.app.features.watchprogress.ContinueWatchingEnrichmentCache
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,7 +20,6 @@ object TmdbSettingsRepository {
     private var useArtwork = true
     private var useBasicInfo = true
     private var useDetails = true
-    private var useReleaseDates = false
     private var useCredits = true
     private var useProductions = true
     private var useNetworks = true
@@ -79,8 +76,7 @@ object TmdbSettingsRepository {
         invalidateHeroEnrichment()
         // BUG-63: `MetaDetailsRepository` keys `baseMeta` by type:id only, and the TMDB
         // enrichment (trailers included) is baked into it — without this a language flip keeps
-        // serving the old language's trailer list until the next launch. Same call
-        // `invalidateReleaseDateMetadata` already makes below.
+        // serving the old language's trailer list until the next launch.
         MetaDetailsRepository.clear()
     }
 
@@ -133,15 +129,6 @@ object TmdbSettingsRepository {
         update = { useDetails = it },
         persist = TmdbSettingsStorage::saveUseDetails,
     )
-
-    fun setUseReleaseDates(value: Boolean) {
-        ensureLoaded()
-        if (useReleaseDates == value) return
-        useReleaseDates = value
-        publish()
-        TmdbSettingsStorage.saveUseReleaseDates(value)
-        invalidateReleaseDateMetadata()
-    }
 
     fun setUseCredits(value: Boolean) = setBoolean(
         current = useCredits,
@@ -210,7 +197,6 @@ object TmdbSettingsRepository {
         val previousEnabled = enabled
         val previousApiKey = apiKey
         val previousLanguage = language
-        val previousUseReleaseDates = useReleaseDates
         hasLoaded = true
         apiKey = TmdbSettingsStorage.loadApiKey()?.trim().orEmpty()
         enabled = (TmdbSettingsStorage.loadEnabled() ?: false) && apiKey.isNotBlank()
@@ -224,7 +210,6 @@ object TmdbSettingsRepository {
         useArtwork = TmdbSettingsStorage.loadUseArtwork() ?: true
         useBasicInfo = TmdbSettingsStorage.loadUseBasicInfo() ?: true
         useDetails = TmdbSettingsStorage.loadUseDetails() ?: true
-        useReleaseDates = TmdbSettingsStorage.loadUseReleaseDates() ?: false
         useCredits = TmdbSettingsStorage.loadUseCredits() ?: true
         useProductions = TmdbSettingsStorage.loadUseProductions() ?: true
         useNetworks = TmdbSettingsStorage.loadUseNetworks() ?: true
@@ -233,9 +218,6 @@ object TmdbSettingsRepository {
         useMoreLikeThis = TmdbSettingsStorage.loadUseMoreLikeThis() ?: true
         useCollections = TmdbSettingsStorage.loadUseCollections() ?: true
         publish()
-        if (wasLoaded && previousUseReleaseDates != useReleaseDates) {
-            invalidateReleaseDateMetadata()
-        }
         if (wasLoaded && (previousEnabled != enabled || previousApiKey != apiKey || previousLanguage != language)) {
             invalidateHeroEnrichment()
         }
@@ -255,7 +237,6 @@ object TmdbSettingsRepository {
             useArtwork = useArtwork,
             useBasicInfo = useBasicInfo,
             useDetails = useDetails,
-            useReleaseDates = useReleaseDates,
             useCredits = useCredits,
             useProductions = useProductions,
             useNetworks = useNetworks,
@@ -264,11 +245,6 @@ object TmdbSettingsRepository {
             useMoreLikeThis = useMoreLikeThis,
             useCollections = useCollections,
         )
-    }
-
-    private fun invalidateReleaseDateMetadata() {
-        MetaDetailsRepository.clear()
-        ContinueWatchingEnrichmentCache.clearAll(ProfileRepository.activeProfileId)
     }
 
     private fun invalidateHeroEnrichment() {

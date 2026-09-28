@@ -25,16 +25,6 @@ struct ContentSourcesSettingsPane: View {
                             set: { model.setTmdbEnabled($0) }
                         )
                     )
-                    SettingsToggleRow(
-                        title: String(localized: "TMDB Release Dates"),
-                        subtitle: model.tmdbUseReleaseDates
-                            ? String(localized: "TMDB air dates override add-on release dates")
-                            : String(localized: "add-on release dates are used as-is"),
-                        isOn: Binding(
-                            get: { model.tmdbUseReleaseDates },
-                            set: { model.setTmdbUseReleaseDates($0) }
-                        )
-                    )
                     Text("Language for TMDB titles, descriptions, logos and the Home hero. Device follows this Apple TV's language.")
                         .font(Theme.Font.caption)
                         .foregroundStyle(Theme.Palette.textSecondary)
@@ -153,7 +143,8 @@ struct ContentSourcesSettingsPane: View {
     }
 
     /// FEAT-10: one toggle per search-capable catalog. Rows derive from the installed addons
-    /// (SettingsViewModel's addon watcher), the disabled set is local to this Apple TV.
+    /// (SettingsViewModel's addon watcher), the disabled set is this profile's, on this Apple TV
+    /// (SRC-2).
     @ViewBuilder
     private var searchSourcesSection: some View {
         // UX-8 (u/mrStevenx3, restated three times, finally "completely hide the Discover
@@ -170,7 +161,17 @@ struct ContentSourcesSettingsPane: View {
             )
         )
 
-        Text("Choose which catalogs Search looks through. Fewer sources means faster, more focused results. Applies to this Apple TV only.")
+        // Upstream 7c1c6578 (#1934): per profile, stored on this Apple TV.
+        SettingsToggleRow(
+            title: String(localized: "Recent Searches"),
+            subtitle: String(localized: "Save recent searches and show them on the Search screen."),
+            isOn: Binding(
+                get: { model.recentSearchesEnabled },
+                set: { model.setRecentSearchesEnabled($0) }
+            )
+        )
+
+        Text("Choose which catalogs Search looks through. Fewer sources means faster, more focused results. Applies to this profile, on this Apple TV only.")
             .font(Theme.Font.caption)
             .foregroundStyle(Theme.Palette.textSecondary)
             .frame(maxWidth: 1100, alignment: .leading)

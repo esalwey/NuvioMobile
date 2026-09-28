@@ -30,6 +30,10 @@ struct ContentView: View {
     @State private var home = HomeViewModel()
     @StateObject private var topShelf = TopShelfUpdater()
     @State private var entered = false
+    /// Upstream 519510591 + 6761ebabb: true while "Who's watching?" was opened from inside the app
+    /// (Profile tab → Switch Profile) instead of as the launch gate — picking the running profile,
+    /// or Menu, then goes straight back without a PIN, a repository fan-out or a cloud pull.
+    @State private var switchingProfile = false
     @State private var selectedTab = 0
     /// Which Settings category the split view is showing. Owned HERE, above the
     /// `.id(appTheme.themeName)` rebuild boundary, for exactly the reason `selectedTab` is: picking
@@ -72,6 +76,17 @@ struct ContentView: View {
     @State private var deepLinkDetailAfterResume: MetaPreview?
     @Environment(\.scenePhase) private var scenePhase
 
+    /// Upstream 519510591 + 6761ebabb: the picker's way back into the profile the app is running
+    /// (nil at the launch gate). No PIN, no fan-out, no pull — the repositories still hold it.
+    private var returnToRunningProfile: (() -> Void)? {
+        guard switchingProfile else { return nil }
+        return {
+            switchingProfile = false
+            profiles.resumeSessionProfile()
+            entered = true
+        }
+    }
+
     var body: some View {
         Group {
             switch auth.gate {
@@ -90,7 +105,7 @@ struct ContentView: View {
                         // H-1B-ii: handed down (not re-created) so the theme `.id()` rebuild of
                         // this Group cannot re-create Home's data pipeline.
                         home: home,
-                        onSwitchProfile: { entered = false },
+                        onSwitchProfile: { switchingProfile = true; entered = false },
                         selectedTab: $selectedTab,
                         settingsCategory: $settingsCategory,
                         pendingThemeSwatchFocus: $pendingThemeSwatchFocus,
@@ -107,7 +122,11 @@ struct ContentView: View {
                     // applied while only this picker is mounted, or MainTabView mounts under the
                     // boot-time theme and the async watcher delivery remounts the whole shell
                     // ~70ms later (see AppThemeModel.reseedNow).
-                    ProfileSelectionView(model: profiles, onSelected: { appTheme.reseedNow(); entered = true })
+                    ProfileSelectionView(
+                        model: profiles,
+                        onSelected: { switchingProfile = false; appTheme.reseedNow(); entered = true },
+                        onReturnToApp: returnToRunningProfile
+                    )
                 }
             }
         }
@@ -161,6 +180,7 @@ struct ContentView: View {
             // Signing out (or a remote session invalidation) tears the shell down to the gate.
             if newGate != .main {
                 entered = false
+                switchingProfile = false
                 // H-1B-ii: hard teardown of Home's (profile-scoped) watchers. `home` now outlives
                 // `HomeView`, so leaving the signed-in state no longer implicitly stops them the
                 // way the old view-lifetime `onDisappear → model.stop()` did. Redundant with the

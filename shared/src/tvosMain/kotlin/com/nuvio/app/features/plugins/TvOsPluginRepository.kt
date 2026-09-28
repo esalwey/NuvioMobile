@@ -49,7 +49,6 @@ object PluginRepository {
     val uiState: StateFlow<PluginsUiState> = _uiState.asStateFlow()
 
     private var initialized = false
-    private var pulledFromServer = false
     private var currentProfileId = 1
     private val activeRefreshJobs = mutableMapOf<String, Job>()
 
@@ -75,7 +74,6 @@ object PluginRepository {
         cancelActiveRefreshes()
         currentProfileId = effectiveProfileId
         initialized = false
-        pulledFromServer = false
         _uiState.value = PluginsUiState()
     }
 
@@ -83,7 +81,6 @@ object PluginRepository {
         cancelActiveRefreshes()
         currentProfileId = 1
         initialized = false
-        pulledFromServer = false
         _uiState.value = PluginsUiState()
     }
 
@@ -100,15 +97,9 @@ object PluginRepository {
                 .decodeList<PluginRow>()
 
             val urls = dedupeManifestUrls(rows.map { it.url })
-            if (urls.isEmpty() && !pulledFromServer) {
-                val localUrls = _uiState.value.repositories.map { it.manifestUrl }
-                if (localUrls.isNotEmpty()) {
-                    initialize()
-                    pulledFromServer = true
-                    pushToServer()
-                    return
-                }
-            }
+            // Upstream 1854dfc3: an empty server list is authoritative. The first pull of each
+            // launch used to push the local repositories back over it ("migrate"), so a
+            // repository removed on another device came back on the next Apple TV launch.
 
             val existingState = _uiState.value
             val existingReposByUrl = existingState.repositories.associateBy { it.manifestUrl }
@@ -149,7 +140,6 @@ object PluginRepository {
                 refreshRepository(repository.manifestUrl, pushAfterRefresh = false)
             }
 
-            pulledFromServer = true
             initialized = true
         }.onFailure { error ->
             log.e(error) { "pullFromServer failed" }
@@ -232,6 +222,10 @@ object PluginRepository {
                 }
 
                 _uiState.update { state ->
+                    // Upstream 1854dfc3: a refresh that lands after its repository was removed
+                    // (here, or by a pull applying another device's removal) must not re-add the
+                    // removed repository's scrapers.
+                    if (state.repositories.none { it.manifestUrl == manifestUrl }) return@update state
                     result.fold(
                         onSuccess = { (repo, scrapers) ->
                             val updatedRepos = state.repositories.map { existing ->
@@ -527,7 +521,6 @@ object PluginRepository {
 
         if (currentProfileId != profileId) {
             cancelActiveRefreshes()
-            pulledFromServer = false
         }
 
         currentProfileId = profileId

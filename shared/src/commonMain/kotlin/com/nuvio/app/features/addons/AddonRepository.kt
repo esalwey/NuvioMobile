@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
@@ -57,7 +58,21 @@ object AddonRepository {
     val uiState: StateFlow<AddonsUiState> = _uiState.asStateFlow()
 
     private val bootstrap = AddonBootstrapState()
+    // Fork: hydration flag for the push guard below (shouldBlockUnhydratedAddonPush). Upstream
+    // 1854dfc3 dropped its `pulledFromServer` together with the empty-server migration branch it
+    // gated; here it only ever answered "has this profile's list been pulled yet", so it stays.
     private var pulledFromServer = false
+    // Fork (ADD-1 follow-up to upstream 1854dfc3): whether this profile's add-on list is already
+    // KNOWN to this device — it has been non-empty AND in step with the account here: a pull
+    // applied a non-empty server list, or a push of a non-empty list succeeded. Persisted per
+    // profile (AddonStorage.saveAddonListKnown, wiped at sign-out). Null until the session's first
+    // bootstrap step reads it back (initialize() or a pull that wins that race). A signed-in
+    // account whose list is known is never re-seeded with the default add-on: an empty server list
+    // there means the user removed every add-on (here or on another device), and the seed's push
+    // would bring one back over that deletion. A list that only ever existed locally — a seed that
+    // never reached the server (offline, failed push), or an empty first pull — does NOT count, so
+    // a fresh account whose seed did not land is seeded again next launch. See seedingAllowed().
+    private var addonListKnown: Boolean? = null
     private var currentProfileId: Int = 1
     private val activeRefreshJobs = mutableMapOf<String, Job>()
     private val pushJobsByProfile = mutableMapOf<Int, Job>()
@@ -80,6 +95,7 @@ object AddonRepository {
         if (bootstrap.initialized) return
         bootstrap.begin()
         currentProfileId = effectiveProfileId
+        rememberStoredAddonList()
         log.d { "initialize() — loading local addons for profile $currentProfileId" }
 
         val storedUrls = dedupeManifestUrls(AddonStorage.loadInstalledAddonUrls(currentProfileId))
@@ -121,6 +137,7 @@ object AddonRepository {
         currentProfileId = effectiveProfileId
         bootstrap.reset()
         pulledFromServer = false
+        addonListKnown = null
         _serverPullSettled.value = false
         _uiState.value = AddonsUiState()
     }
@@ -132,6 +149,7 @@ object AddonRepository {
         currentProfileId = 1
         bootstrap.reset()
         pulledFromServer = false
+        addonListKnown = null
         _serverPullSettled.value = false
         _uiState.value = AddonsUiState()
     }
@@ -140,6 +158,7 @@ object AddonRepository {
         var settled = true
         try {
             currentProfileId = resolveEffectiveProfileId(profileId)
+            rememberStoredAddonList()
             log.i { "pullFromServer() — profileId=$profileId, initialized=${bootstrap.initialized}, pulledFromServer=$pulledFromServer" }
             runCatching {
                 val rows = SupabaseProvider.client.postgrest
@@ -162,67 +181,16 @@ object AddonRepository {
                 log.i { "pullFromServer() — server returned ${rows.size} addons" }
                 urls.forEachIndexed { i, u -> log.d { "  server[$i]: $u" } }
 
-                if (urls.isEmpty() && !pulledFromServer) {
-                    val localUrls = dedupeManifestUrls(AddonStorage.loadInstalledAddonUrls(currentProfileId))
-                    log.i { "pullFromServer() — server empty, local has ${localUrls.size} addons" }
-                    if (localUrls.isNotEmpty()) {
-                        log.i { "pullFromServer() — migrating local addons to server for profile $currentProfileId" }
-                        initialize()
-                        pulledFromServer = true
-                        val enabledByUrl = loadLocalEnabledStates()
-                        val addons = localUrls.mapIndexed { index, addonUrl ->
-                            val manifestUrl = ensureManifestSuffix(addonUrl)
-                            AddonPushItem(
-                                url = manifestUrl,
-                                name = _uiState.value.addons
-                                    .find { it.manifestUrl == manifestUrl }?.manifest?.name ?: "",
-                                enabled = enabledByUrl[manifestUrl]
-                                    ?: _uiState.value.addons.find { it.manifestUrl == manifestUrl }?.enabled
-                                    ?: true,
-                                sortOrder = index,
-                            )
-                        }
-                        val params = buildJsonObject {
-                            put("p_profile_id", currentProfileId)
-                            put("p_addons", json.encodeToJsonElement(addons))
-                            putSyncOriginClientId()
-                        }
-                        SupabaseProvider.client.postgrest.rpc("sync_push_addons", params)
-                        log.i { "pullFromServer() — migration push done (${addons.size} addons)" }
-                        return
-                    }
-                }
-
-                if (urls.isEmpty()) {
-                    val localUrls = dedupeManifestUrls(AddonStorage.loadInstalledAddonUrls(currentProfileId))
-                    if (localUrls.isNotEmpty()) {
-                        log.w { "pullFromServer() — remote empty while local has ${localUrls.size} addons; preserving local addons" }
-                        val enabledByUrl = loadLocalEnabledStates()
-                        val existingByUrl = _uiState.value.addons.associateBy(ManagedAddon::manifestUrl)
-                        _uiState.value = AddonsUiState(
-                            addons = localUrls.map { url ->
-                                existingByUrl[url].toPendingAddon(
-                                    manifestUrl = url,
-                                    enabled = enabledByUrl[url],
-                                )
-                            },
-                            // This path completes bootstrap below, so the published state
-                            // says so too — a pull that wins the race with initialize() must not
-                            // leave watchers thinking bootstrap never happened.
-                            isInitialized = true,
-                        )
-                        persist()
-                        localUrls.forEach { url ->
-                            val existing = existingByUrl[url]
-                            val addon = _uiState.value.addons.firstOrNull { it.manifestUrl == url }
-                            if (addon?.enabled == true && (existing == null || (addon.manifest == null && !addon.isRefreshing))) {
-                                refreshAddon(url)
-                            }
-                        }
-                        pulledFromServer = true
-                        bootstrap.complete()
-                        return
-                    }
+                // Upstream 1854dfc3 ("prevent automatic pulls from restoring deleted data"): the
+                // server list is authoritative, an EMPTY one included. Two branches used to treat an
+                // empty list as a fluke instead — the first pull of each launch re-pushed the local
+                // list to the server ("migrating local addons"), later pulls restored it locally —
+                // so removing every add-on on the phone or the web was undone by the next Apple TV
+                // launch (ADD-1). Both are gone; an empty list now clears this profile like any
+                // other server list replaces it. A signed-in account can no longer push a local list
+                // it never pulled (shouldBlockUnhydratedAddonPush below), so nothing needs migrating.
+                if (urls.isEmpty() && _uiState.value.addons.isNotEmpty()) {
+                    log.i { "pullFromServer() — server list is empty; clearing ${_uiState.value.addons.size} local addons for profile $currentProfileId" }
                 }
 
                 val existingByUrl = _uiState.value.addons.associateBy(ManagedAddon::manifestUrl)
@@ -235,9 +203,14 @@ object AddonRepository {
                             enabled = row?.enabled,
                         )
                     },
-                    // As above: the server's list IS a settled bootstrap for this profile.
+                    // The server's list IS a settled bootstrap for this profile, so the published
+                    // state says so too — a pull that wins the race with initialize() must not
+                    // leave watchers thinking bootstrap never happened.
                     isInitialized = true,
                 )
+                // ADD-1: a non-empty list straight from the account — known from now on (persist()
+                // records it). An empty one leaves the marker as it was.
+                if (urls.isNotEmpty()) addonListKnown = true
                 persist()
                 urls.forEach { url ->
                     val existing = existingByUrl[url]
@@ -260,8 +233,8 @@ object AddonRepository {
             settled = false
             throw error
         } finally {
-            // Signals a settle on every completion path except cancellation — including inside
-            // the early `return`s above, which trigger this `finally` like any other. A
+            // Signals a settle on every completion path except cancellation (an applied list and
+            // a real failure alike). A
             // cancelled pull (e.g. profile switched away mid-flight) must NOT count as settled:
             // the seed/push guards below need to keep waiting for a pull that actually finishes.
             if (settled) _serverPullSettled.value = true
@@ -450,18 +423,39 @@ object AddonRepository {
     /// Whether the default-addon seed may run right now. Guests/signed-out sessions seed
     /// immediately (nothing to pull); a signed-in account must wait until the first server pull
     /// settles, so the seed can never race the pull and full-replace-push a nearly-empty list
-    /// over the account (docs/addon-wipe-investigation-2026-08-28.md).
+    /// over the account (docs/addon-wipe-investigation-2026-08-28.md) — and it only seeds a list
+    /// this device has never known (ADD-1: see `addonListKnown`).
     fun seedingAllowed(): Boolean =
-        defaultAddonSeedingAllowed(AuthRepository.state.value, _serverPullSettled.value)
+        defaultAddonSeedingAllowed(
+            authState = AuthRepository.state.value,
+            serverPullSettled = _serverPullSettled.value,
+            addonListKnown = addonListKnown ?: storedAddonListKnown(currentProfileId),
+        )
+
+    /// ADD-1: true once it is settled that the default-addon seed will NOT run for this profile
+    /// session — a signed-in account, its first pull settled, and a list this device already knew.
+    /// Home then treats the seed as done (the way it treats a failed seed) instead of holding its
+    /// rows for one that never comes.
+    fun defaultSeedDeclined(): Boolean {
+        val authState = AuthRepository.state.value
+        if (authState !is AuthState.Authenticated || authState.isAnonymous) return false
+        if (!_serverPullSettled.value) return false
+        return addonListKnown ?: storedAddonListKnown(currentProfileId)
+    }
+
+    /// ADD-2: whether the active profile is a secondary profile set to use the primary profile's
+    /// add-ons. Install, remove, move and enable/disable are no-ops then (install reports it, the
+    /// others return silently), so the Add-ons screen reads this to explain and lock its controls.
+    fun isManagedByPrimaryProfile(): Boolean = isUsingPrimaryAddonsFromSecondaryProfile()
 
     private fun pushToServer() {
         if (isUsingPrimaryAddonsFromSecondaryProfile()) return
         if (shouldBlockUnhydratedAddonPush(AuthRepository.state.value, pulledFromServer)) {
             // Deliberate data-direction choice (Codex 2026-08-28 P2, declined): a mutation made
             // before this device has ever seen the account's list is non-authoritative — that is
-            // the exact shape that wiped a tester's account (the Cinemeta seed). If the account is
-            // genuinely empty, pullFromServer's migration branch still pushes the local list; if
-            // the account has addons, the pull's apply wins over the pre-hydration edit.
+            // the exact shape that wiped a tester's account (the Cinemeta seed). The pull's apply
+            // wins over the pre-hydration edit, an empty account list included (upstream 1854dfc3
+            // removed the branch that used to push the local list over an empty account).
             log.w { "pushToServer() — BLOCKED: signed-in account but the addon list was never hydrated from the server; a full-replace push composed from this state can wipe the account's addons" }
             return
         }
@@ -489,6 +483,9 @@ object AddonRepository {
                 }
                 SupabaseProvider.client.postgrest.rpc("sync_push_addons", params)
                 log.d { "pushToServer() — success" }
+                // ADD-1: this non-empty list is now the account's — a later empty server list is
+                // a deletion, not a fresh account (see addonListKnown).
+                if (addons.isNotEmpty() && isActive) markAddonListKnown(profileId)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -520,6 +517,10 @@ object AddonRepository {
     }
 
     private fun persist() {
+        // Read back BEFORE anything is written, so a device upgraded from a build without the
+        // marker still judges its stored list by what the older build left (see
+        // resolveStoredAddonListKnown); no-op once this session has done it.
+        rememberStoredAddonList()
         val addons = _uiState.value.addons
         AddonStorage.saveInstalledAddonUrls(
             currentProfileId,
@@ -529,11 +530,34 @@ object AddonRepository {
             currentProfileId,
             addons.associate { it.manifestUrl to it.enabled },
         )
+        // ADD-1: written with every list so the next session reads the marker, not a guess.
+        AddonStorage.saveAddonListKnown(currentProfileId, addonListKnown == true)
+    }
+
+    /// ADD-1: a non-empty list for [profileId] reached the server.
+    private fun markAddonListKnown(profileId: Int) {
+        if (profileId == currentProfileId) addonListKnown = true
+        AddonStorage.saveAddonListKnown(profileId, true)
     }
 
     private fun loadLocalEnabledStates(): Map<String, Boolean> =
         AddonStorage.loadAddonEnabledStates(currentProfileId)
             .mapKeys { (url, _) -> ensureManifestSuffix(url) }
+
+    /// Captures `addonListKnown` once per profile session, BEFORE anything this session persists
+    /// (initialize(), pullFromServer() and persist() all call it first), so it reflects what an
+    /// earlier session left on this device.
+    private fun rememberStoredAddonList() {
+        if (addonListKnown == null) {
+            addonListKnown = storedAddonListKnown(currentProfileId)
+        }
+    }
+
+    private fun storedAddonListKnown(profileId: Int): Boolean =
+        resolveStoredAddonListKnown(
+            marker = AddonStorage.loadAddonListKnown(profileId),
+            storedUrls = AddonStorage.loadInstalledAddonUrls(profileId),
+        )
 
     private fun cancelActiveRefreshes() {
         activeRefreshJobs.values.forEach(Job::cancel)
@@ -640,5 +664,22 @@ internal fun shouldBlockUnhydratedAddonPush(authState: AuthState, pulledFromServ
 /// soon as local state is known empty. A signed-in, non-anonymous account must instead wait for
 /// the first server pull to settle, so the seed can't race the pull and get full-replace-pushed
 /// over the account's real addon list. See docs/addon-wipe-investigation-2026-08-28.md.
-internal fun defaultAddonSeedingAllowed(authState: AuthState, serverPullSettled: Boolean): Boolean =
-    authState !is AuthState.Authenticated || authState.isAnonymous || serverPullSettled
+///
+/// [addonListKnown] (ADD-1): this device already knew the account's list for this profile. An
+/// empty list is then the user's own doing — every add-on removed here or on another device — and
+/// seeding (whose push reaches every device) would resurrect one of them, so only a list this
+/// device has never known is seeded.
+///
+/// ADD-1: whether a profile's add-on list counts as known when a session starts. [marker] is what
+/// earlier sessions recorded; null on a device upgraded from a build that never wrote it, where a
+/// non-empty stored list counts — those builds pushed every local list to an empty account on
+/// their first pull, so such a list did reach the server.
+internal fun resolveStoredAddonListKnown(marker: Boolean?, storedUrls: List<String>): Boolean =
+    marker ?: storedUrls.isNotEmpty()
+
+internal fun defaultAddonSeedingAllowed(
+    authState: AuthState,
+    serverPullSettled: Boolean,
+    addonListKnown: Boolean = false,
+): Boolean =
+    authState !is AuthState.Authenticated || authState.isAnonymous || (serverPullSettled && !addonListKnown)
