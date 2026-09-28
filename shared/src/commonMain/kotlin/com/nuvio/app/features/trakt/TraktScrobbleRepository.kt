@@ -12,6 +12,8 @@ import com.nuvio.app.features.tracking.TrackingScrobbleAction
 import com.nuvio.app.features.tracking.TrackingScrobbleEvent
 import com.nuvio.app.features.tracking.TrackingScrobbler
 import com.nuvio.app.features.tracking.TrackingSeekScrobblePolicy
+import com.nuvio.app.features.watchprogress.TrackerOptimisticFailedStopRetentionMs
+import com.nuvio.app.features.watchprogress.TrackerOptimisticStopInFlightHoldMs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.serialization.SerialName
@@ -166,12 +168,26 @@ object TraktScrobbleRepository : TrackingScrobbler {
         )
     }
 
+    /** Called from Swift: nothing but cancellation may escape (it would abort the app). */
     suspend fun scrobbleStart(profileId: Int, item: TraktScrobbleItem, progressPercent: Float) {
-        sendScrobble(profileId = profileId, action = "start", item = item, progressPercent = progressPercent)
+        try {
+            sendScrobble(profileId = profileId, action = "start", item = item, progressPercent = progressPercent)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            log.e(error) { "Trakt scrobble start failed for ${item.itemKey}" }
+        }
     }
 
+    /** Called from Swift: nothing but cancellation may escape (it would abort the app). */
     suspend fun scrobbleStop(profileId: Int, item: TraktScrobbleItem, progressPercent: Float) {
-        sendScrobble(profileId = profileId, action = "stop", item = item, progressPercent = progressPercent)
+        try {
+            sendScrobble(profileId = profileId, action = "stop", item = item, progressPercent = progressPercent)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            reportUndeliveredStop(item, progressPercent.coerceIn(0f, 100f), "error: ${error.message}", error)
+        }
     }
 
     suspend fun buildItem(
@@ -237,9 +253,25 @@ object TraktScrobbleRepository : TrackingScrobbler {
         progressPercent: Float,
     ) {
         if (ActiveProfileProvider.activeProfileId != profileId) return
-        val headers = TraktAuthRepository.authorizedHeaders() ?: return
-        if (ActiveProfileProvider.activeProfileId != profileId) return
         val clampedProgress = progressPercent.coerceIn(0f, 100f)
+        val isStop = action == "stop"
+        if (isStop) {
+            // CW sync #4: the title's optimistic rows outlive this stop's retries and timeouts, so
+            // a stop that fails slowly still finds them to keep (reportUndeliveredStop).
+            TraktProgressRepository.holdOptimisticProgress(
+                item = item,
+                untilEpochMs = TraktPlatformClock.nowEpochMs() + TrackerOptimisticStopInFlightHoldMs,
+            )
+        }
+        val headers = TraktAuthRepository.authorizedHeaders() ?: run {
+            // Disconnected: nothing to report. Connected without a usable token (the refresh
+            // failed): the stop is lost like any failed one.
+            if (isStop && TraktAuthRepository.isAuthenticated.value) {
+                reportUndeliveredStop(item, clampedProgress, "no usable Trakt token (the refresh failed)")
+            }
+            return
+        }
+        if (ActiveProfileProvider.activeProfileId != profileId) return
         if (shouldSkip(profileId, action, item.itemKey, clampedProgress)) return
 
         val url = "$BASE_URL/scrobble/$action"
@@ -288,6 +320,7 @@ object TraktScrobbleRepository : TrackingScrobbler {
                     delay(retryDelayMs * attempt)
                     continue
                 }
+                if (isStop) reportUndeliveredStop(item, clampedProgress, "transport failure after $attempts attempts")
                 return
             }
 
@@ -327,6 +360,7 @@ object TraktScrobbleRepository : TrackingScrobbler {
             log.w {
                 "Failed Trakt scrobble $action: HTTP ${response.status} ${response.statusText.ifBlank { "<no-status-text>" }}"
             }
+            if (isStop) reportUndeliveredStop(item, clampedProgress, "HTTP ${response.status}")
             return
         }
 
@@ -346,6 +380,39 @@ object TraktScrobbleRepository : TrackingScrobbler {
                     if (error is CancellationException) throw error
                     log.w { "Failed to refresh Trakt progress after stop: ${error.message}" }
                 }
+        }
+    }
+
+    /**
+     * CW sync #4: a scrobble stop that never reached Trakt. Trakt does not know about this viewing —
+     * an autoplayed episode stays unwatched there and its playback row stays wherever it was — so
+     * with Trakt as the Watch Progress Source, Continue Watching would silently go back to that state
+     * once the title's optimistic rows expire. They are kept for up to a day instead
+     * ([TraktProgressRepository.holdOptimisticProgress]; a Trakt snapshot that confirms or supersedes
+     * them still wins), and the loss is logged as an error with what Home keeps.
+     */
+    private fun reportUndeliveredStop(
+        item: TraktScrobbleItem,
+        progressPercent: Float,
+        reason: String,
+        cause: Throwable? = null,
+    ) {
+        val kept = runCatching {
+            TraktProgressRepository.holdOptimisticProgress(
+                item = item,
+                untilEpochMs = TraktPlatformClock.nowEpochMs() + TrackerOptimisticFailedStopRetentionMs,
+            )
+        }.getOrDefault(0)
+        log.e(cause) {
+            val consequence = if (kept > 0) {
+                "Continue Watching keeps its $kept local row(s) for up to 24 h, until Trakt confirms or " +
+                    "supersedes them"
+            } else {
+                "no local row of it is on Continue Watching (Trakt is not the Watch Progress Source, " +
+                    "or the rows expired)"
+            }
+            "Trakt scrobble stop NOT delivered for ${item.itemKey} at $progressPercent% ($reason): Trakt did " +
+                "not record this viewing; $consequence"
         }
     }
 

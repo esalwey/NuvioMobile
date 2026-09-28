@@ -482,15 +482,44 @@ object TraktProgressRepository {
             val active = current
                 .filterValues { optimistic -> optimistic.expiresAtMs > now }
                 .toMutableMap()
-            val existing = active[entry.videoId]?.progress
-            if (existing == null || shouldReplaceProgressSnapshotEntry(existing = existing, candidate = entry)) {
+            val existing = active[entry.videoId]
+            if (existing == null || shouldReplaceProgressSnapshotEntry(existing = existing.progress, candidate = entry)) {
                 active[entry.videoId] = OptimisticProgressEntry(
                     progress = entry,
-                    expiresAtMs = now + OPTIMISTIC_PROGRESS_TTL_MS,
+                    // CW sync #4: a newer write never shortens a hold ([holdOptimisticProgress]) —
+                    // an end-screen background flush after a failed stop would otherwise bring the
+                    // stale Trakt state back 3 minutes later.
+                    expiresAtMs = maxOf(now + OPTIMISTIC_PROGRESS_TTL_MS, existing?.expiresAtMs ?: 0L),
                 )
             }
             active
         }
+    }
+
+    /**
+     * CW sync #4: keeps the live optimistic rows of [item]'s title (a show's episodes included —
+     * Trakt may number them differently from the add-on) until at least [untilEpochMs]. Called
+     * while a scrobble stop is in flight, and after one failed (`TraktScrobbleRepository`): Trakt
+     * never recorded that viewing, so its snapshot would otherwise put Continue Watching back on the
+     * episode it last knew about once the 3-minute rows expire. The usual reconciliation still drops
+     * each row as soon as a Trakt snapshot confirms it, and a newer Trakt row still wins the merge.
+     * Returns how many rows it holds.
+     */
+    internal fun holdOptimisticProgress(item: TraktScrobbleItem, untilEpochMs: Long): Int {
+        val now = TraktPlatformClock.nowEpochMs()
+        var held = 0
+        optimisticProgress.update { current ->
+            held = 0
+            current.mapValues { (_, optimistic) ->
+                if (optimistic.expiresAtMs > now && optimistic.progress.isOfTraktScrobbleTitle(item)) {
+                    held += 1
+                    optimistic.copy(expiresAtMs = maxOf(optimistic.expiresAtMs, untilEpochMs))
+                } else {
+                    optimistic
+                }
+            }
+        }
+        return held
     }
 
     private fun removeOptimisticProgress(
@@ -1577,6 +1606,23 @@ fun WatchProgressEntry.matchesTraktRemovalContext(
     return seasonNumber == null || (
         this.seasonNumber == seasonNumber && this.episodeNumber == episodeNumber
     )
+}
+
+/**
+ * CW sync #4: whether this (optimistic) progress row belongs to the title [item] scrobbles — the
+ * same movie, or any episode of the same show (Trakt may number the episodes differently from the
+ * add-on the row was recorded with). Matched on the ids Trakt addresses: IMDB, TMDB, Trakt.
+ */
+internal fun WatchProgressEntry.isOfTraktScrobbleTitle(item: TraktScrobbleItem): Boolean {
+    val itemIds = when (item) {
+        is TraktScrobbleItem.Movie -> item.ids
+        is TraktScrobbleItem.Episode -> item.showIds
+    }
+    if (isEpisode != (item is TraktScrobbleItem.Episode)) return false
+    val rowIds = parseTraktContentIds(parentMetaId)
+    return (!rowIds.imdb.isNullOrBlank() && rowIds.imdb.equals(itemIds.imdb, ignoreCase = true)) ||
+        (rowIds.tmdb != null && rowIds.tmdb == itemIds.tmdb) ||
+        (rowIds.trakt != null && rowIds.trakt == itemIds.trakt)
 }
 
 @Serializable
