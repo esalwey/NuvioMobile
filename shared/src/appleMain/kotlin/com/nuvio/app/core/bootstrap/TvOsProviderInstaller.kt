@@ -421,6 +421,10 @@ private object TvOsProfileLifecycleCoordinator : ProfileLifecycleCoordinator {
         // out of its adapter) — without this a guest profile switch (no cloud pull) would keep
         // the previous profile's keys in memory.
         step("debridSettings") { DebridSettingsRepository.onProfileChanged() }
+        // Upstream 1854dfc3 (profile-switch race): LAST, once every repository above has reloaded
+        // the new profile — re-baselines the settings-blob observer and the provider-credential
+        // sync so this reload is not mistaken for a local edit and pushed over the new profile.
+        step("profileSettingsSync") { ProfileSettingsSync.onProfileChanged() }
         log.i { "Profile-select fan-out complete for profile $profileIndex" }
     }
 

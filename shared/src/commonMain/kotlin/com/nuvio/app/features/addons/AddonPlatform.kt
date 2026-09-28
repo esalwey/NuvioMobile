@@ -2,6 +2,10 @@ package com.nuvio.app.features.addons
 
 expect object AddonStorage {
     fun loadInstalledAddonUrls(profileId: Int): List<String>
+    /// Whether an installed-add-on list was ever stored for [profileId] on this device — an EMPTY
+    /// stored list included (unlike `loadInstalledAddonUrls(profileId).isNotEmpty()`). The account
+    /// wipe removes the key, so after a sign-out/in this is false again.
+    fun hasStoredInstalledAddonUrls(profileId: Int): Boolean
     fun saveInstalledAddonUrls(profileId: Int, urls: List<String>)
     fun loadAddonEnabledStates(profileId: Int): Map<String, Boolean>
     fun saveAddonEnabledStates(profileId: Int, states: Map<String, Boolean>)

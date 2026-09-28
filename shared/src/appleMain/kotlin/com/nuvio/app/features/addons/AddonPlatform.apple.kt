@@ -39,6 +39,9 @@ actual object AddonStorage {
             .filter { it.isNotEmpty() }
             .toList()
 
+    actual fun hasStoredInstalledAddonUrls(profileId: Int): Boolean =
+        NSUserDefaults.standardUserDefaults.objectForKey("${addonUrlsKey}_$profileId") != null
+
     actual fun saveInstalledAddonUrls(profileId: Int, urls: List<String>) {
         NSUserDefaults.standardUserDefaults.setObject(
             urls.joinToString(separator = "\n"),

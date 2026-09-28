@@ -62,4 +62,25 @@ class AddonSyncGuardsTest {
     fun `allows seeding for a signed-in account once the server pull has settled`() {
         assertTrue(defaultAddonSeedingAllowed(authenticatedNonAnon, serverPullSettled = true))
     }
+
+    // ADD-1: an empty list this device already knew is the user's deletion, not a fresh account.
+    @Test
+    fun `blocks seeding for a signed-in account whose add-on list this device already knew`() {
+        assertFalse(
+            defaultAddonSeedingAllowed(authenticatedNonAnon, serverPullSettled = true, addonListKnown = true),
+        )
+    }
+
+    @Test
+    fun `allows seeding for a signed-in account whose add-on list this device never knew`() {
+        assertTrue(
+            defaultAddonSeedingAllowed(authenticatedNonAnon, serverPullSettled = true, addonListKnown = false),
+        )
+    }
+
+    @Test
+    fun `guest seeding ignores whether the list was known`() {
+        assertTrue(defaultAddonSeedingAllowed(AuthState.Unauthenticated, serverPullSettled = false, addonListKnown = true))
+        assertTrue(defaultAddonSeedingAllowed(authenticatedAnon, serverPullSettled = false, addonListKnown = true))
+    }
 }
