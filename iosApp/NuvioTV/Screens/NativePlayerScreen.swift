@@ -187,7 +187,7 @@ struct NativePlayerScreen: View {
             }
             coordinator.onPositionTick = { [weak upNext] position, duration in
                 upNext?.onProgress(positionSec: position, durationSec: duration)
-                updateSkipPrompt(position: position)
+                updateSkipPrompt(position: position, durationSec: duration)
             }
             upNext.playerAttached()
             upNext.setPaused(false)
@@ -340,8 +340,11 @@ struct NativePlayerScreen: View {
 
     /// Offer the skip while inside a segment; the last second is excluded so the action
     /// disappears cleanly at the end (same rule as the mpv screen).
-    private func updateSkipPrompt(position: Double) {
-        let active = skipSegments.first { position >= $0.start && position < $0.end - PlayerChipStyle.lastSecondExclusion }
+    private func updateSkipPrompt(position: Double, durationSec: Double) {
+        // Upstream 80860602f: an error/placeholder clip (shared short-placeholder rule) offers no skip.
+        let placeholder = WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(durationSec * 1000))
+        let active = placeholder ? nil
+            : skipSegments.first(where: { position >= $0.start && position < $0.end - PlayerChipStyle.lastSecondExclusion })
         let prompt = active.map {
             SkipPrompt(label: Self.skipLabel(for: $0.type), targetSec: $0.end,
                        isCredits: UpNextTrigger.outroTypes.contains($0.type.lowercased()))

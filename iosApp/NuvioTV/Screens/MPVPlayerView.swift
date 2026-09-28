@@ -1503,7 +1503,7 @@ final class MPVTVPlayerViewController: UIViewController {
             logStartupStatsIfNeeded()
         }
 
-        updateSkipPrompt(position: snap.position)
+        updateSkipPrompt(position: snap.position, durationSec: snap.duration)
     }
 
     /// First-90s diagnostics for the beta "laggy at first" report: one `[MPVStats]` line per
@@ -1542,8 +1542,11 @@ final class MPVTVPlayerViewController: UIViewController {
 
     /// Show a skip prompt while the playhead is inside a segment (leaving a 1s tail so the button
     /// disappears cleanly at the end).
-    private func updateSkipPrompt(position: Double) {
-        let active = skipSegments.first { position >= $0.start && position < $0.end - PlayerChipStyle.lastSecondExclusion }
+    private func updateSkipPrompt(position: Double, durationSec: Double) {
+        // Upstream 80860602f: an error/placeholder clip (shared short-placeholder rule) offers no skip.
+        let placeholder = WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(durationSec * 1000))
+        let active = placeholder ? nil
+            : skipSegments.first(where: { position >= $0.start && position < $0.end - PlayerChipStyle.lastSecondExclusion })
         let prompt = active.map {
             SkipPrompt(label: skipLabel(for: $0.type), targetSec: $0.end,
                        isCredits: UpNextTrigger.outroTypes.contains($0.type.lowercased()))
