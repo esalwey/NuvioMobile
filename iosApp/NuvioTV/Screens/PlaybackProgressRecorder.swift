@@ -149,7 +149,7 @@ final class PlaybackProgressRecorder {
         // (`kitsu:`, `mal:` …), which Simkl can.
         if !otherTrackersOpen {
             otherTrackersOpen = true
-            scrobbleOtherTrackers(.start, percent: Self.percent(positionSec, durationSec))
+            scrobbleOtherTrackers(TrackingScrobbleAction.start, percent: Self.percent(positionSec, durationSec))
         }
         TraktScrobbleRepository.shared.buildItem(
             contentType: context.contentType,
@@ -192,7 +192,7 @@ final class PlaybackProgressRecorder {
         let percent: Float = short ? 0 : Self.percent(positionSec, durationSec)
         if otherTrackersOpen {
             otherTrackersOpen = false
-            scrobbleOtherTrackers(.stop, percent: percent)
+            scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent)
         }
         guard let item = traktItem else { return }
         traktItem = nil

@@ -1123,7 +1123,7 @@ final class MPVTVPlayerViewController: UIViewController {
         // (`kitsu:`, `mal:` …), which Simkl can.
         if !otherTrackersOpen {
             otherTrackersOpen = true
-            scrobbleOtherTrackers(.start, percent: traktStartPercent())
+            scrobbleOtherTrackers(TrackingScrobbleAction.start, percent: traktStartPercent())
         }
         TraktScrobbleRepository.shared.buildItem(
             contentType: context.contentType,
@@ -1160,7 +1160,7 @@ final class MPVTVPlayerViewController: UIViewController {
         let percent: Float = short ? 0 : (finished ? 100 : currentProgressPercent())
         if otherTrackersOpen {
             otherTrackersOpen = false
-            scrobbleOtherTrackers(.stop, percent: percent)
+            scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent)
         }
         guard let item = traktScrobbleItem else { return }
         traktScrobbleItem = nil
