@@ -800,9 +800,11 @@ final class MPVTVPlayerViewController: UIViewController {
 
     /// Once per file: restore the saved choice, or run the language plan. A saved addon choice can
     /// wait (`.waiting`) for this episode's addon subtitles — retried on every track walk, when the
-    /// fetch completes, and at `subtitleRestoreWaitSec` at the latest.
+    /// fetch completes, and at `subtitleRestoreWaitSec` at the latest. Never before FILE_LOADED: a
+    /// track walk can publish while the file is still opening, before `onFileLoaded` side-loads the
+    /// prefetched addon list — a saved addon choice would find nothing and give up.
     private func resolveSubtitleSelection(subInfos: [TrackInfo]) {
-        guard didAutoSelectTracks, !subtitleSelectionResolved, mpv != nil else { return }
+        guard didAutoSelectTracks, fileLoaded, !subtitleSelectionResolved, mpv != nil else { return }
         switch restorePersistedSubtitle(subInfos: subInfos) {
         case .restored:
             finishSubtitleSelection()
@@ -995,6 +997,8 @@ final class MPVTVPlayerViewController: UIViewController {
         fetchSkipSegments()
         // Started by the first refresh tick that knows the duration (PLY-6).
         traktStartPending = true
+        // The subtitle choice, if a track walk already came through while the file was opening.
+        resolveSubtitleSelection(subInfos: lastSubtitleInfos)
     }
 
     // MARK: - Match content frame rate (AVDisplayManager)
