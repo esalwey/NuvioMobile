@@ -55,6 +55,35 @@ private const val WATCH_PROGRESS_DELTA_PAGE_SIZE = 900
 private const val WATCH_PROGRESS_DELTA_OPERATION_UPSERT = "upsert"
 private const val WATCH_PROGRESS_DELTA_OPERATION_DELETE = "delete"
 private const val WATCH_PROGRESS_REMOTE_WRITE_DEDUP_WINDOW_MS = 5_000L
+internal const val WATCH_PROGRESS_BACKLOG_PUSH_LIMIT = 200
+
+/**
+ * CW sync (REMAINING_FIX #2): the rows the one-time post-pull backlog push sends — local rows whose
+ * key is still dirty, newest first, at most [limit]. Rows without a content or video id are left
+ * out: the server needs both, and one malformed row would fail the whole batch.
+ *
+ * Run right after a successful Nuvio pull, "still dirty" means the local row is newer than the
+ * account's copy or the account has none (the pull merges acknowledge every key the server already
+ * matches): up to build 130 every tvOS write passed `syncRemote = false`, and PLY-4 only pushes new
+ * saves, so those rows would otherwise never reach the account.
+ */
+internal fun selectDirtyWatchProgressBacklog(
+    entries: Collection<WatchProgressEntry>,
+    dirtyProgressKeys: Set<String>,
+    limit: Int = WATCH_PROGRESS_BACKLOG_PUSH_LIMIT,
+): List<WatchProgressEntry> {
+    if (dirtyProgressKeys.isEmpty() || limit <= 0) return emptyList()
+    return entries.newestByProgressKey()
+        .filter { (key, entry) ->
+            key in dirtyProgressKeys && entry.parentMetaId.isNotBlank() && entry.videoId.isNotBlank()
+        }
+        .values
+        .sortedWith(
+            compareByDescending<WatchProgressEntry> { entry -> entry.lastUpdatedEpochMs }
+                .thenBy { entry -> entry.resolvedProgressKey() },
+        )
+        .take(limit)
+}
 
 private data class RemoteMetadataResolutionResult(
     val key: WatchProgressMetadataKey,
@@ -327,6 +356,9 @@ object WatchProgressRepository {
     private var deltaInitialized = false
     private val remoteWriteDeduplicator = RemoteProgressWriteDeduplicator()
     internal var syncAdapter: ProgressSyncAdapter = SupabaseProgressSyncAdapter
+    /** Profiles whose dirty-row backlog was already pushed (or tried) by this process (#2). */
+    private val backlogPushLock = SynchronizedObject()
+    private val backlogPushedProfileIds = mutableSetOf<Int>()
 
     init {
         ensureTrackingProvidersRegistered()
@@ -418,6 +450,8 @@ object WatchProgressRepository {
         deltaCursorEventId = 0L
         deltaInitialized = false
         remoteWriteDeduplicator.clear()
+        // Another account's profiles reuse the same ids: they get their own backlog push.
+        synchronized(backlogPushLock) { backlogPushedProfileIds.clear() }
         TrackingProviderRegistry.progressProviders().forEach(TrackingProgressProvider::clearLocalState)
         TrackingSettingsRepository.clearLocalState()
         _uiState.value = WatchProgressUiState()
@@ -633,6 +667,11 @@ object WatchProgressRepository {
                         operationGeneration = operationGeneration,
                     )
                 }
+                // Still under the pull mutex: the dirty set is read exactly as this pull left it.
+                pushDirtyProgressBacklogOnce(
+                    profileId = profileId,
+                    operationGeneration = operationGeneration,
+                )
                 true
             } catch (error: CancellationException) {
                 throw error
@@ -1606,6 +1645,46 @@ object WatchProgressRepository {
                     if (latestEntry != null) {
                         pushScrobbleToServer(entry = latestEntry, profileId = profileId, isRetry = true)
                     }
+                }
+            }
+        }
+    }
+
+    /**
+     * CW sync (REMAINING_FIX #2): once per profile per process, right after a successful Nuvio pull,
+     * push the rows that are still dirty ([selectDirtyWatchProgressBacklog]) — progress recorded
+     * while every tvOS write stayed local (builds up to 130) never reached the account, and nothing
+     * else ever re-sends a dirty row. A successful push acknowledges them like any other push
+     * ([recordSuccessfulPush]); a failed one is logged and tried again on the next launch.
+     */
+    private fun pushDirtyProgressBacklogOnce(profileId: Int, operationGeneration: Long) {
+        if (!isActiveOperation(profileId, operationGeneration) || !hasLoadedNuvioRemoteProgress) return
+        val dirtyKeys = dirtyProgressKeysSnapshot()
+        if (!synchronized(backlogPushLock) { backlogPushedProfileIds.add(profileId) }) return
+        val backlog = selectDirtyWatchProgressBacklog(
+            entries = localEntriesSnapshot(),
+            dirtyProgressKeys = dirtyKeys,
+        )
+        if (backlog.isEmpty()) return
+        log.i {
+            "Pushing the watch-progress backlog for profile $profileId: ${backlog.size} of " +
+                "${dirtyKeys.size} unsynced rows, newest first"
+        }
+        accountScopeSnapshot().launch {
+            try {
+                syncAdapter.push(profileId = profileId, entries = backlog)
+                recordSuccessfulPush(
+                    profileId = profileId,
+                    operationGeneration = operationGeneration,
+                    entries = backlog,
+                )
+                log.i { "Pushed the watch-progress backlog for profile $profileId (${backlog.size} rows)" }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                log.e(error) {
+                    "Failed to push the watch-progress backlog for profile $profileId (${backlog.size} rows); " +
+                        "it is tried again on the next launch"
                 }
             }
         }

@@ -152,6 +152,35 @@ internal fun extraWatchedKeysChanged(
     current: Set<String>,
 ): Boolean = previous.orEmpty() != current
 
+internal const val WATCHED_BACKLOG_PUSH_LIMIT = 200
+
+/**
+ * CW sync (REMAINING_FIX #2): the watched marks the one-time post-pull backlog push sends — Nuvio
+ * marks whose key is still dirty, most recently marked first, at most [limit]. Up to build 130 a
+ * finished episode was marked with `syncRemote = false`, so its mark never reached the account;
+ * right after a successful pull, a key that is still dirty is a mark the account lacks or holds
+ * older (the pull merges acknowledge every key the server already matches).
+ */
+internal fun selectDirtyWatchedBacklog(
+    items: Map<String, WatchedItem>,
+    dirtyKeys: Set<String>,
+    limit: Int = WATCHED_BACKLOG_PUSH_LIMIT,
+): List<WatchedItem> {
+    if (dirtyKeys.isEmpty() || limit <= 0) return emptyList()
+    return dirtyKeys
+        .mapNotNull { key ->
+            items[key]
+                ?.takeIf { item -> item.id.isNotBlank() }
+                ?.let { item -> key to item.normalizedMarkedAt() }
+        }
+        .sortedWith(
+            compareByDescending<Pair<String, WatchedItem>> { (_, item) -> item.markedAtEpochMs }
+                .thenBy { (key, _) -> key },
+        )
+        .take(limit)
+        .map { (_, item) -> item }
+}
+
 private const val maxRestorableWatchedPayloadChars = 4 * 1024 * 1024
 
 internal fun shouldRestoreWatchedPayload(payloadLength: Int): Boolean =
@@ -203,6 +232,9 @@ object WatchedRepository {
     private var deltaInitialized: Boolean = false
     internal var syncAdapter: WatchedSyncAdapter = SupabaseWatchedSyncAdapter
     private var extraKeysObserverJob: Job? = null
+    /** Profiles whose dirty-mark backlog was already pushed (or tried) by this process (#2). */
+    private val backlogPushLock = SynchronizedObject()
+    private val backlogPushedProfileIds = mutableSetOf<Int>()
 
     fun ensureLoaded() {
         ensureTrackingProvidersRegistered()
@@ -255,6 +287,8 @@ object WatchedRepository {
         lastSuccessfulPushEpochMs = 0L
         deltaCursorEventId = 0L
         deltaInitialized = false
+        // Another account's profiles reuse the same ids: they get their own backlog push.
+        synchronized(backlogPushLock) { backlogPushedProfileIds.clear() }
         _fullyWatchedSeriesKeys.value = emptySet()
         _uiState.value = WatchedUiState()
     }
@@ -440,16 +474,20 @@ object WatchedRepository {
                     profileId = profileId,
                     resetDeltaState = true,
                 )
-            } ?: if (forceSnapshot) {
-                refreshNuvioSnapshot(
-                    operation = operation,
-                    profileId = profileId,
-                )
-            } else {
-                pullSupabaseDeltaFromServer(
-                    operation = operation,
-                    profileId = profileId,
-                )
+            } ?: run {
+                val pulled = if (forceSnapshot) {
+                    refreshNuvioSnapshot(
+                        operation = operation,
+                        profileId = profileId,
+                    )
+                } else {
+                    pullSupabaseDeltaFromServer(
+                        operation = operation,
+                        profileId = profileId,
+                    )
+                }
+                if (pulled) pushDirtyWatchedBacklogOnce(operation)
+                pulled
             }
         } catch (error: CancellationException) {
             throw error
@@ -1036,6 +1074,46 @@ object WatchedRepository {
                 }
             }.onFailure { e ->
                 log.e(e) { "Failed to push watched items" }
+            }
+        }
+    }
+
+    /**
+     * CW sync (REMAINING_FIX #2): once per profile per process, right after a successful Nuvio pull,
+     * push the Nuvio marks that are still dirty ([selectDirtyWatchedBacklog]) to the account only —
+     * never to a tracker: playback completions reach trackers through their scrobbles. A successful
+     * push acknowledges them like any other ([recordSuccessfulPush]); a failed one is logged and
+     * tried again on the next launch.
+     */
+    private fun pushDirtyWatchedBacklogOnce(operation: WatchedRefreshOperation) {
+        if (operation.sourceOperation.source.providerId != null || !isActiveOperation(operation)) return
+        val profileId = operation.profileId
+        val (backlog, dirtyCount) = itemsStore.read { nuvioItems, _, dirtyNuvioKeys, _ ->
+            selectDirtyWatchedBacklog(items = nuvioItems, dirtyKeys = dirtyNuvioKeys) to dirtyNuvioKeys.size
+        }
+        if (!synchronized(backlogPushLock) { backlogPushedProfileIds.add(profileId) }) return
+        if (backlog.isEmpty()) return
+        log.i {
+            "Pushing the watched-mark backlog for profile $profileId: ${backlog.size} of $dirtyCount " +
+                "unsynced marks, most recent first"
+        }
+        val operationGeneration = operation.profileGeneration
+        accountScopeSnapshot().launch {
+            try {
+                syncAdapter.push(profileId = profileId, items = backlog)
+                recordSuccessfulPush(
+                    profileId = profileId,
+                    operationGeneration = operationGeneration,
+                    items = backlog,
+                )
+                log.i { "Pushed the watched-mark backlog for profile $profileId (${backlog.size} marks)" }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                log.e(error) {
+                    "Failed to push the watched-mark backlog for profile $profileId (${backlog.size} marks); " +
+                        "it is tried again on the next launch"
+                }
             }
         }
     }
