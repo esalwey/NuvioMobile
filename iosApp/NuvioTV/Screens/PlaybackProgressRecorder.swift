@@ -27,25 +27,28 @@ final class PlaybackProgressRecorder {
 
     // MARK: - Progress save
 
+    // CW-1: filed under the SERIES name with the episode's own name/still beside it (mobile
+    // parity) — `context.title` is the "S1E3 · Pilot" picker label, which Continue Watching, the
+    // hero and the synced record used to show as the show's title.
     private lazy var session = WatchProgressPlaybackSession(
         profileId: ActiveProfileProvider.shared.activeProfileId,
         contentType: context.contentType,
         parentMetaId: context.parentMetaId,
         parentMetaType: context.contentType,
         videoId: context.videoId,
-        title: context.title,
-        logo: nil,
+        title: context.progressTitle,
+        logo: context.logo,
         poster: context.poster,
         background: context.background,
         seasonNumber: context.season.map { KotlinInt(int: Int32($0)) },
         episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) },
-        episodeTitle: nil,
-        episodeThumbnail: nil,
+        episodeTitle: context.episodeTitle,
+        episodeThumbnail: context.episodeStill,
         providerName: context.providerName,
         providerAddonId: context.providerAddonId,
         lastStreamTitle: context.streamTitle,
         lastStreamSubtitle: context.streamSubtitle,
-        pauseDescription: nil,
+        pauseDescription: context.synopsis,
         lastSourceUrl: context.url.absoluteString
     )
 
@@ -92,10 +95,10 @@ final class PlaybackProgressRecorder {
             contentType: context.contentType,
             parentMetaId: context.parentMetaId,
             videoId: context.videoId,
-            title: context.title,
+            title: context.progressTitle,
             seasonNumber: context.season.map { KotlinInt(int: Int32($0)) },
             episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) },
-            episodeTitle: nil,
+            episodeTitle: context.episodeTitle,
             releaseInfo: nil
         ) { [weak self] item, _ in
             DispatchQueue.main.async {

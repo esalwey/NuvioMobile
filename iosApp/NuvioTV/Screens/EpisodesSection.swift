@@ -133,7 +133,12 @@ struct EpisodesSection: View {
                 poster: route.meta.poster,
                 episodeStill: route.episodeStill,
                 synopsis: route.synopsis,
-                meta: PlaybackMeta(details: route.meta)
+                meta: PlaybackMeta(details: route.meta),
+                // CW-1: progress is filed under the series, with the episode's own name beside it.
+                seriesTitle: route.meta.name,
+                episodeTitle: route.episode.title,
+                background: route.meta.background,
+                logo: route.meta.logo
             )
         }
     }

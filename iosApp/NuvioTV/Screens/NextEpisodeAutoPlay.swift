@@ -934,7 +934,10 @@ final class NextEpisodeEngine: ObservableObject {
             meta: context.meta,
             fileSizeBytes: { let n: Int64? = stream.behaviorHints.videoSize?.int64Value; return n }(),
             requestHeaders: StreamModelsKt.sanitizePlaybackHeaders(
-                headers: stream.behaviorHints.proxyHeaders?.request)
+                headers: stream.behaviorHints.proxyHeaders?.request),
+            seriesTitle: context.seriesTitle,
+            episodeTitle: context.episodeTitle,
+            logo: context.logo
         )
         handedOff = true
         countdownTask?.cancel()
@@ -1386,7 +1389,11 @@ final class NextEpisodeEngine: ObservableObject {
             meta: context.meta,
             fileSizeBytes: { let n: Int64? = stream.behaviorHints.videoSize?.int64Value; return n }(),
             requestHeaders: StreamModelsKt.sanitizePlaybackHeaders(
-                headers: stream.behaviorHints.proxyHeaders?.request)
+                headers: stream.behaviorHints.proxyHeaders?.request),
+            // CW-1: same series; the next episode's own name.
+            seriesTitle: context.seriesTitle,
+            episodeTitle: Self.nonEmpty(next.title),
+            logo: context.logo
         )
     }
 

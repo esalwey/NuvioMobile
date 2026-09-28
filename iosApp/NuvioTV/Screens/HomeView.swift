@@ -1058,7 +1058,14 @@ struct HomeView: View {
                 StreamPickerView(
                     type: target.entry.parentMetaType,
                     videoId: target.entry.videoId,
-                    title: target.entry.title,
+                    // CW-1: the entry's title is the SERIES name — the picker header shows the
+                    // episode label, and the series name goes back into the progress record.
+                    title: ProgressRecordTitles.pickerTitle(
+                        title: target.entry.title,
+                        season: target.entry.seasonNumber?.value,
+                        episode: target.entry.episodeNumber?.value,
+                        episodeTitle: target.entry.episodeTitle
+                    ),
                     parentMetaId: target.entry.parentMetaId,
                     season: target.entry.seasonNumber?.value,
                     episode: target.entry.episodeNumber?.value,
@@ -1067,6 +1074,10 @@ struct HomeView: View {
                     poster: target.entry.poster,
                     episodeStill: { let still: String? = target.entry.episodeThumbnail; return (still ?? "").isEmpty ? nil : still }(),
                     synopsis: { let d: String? = target.entry.pauseDescription; return (d ?? "").isEmpty ? nil : d }(),
+                    seriesTitle: target.entry.title,
+                    episodeTitle: target.entry.episodeTitle,
+                    background: target.entry.background,
+                    logo: target.entry.logo,
                     onLeaveToDetails: { detailAfterResume = previewFromEntry(target.entry) }
                 )
             }

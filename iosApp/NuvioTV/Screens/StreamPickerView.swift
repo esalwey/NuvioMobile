@@ -36,6 +36,11 @@ struct StreamPickerView: View {
     let poster: String?
     /// Title-level facts for the player's Info tab chips (nil when the caller has no meta).
     let meta: PlaybackMeta?
+    /// CW-1: what the watch-progress record is filed under — the series name (`title` is the
+    /// episode label for an episode), plus the title's backdrop and logo. See `PlaybackContext`.
+    let seriesTitle: String?
+    let background: String?
+    let logo: String?
 
     /// The episode this picker lists streams for. It starts as the one the picker was opened for;
     /// "Choose a Source" on the player's end screen moves it to the NEXT episode (`retarget(to:)`)
@@ -48,6 +53,8 @@ struct StreamPickerView: View {
         /// 16:9 episode image for the Info-tab header, shown in preference to `poster`.
         var episodeStill: String?
         var synopsis: String?
+        /// The episode's own name (CW-1: recorded beside the series name).
+        var episodeTitle: String?
     }
     @State private var target: Target
     private var videoId: String { target.videoId }
@@ -56,6 +63,16 @@ struct StreamPickerView: View {
     private var episode: Int? { target.episode }
     private var episodeStill: String? { target.episodeStill }
     private var synopsis: String? { target.synopsis }
+
+    /// CW-1: the series identity fetched with the episode list on the paths that start from a
+    /// progress record (Continue Watching, the Top Shelf). Those can only hand over what the record
+    /// holds — a name that builds before CW-1 wrote as the episode label, and often no artwork.
+    private struct FetchedSeries: Equatable {
+        var name: String?
+        var background: String?
+        var logo: String?
+    }
+    @State private var fetchedSeries: FetchedSeries?
 
     /// Presenters that are not the title's details page (Home's Continue Watching, a Top Shelf deep
     /// link) open it once this picker has closed after the player asked for the details page —
@@ -115,17 +132,28 @@ struct StreamPickerView: View {
         episodeStill: String? = nil,
         synopsis: String? = nil,
         meta: PlaybackMeta? = nil,
+        seriesTitle: String? = nil,
+        episodeTitle: String? = nil,
+        background: String? = nil,
+        logo: String? = nil,
         onLeaveToDetails: (() -> Void)? = nil
     ) {
         self.meta = meta
         self.poster = poster
+        // A progress-record launch hands over what the record holds, which builds before CW-1
+        // wrote as the episode label: such a label is dropped here (the fetched name stands in).
+        self.seriesTitle = seriesTitle.flatMap {
+            ProgressRecordTitles.seriesTitle($0, season: season, episode: episode)
+        }
+        self.background = background
+        self.logo = logo
         self.onLeaveToDetails = onLeaveToDetails
         self.type = type
         self.parentMetaId = parentMetaId ?? videoId
         self.episodes = episodes
         _target = State(initialValue: Target(
             videoId: videoId, title: title, season: season, episode: episode,
-            episodeStill: episodeStill, synopsis: synopsis
+            episodeStill: episodeStill, synopsis: synopsis, episodeTitle: episodeTitle
         ))
         _model = StateObject(wrappedValue: StreamsViewModel(
             type: type, videoId: videoId, parentMetaId: parentMetaId, season: season, episode: episode
@@ -142,7 +170,7 @@ struct StreamPickerView: View {
             season: season,
             episode: episode,
             poster: poster,
-            background: nil,
+            background: Self.nonEmpty(background) ?? fetchedSeries?.background,
             providerName: stream?.addonName,
             providerAddonId: stream?.addonId,
             streamTitle: stream.map { $0.streamLabel },
@@ -157,21 +185,47 @@ struct StreamPickerView: View {
             meta: meta,
             fileSizeBytes: { let n: Int64? = stream?.behaviorHints.videoSize?.int64Value; return n }(),
             requestHeaders: StreamModelsKt.sanitizePlaybackHeaders(
-                headers: stream?.behaviorHints.proxyHeaders?.request)
+                headers: stream?.behaviorHints.proxyHeaders?.request),
+            seriesTitle: resolvedSeriesTitle,
+            episodeTitle: Self.nonEmpty(target.episodeTitle),
+            logo: Self.nonEmpty(logo) ?? fetchedSeries?.logo
         )
+    }
+
+    /// CW-1: the series name the progress record is filed under — the caller's (legacy episode
+    /// labels already dropped in `init`), else the one fetched with the episode list.
+    private var resolvedSeriesTitle: String? {
+        seriesTitle ?? fetchedSeries?.name
+    }
+
+    /// Kotlin-bridged optional strings: blank counts as missing.
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
     }
 
     /// Series launch paths that don't carry the episode list (Home continue-watching, Detail's
     /// primary Play) get it fetched here so the player can offer next-episode autoplay. No-op for
-    /// movies and for paths that already passed `episodes` (EpisodesSection).
+    /// movies and for paths that already passed `episodes` (EpisodesSection). The series name and
+    /// artwork come along for the progress record (CW-1).
     private func fetchEpisodesIfNeeded() {
         guard episodes.isEmpty, fetchedEpisodes.isEmpty,
               ["series", "tv", "show", "tvshow"].contains(type.lowercased()) else { return }
         MetaDetailsRepository.shared.fetch(type: type, id: parentMetaId, cacheResult: true) { details, _ in
-            let videos = details?.videos ?? []
-            guard !videos.isEmpty else { return }
+            guard let details else { return }
+            let videos = details.videos
+            let name: String = details.name
+            let backdrop: String? = details.background
+            let logo: String? = details.logo
             // Suspend completions can land off-main; hop before mutating view state.
-            DispatchQueue.main.async { fetchedEpisodes = videos }
+            DispatchQueue.main.async {
+                if !videos.isEmpty { fetchedEpisodes = videos }
+                fetchedSeries = FetchedSeries(
+                    name: Self.nonEmpty(name),
+                    background: Self.nonEmpty(backdrop),
+                    logo: Self.nonEmpty(logo)
+                )
+            }
         }
     }
 
@@ -378,7 +432,8 @@ struct StreamPickerView: View {
             season: video.season?.value,
             episode: video.episode?.value,
             episodeStill: (still ?? "").isEmpty ? nil : still,
-            synopsis: (overview ?? "").isEmpty ? nil : overview
+            synopsis: (overview ?? "").isEmpty ? nil : overview,
+            episodeTitle: video.title
         )
         target = next
         // The list now IS the playing episode's, so a later close stays here.

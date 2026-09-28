@@ -215,10 +215,13 @@ struct ContentView: View {
                 StreamPickerView(
                     type: type,
                     videoId: videoId,
-                    title: title,
+                    // CW-1: the Top Shelf item carries the progress record's title — the series name.
+                    title: ProgressRecordTitles.pickerTitle(title: title, season: season, episode: episode,
+                                                            episodeTitle: nil),
                     parentMetaId: parentMetaId,
                     season: season,
                     episode: episode,
+                    seriesTitle: title,
                     onLeaveToDetails: {
                         deepLinkDetailAfterResume = MetaPreview(
                             id: parentMetaId,

@@ -892,8 +892,11 @@ struct DetailView: View {
             if interacted { cancelAutoPlayTrailer() }
         }
         .fullScreenCover(isPresented: $showStreams) {
+            // CW-1: the backdrop (never the poster fallback `backgroundUrl` ends on) and the logo
+            // are recorded with the progress entry for Continue Watching and its hero.
             StreamPickerView(type: preview.type, videoId: streamVideoId, title: title,
-                             poster: posterUrl, synopsis: overview, meta: playbackMeta)
+                             poster: posterUrl, synopsis: overview, meta: playbackMeta,
+                             background: model.meta?.background ?? preview.banner, logo: logoUrl)
         }
         .fullScreenCover(item: $seriesPlay) { route in
             StreamPickerView(
@@ -907,7 +910,12 @@ struct DetailView: View {
                 poster: route.meta.poster,
                 episodeStill: route.episodeStill,
                 synopsis: route.synopsis,
-                meta: playbackMeta
+                meta: playbackMeta,
+                // CW-1: progress is filed under the series, with the episode's own name beside it.
+                seriesTitle: route.meta.name,
+                episodeTitle: route.episodeName,
+                background: route.meta.background,
+                logo: route.meta.logo
             )
         }
         // FEAT-32: presented from `presentedTrailer`, which `beginTrailerBridge` sets after the
@@ -2325,6 +2333,13 @@ private struct SeriesPlayRoute: Identifiable {
         if let overview, !overview.isEmpty { return overview }
         let d: String? = meta.description_
         return d
+    }
+    /// The episode's own name (the action's, else the resolved episode's) — CW-1.
+    var episodeName: String? {
+        let name: String? = action.episodeTitle
+        if let name, !name.isEmpty { return name }
+        let fallback: String? = episode?.title
+        return (fallback ?? "").isEmpty ? nil : fallback
     }
 
     /// "S1E1 · Pilot"-style picker title (falls back to the action label).

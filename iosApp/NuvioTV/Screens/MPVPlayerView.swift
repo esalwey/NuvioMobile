@@ -832,10 +832,10 @@ final class MPVTVPlayerViewController: UIViewController {
             contentType: context.contentType,
             parentMetaId: context.parentMetaId,
             videoId: context.videoId,
-            title: context.title,
+            title: context.progressTitle,
             seasonNumber: context.season.map { KotlinInt(int: Int32($0)) },
             episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) },
-            episodeTitle: nil,
+            episodeTitle: context.episodeTitle,
             releaseInfo: nil
         ) { [weak self] item, _ in
             // Suspend completions can land off-main; hop before touching controller state.
@@ -1116,25 +1116,27 @@ final class MPVTVPlayerViewController: UIViewController {
         if seconds > 10 { pendingResumeSec = seconds }
     }
 
+    // CW-1: the series name + the episode's own name/still, never the "S1E3 · Pilot" header label
+    // as the show's title (same record `PlaybackProgressRecorder` writes for the native engine).
     private lazy var session = WatchProgressPlaybackSession(
         profileId: ActiveProfileProvider.shared.activeProfileId,
         contentType: context.contentType,
         parentMetaId: context.parentMetaId,
         parentMetaType: context.contentType,
         videoId: context.videoId,
-        title: context.title,
-        logo: nil,
+        title: context.progressTitle,
+        logo: context.logo,
         poster: context.poster,
         background: context.background,
         seasonNumber: context.season.map { KotlinInt(int: Int32($0)) },
         episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) },
-        episodeTitle: nil,
-        episodeThumbnail: nil,
+        episodeTitle: context.episodeTitle,
+        episodeThumbnail: context.episodeStill,
         providerName: context.providerName,
         providerAddonId: context.providerAddonId,
         lastStreamTitle: context.streamTitle,
         lastStreamSubtitle: context.streamSubtitle,
-        pauseDescription: nil,
+        pauseDescription: context.synopsis,
         lastSourceUrl: context.url.absoluteString
     )
 
