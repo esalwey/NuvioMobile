@@ -14,6 +14,9 @@ struct DetailOverview: View {
     var collapsedLines = 4
     var maxWidth: CGFloat = 1100
 
+    /// Accessibility identifier of the More / Less pill.
+    static let toggleIdentifier = "detail.overview.toggle"
+
     @State private var expanded = false
     @State private var fullHeight: CGFloat = 0
     @State private var collapsedHeight: CGFloat = 0
@@ -68,6 +71,8 @@ struct DetailOverview: View {
                 .padding(.horizontal, Theme.Spacing.md)
                 .padding(.vertical, Theme.Spacing.xxs + 2)
         }
+        // The UI tests' handle on this extra focus stop (DetailRowAnchorTests steps past it).
+        .accessibilityIdentifier(Self.toggleIdentifier)
         if DetailScrollAB.buttonGlassDisabled {
             button.buttonStyle(.bordered)
         } else {
