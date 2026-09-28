@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
@@ -62,12 +63,15 @@ object AddonRepository {
     // gated; here it only ever answered "has this profile's list been pulled yet", so it stays.
     private var pulledFromServer = false
     // Fork (ADD-1 follow-up to upstream 1854dfc3): whether this profile's add-on list is already
-    // KNOWN to this device — a list was stored here before this profile session began, or the list
-    // has been non-empty at some point during it. Null until the session's first bootstrap step
-    // captures it (initialize() or a pull that wins that race). A signed-in account whose list is
-    // known is never re-seeded with the default add-on: an empty server list there means the user
-    // removed every add-on (here or on another device), and the seed's push would bring one back
-    // over that deletion. See seedingAllowed().
+    // KNOWN to this device — it has been non-empty AND in step with the account here: a pull
+    // applied a non-empty server list, or a push of a non-empty list succeeded. Persisted per
+    // profile (AddonStorage.saveAddonListKnown, wiped at sign-out). Null until the session's first
+    // bootstrap step reads it back (initialize() or a pull that wins that race). A signed-in
+    // account whose list is known is never re-seeded with the default add-on: an empty server list
+    // there means the user removed every add-on (here or on another device), and the seed's push
+    // would bring one back over that deletion. A list that only ever existed locally — a seed that
+    // never reached the server (offline, failed push), or an empty first pull — does NOT count, so
+    // a fresh account whose seed did not land is seeded again next launch. See seedingAllowed().
     private var addonListKnown: Boolean? = null
     private var currentProfileId: Int = 1
     private val activeRefreshJobs = mutableMapOf<String, Job>()
@@ -204,6 +208,9 @@ object AddonRepository {
                     // leave watchers thinking bootstrap never happened.
                     isInitialized = true,
                 )
+                // ADD-1: a non-empty list straight from the account — known from now on (persist()
+                // records it). An empty one leaves the marker as it was.
+                if (urls.isNotEmpty()) addonListKnown = true
                 persist()
                 urls.forEach { url ->
                     val existing = existingByUrl[url]
@@ -422,7 +429,7 @@ object AddonRepository {
         defaultAddonSeedingAllowed(
             authState = AuthRepository.state.value,
             serverPullSettled = _serverPullSettled.value,
-            addonListKnown = addonListKnown ?: AddonStorage.hasStoredInstalledAddonUrls(currentProfileId),
+            addonListKnown = addonListKnown ?: storedAddonListKnown(currentProfileId),
         )
 
     /// ADD-1: true once it is settled that the default-addon seed will NOT run for this profile
@@ -433,7 +440,7 @@ object AddonRepository {
         val authState = AuthRepository.state.value
         if (authState !is AuthState.Authenticated || authState.isAnonymous) return false
         if (!_serverPullSettled.value) return false
-        return addonListKnown ?: AddonStorage.hasStoredInstalledAddonUrls(currentProfileId)
+        return addonListKnown ?: storedAddonListKnown(currentProfileId)
     }
 
     /// ADD-2: whether the active profile is a secondary profile set to use the primary profile's
@@ -476,6 +483,9 @@ object AddonRepository {
                 }
                 SupabaseProvider.client.postgrest.rpc("sync_push_addons", params)
                 log.d { "pushToServer() — success" }
+                // ADD-1: this non-empty list is now the account's — a later empty server list is
+                // a deletion, not a fresh account (see addonListKnown).
+                if (addons.isNotEmpty() && isActive) markAddonListKnown(profileId)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -507,8 +517,11 @@ object AddonRepository {
     }
 
     private fun persist() {
+        // Read back BEFORE anything is written, so a device upgraded from a build without the
+        // marker still judges its stored list by what the older build left (see
+        // resolveStoredAddonListKnown); no-op once this session has done it.
+        rememberStoredAddonList()
         val addons = _uiState.value.addons
-        if (addons.isNotEmpty()) addonListKnown = true
         AddonStorage.saveInstalledAddonUrls(
             currentProfileId,
             dedupeManifestUrls(addons.map { it.manifestUrl }),
@@ -517,6 +530,14 @@ object AddonRepository {
             currentProfileId,
             addons.associate { it.manifestUrl to it.enabled },
         )
+        // ADD-1: written with every list so the next session reads the marker, not a guess.
+        AddonStorage.saveAddonListKnown(currentProfileId, addonListKnown == true)
+    }
+
+    /// ADD-1: a non-empty list for [profileId] reached the server.
+    private fun markAddonListKnown(profileId: Int) {
+        if (profileId == currentProfileId) addonListKnown = true
+        AddonStorage.saveAddonListKnown(profileId, true)
     }
 
     private fun loadLocalEnabledStates(): Map<String, Boolean> =
@@ -524,13 +545,19 @@ object AddonRepository {
             .mapKeys { (url, _) -> ensureManifestSuffix(url) }
 
     /// Captures `addonListKnown` once per profile session, BEFORE anything this session persists
-    /// (both initialize() and pullFromServer() call it first), so it reflects what an earlier
-    /// session left on this device.
+    /// (initialize(), pullFromServer() and persist() all call it first), so it reflects what an
+    /// earlier session left on this device.
     private fun rememberStoredAddonList() {
         if (addonListKnown == null) {
-            addonListKnown = AddonStorage.hasStoredInstalledAddonUrls(currentProfileId)
+            addonListKnown = storedAddonListKnown(currentProfileId)
         }
     }
+
+    private fun storedAddonListKnown(profileId: Int): Boolean =
+        resolveStoredAddonListKnown(
+            marker = AddonStorage.loadAddonListKnown(profileId),
+            storedUrls = AddonStorage.loadInstalledAddonUrls(profileId),
+        )
 
     private fun cancelActiveRefreshes() {
         activeRefreshJobs.values.forEach(Job::cancel)
@@ -642,6 +669,14 @@ internal fun shouldBlockUnhydratedAddonPush(authState: AuthState, pulledFromServ
 /// empty list is then the user's own doing — every add-on removed here or on another device — and
 /// seeding (whose push reaches every device) would resurrect one of them, so only a list this
 /// device has never known is seeded.
+///
+/// ADD-1: whether a profile's add-on list counts as known when a session starts. [marker] is what
+/// earlier sessions recorded; null on a device upgraded from a build that never wrote it, where a
+/// non-empty stored list counts — those builds pushed every local list to an empty account on
+/// their first pull, so such a list did reach the server.
+internal fun resolveStoredAddonListKnown(marker: Boolean?, storedUrls: List<String>): Boolean =
+    marker ?: storedUrls.isNotEmpty()
+
 internal fun defaultAddonSeedingAllowed(
     authState: AuthState,
     serverPullSettled: Boolean,

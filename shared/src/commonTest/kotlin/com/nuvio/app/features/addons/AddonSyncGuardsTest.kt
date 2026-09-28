@@ -83,4 +83,35 @@ class AddonSyncGuardsTest {
         assertTrue(defaultAddonSeedingAllowed(AuthState.Unauthenticated, serverPullSettled = false, addonListKnown = true))
         assertTrue(defaultAddonSeedingAllowed(authenticatedAnon, serverPullSettled = false, addonListKnown = true))
     }
+
+    // ADD-1 follow-up: "known" is the recorded marker — set only once a non-empty list was in step
+    // with the account — never merely "some list is stored here".
+    @Test
+    fun `a recorded marker decides whether the stored list is known`() {
+        assertTrue(resolveStoredAddonListKnown(marker = true, storedUrls = emptyList()))
+        assertFalse(resolveStoredAddonListKnown(marker = false, storedUrls = listOf(CINEMETA)))
+    }
+
+    @Test
+    fun `an unpushed default seed does not make the list known`() {
+        // Seeded while offline (push blocked) or with a failed push: persist() records false, so
+        // the next launch's empty pull is followed by a new seed instead of a Home with no sources.
+        assertFalse(resolveStoredAddonListKnown(marker = false, storedUrls = listOf(CINEMETA)))
+    }
+
+    @Test
+    fun `an empty first pull does not make the list known`() {
+        assertFalse(resolveStoredAddonListKnown(marker = false, storedUrls = emptyList()))
+    }
+
+    @Test
+    fun `without a marker only a non-empty stored list counts as known`() {
+        // Device upgraded from a build that never wrote the marker.
+        assertTrue(resolveStoredAddonListKnown(marker = null, storedUrls = listOf(CINEMETA)))
+        assertFalse(resolveStoredAddonListKnown(marker = null, storedUrls = emptyList()))
+    }
+
+    private companion object {
+        const val CINEMETA = "https://v3-cinemeta.strem.io/manifest.json"
+    }
 }

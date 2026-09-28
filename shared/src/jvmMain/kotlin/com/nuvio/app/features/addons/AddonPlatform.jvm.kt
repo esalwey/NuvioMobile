@@ -23,6 +23,7 @@ actual object AddonStorage {
     private const val preferencesName = "nuvio_addons"
     private const val addonUrlsKey = "installed_manifest_urls"
     private const val addonEnabledStatesKey = "installed_manifest_enabled_states"
+    private const val addonListKnownKey = "installed_manifest_list_known"
 
     private val preferences: JvmSharedPreferences? = jvmSharedPreferences(preferencesName)
 
@@ -35,8 +36,18 @@ actual object AddonStorage {
             .filter { it.isNotEmpty() }
             .toList()
 
-    actual fun hasStoredInstalledAddonUrls(profileId: Int): Boolean =
-        preferences?.contains("${addonUrlsKey}_$profileId") == true
+    actual fun loadAddonListKnown(profileId: Int): Boolean? {
+        val prefs = preferences ?: return null
+        val key = "${addonListKnownKey}_$profileId"
+        return if (prefs.contains(key)) prefs.getBoolean(key, false) else null
+    }
+
+    actual fun saveAddonListKnown(profileId: Int, known: Boolean) {
+        preferences
+            ?.edit()
+            ?.putBoolean("${addonListKnownKey}_$profileId", known)
+            ?.apply()
+    }
 
     actual fun saveInstalledAddonUrls(profileId: Int, urls: List<String>) {
         preferences

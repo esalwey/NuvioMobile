@@ -124,6 +124,9 @@ object AccountDataStores {
                 AppleKeySpec.ProfileIndexed("installed_manifest_urls_"),
                 // Written by saveAddonEnabledStates; covered by NO existing cleaner.
                 AppleKeySpec.ProfileIndexed("installed_manifest_enabled_states_"),
+                // ADD-1 saveAddonListKnown: left alive, the next account's same-numbered profile
+                // would inherit "list known" and never get the default add-on.
+                AppleKeySpec.ProfileIndexed("installed_manifest_list_known_"),
             ),
         ),
         AccountDataStore(
