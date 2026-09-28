@@ -296,7 +296,8 @@ internal fun SimklMedia.canonicalContentId(animeIdPreference: SimklAnimeIdPrefer
             SimklAnimeIdPreference.IMDB -> Unit // fall through to standard chain
         }
     }
-    // Standard fallback chain (upstream 8aad52d83 moves Kitsu ahead of MAL)
+    // Standard fallback chain (upstream 8aad52d83 moves Kitsu ahead of MAL; the Kitsu branch it left
+    // after AniList could never be reached and is dropped here)
     return when {
         !ids.idValue("imdb").isNullOrBlank() -> ids.idValue("imdb")
         !ids.idValue("tmdb").isNullOrBlank() -> "tmdb:${ids.idValue("tmdb")}"
@@ -305,7 +306,6 @@ internal fun SimklMedia.canonicalContentId(animeIdPreference: SimklAnimeIdPrefer
         !ids.idValue("mal").isNullOrBlank() -> "mal:${ids.idValue("mal")}"
         !ids.idValue("anidb").isNullOrBlank() -> "anidb:${ids.idValue("anidb")}"
         !ids.idValue("anilist").isNullOrBlank() -> "anilist:${ids.idValue("anilist")}"
-        !ids.idValue("kitsu").isNullOrBlank() -> "kitsu:${ids.idValue("kitsu")}"
         !ids.simklIdValue().isNullOrBlank() -> "simkl:${ids.simklIdValue()}"
         else -> null
     }

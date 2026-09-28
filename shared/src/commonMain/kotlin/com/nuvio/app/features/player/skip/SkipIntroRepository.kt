@@ -84,7 +84,11 @@ object SkipIntroRepository {
         val simklIdsDeferred = async { SimklIdResolver.resolveIds("mal", malId) }
         val simklIds = simklIdsDeferred.await()
         // The addon's IMDB id only stands in when Simkl has none: Simkl's own id is the one its TVDB
-        // episode mapping below is expressed in.
+        // episode mapping below is expressed in. It needs that mapping all the same: when Simkl
+        // knows nothing of the entry, IntroDB is not asked. Upstream would query the franchise's
+        // IMDB id at the entry's own season and episode, but a Kitsu/MAL entry numbers its episodes
+        // from 1 in every season, so a later season would get the first season's segments, which
+        // also time the Up Next card.
         val resolvedImdbId = imdbId ?: simklIds?.imdb ?: fallbackImdbId
 
         val anilistId = simklIds?.anilist
@@ -136,7 +140,8 @@ object SkipIntroRepository {
         val simklIdsDeferred = async { SimklIdResolver.resolveIds("kitsu", kitsuId) }
         val simklIds = simklIdsDeferred.await()
         val malIdStr = simklIds?.mal
-        // The addon's IMDB id only stands in when Simkl has none (see getSkipIntervalsForMal).
+        // The addon's IMDB id only stands in when Simkl has none, and only with Simkl's TVDB
+        // mapping (see getSkipIntervalsForMal).
         val resolvedImdbId = imdbId ?: simklIds?.imdb ?: fallbackImdbId
 
         val aniSkipDeferred = async {
