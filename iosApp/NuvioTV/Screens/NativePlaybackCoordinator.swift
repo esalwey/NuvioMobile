@@ -804,7 +804,8 @@ final class NativePlaybackCoordinator: ObservableObject {
                         let paused = player.timeControlStatus != .playing
                         self.lastPositionSec = pos
                         self.lastDurationSec = dur
-                        self.recorder.record(positionSec: pos, durationSec: dur, isPaused: paused, speed: 1, flush: false)
+                        self.recorder.record(positionSec: pos, durationSec: dur, isPaused: paused, speed: 1, flush: false,
+                                             isBuffering: player.timeControlStatus == .waitingToPlayAtSpecifiedRate)
                         self.refreshActiveAudioTrack()
                         if self.audibleGroup == nil { self.handleMediaSelectionChange(item: item, player: player) }
                         else { self.syncAudioSelection(item: item, player: player) }

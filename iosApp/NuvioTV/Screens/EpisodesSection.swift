@@ -16,13 +16,19 @@ struct EpisodesSection: View {
     /// (`DetailViewModel.episodeProgress`); drawn as a bar along the bottom of the still.
     var episodeProgress: [String: Double] = [:]
     /// EP-1: the season and episode of the series' Resume / Up Next action — the shelf opens on
-    /// that season, scrolled to that episode, until the viewer picks a season themselves.
+    /// that season, scrolled to that episode, and follows it until the viewer reaches the shelf.
     var preferredSeason: Int? = nil
     var preferredEpisode: Int? = nil
     /// EP-2: mark / unmark one episode (long press → context menu). nil = no menu.
     var onToggleWatched: ((MetaVideo) -> Void)? = nil
 
     @State private var selectedSeason: Int?
+    /// EP-1: an episode card has had focus. Until then the shelf follows the Resume / Up Next action
+    /// as it resolves (local progress first, a Trakt hydration seconds later); from then on the
+    /// season on screen is pinned into `selectedSeason` and the shelf never scrolls by itself, so an
+    /// action that moves on — an episode marked watched, a season finale, a sync landing — never
+    /// swaps the season or the scroll position under the viewer.
+    @State private var shelfEngaged = false
     @State private var episodeForStreams: EpisodeRoute?
     @FocusState private var focusedEpisodeId: String?
 
@@ -131,24 +137,39 @@ struct EpisodesSection: View {
                 .scrollClipDisabled()
                 .onAppear {
                     // EP-1: open on the Resume / Up Next episode (the layout pass has to land first).
-                    guard let restingEpisodeId, restingEpisodeId != episodes.first?.id else { return }
+                    // Not on a return to this page once the viewer has been through the shelf.
+                    guard !shelfEngaged, let restingEpisodeId, restingEpisodeId != episodes.first?.id else { return }
                     DispatchQueue.main.async {
                         var tx = Transaction()
                         tx.disablesAnimations = true
                         withTransaction(tx) { proxy.scrollTo(restingEpisodeId, anchor: .leading) }
                     }
                 }
-                .onChange(of: restingEpisodeId) { _, target in
+                .onChange(of: current) { _, _ in
                     // A new season can be shorter than the old scroll offset; snap to its first
                     // episode — or, EP-1, to the Resume / Up Next episode — without animating
-                    // through the intermediate layout. Never under a viewer browsing the shelf.
-                    guard let target, focusedEpisodeId == nil else { return }
+                    // through the intermediate layout.
+                    guard let restingEpisodeId else { return }
+                    var tx = Transaction()
+                    tx.disablesAnimations = true
+                    withTransaction(tx) { proxy.scrollTo(restingEpisodeId, anchor: .leading) }
+                }
+                .onChange(of: restingEpisodeId) { _, target in
+                    // EP-1: the action resolved late within the season on screen (a Trakt
+                    // hydration) — follow it, but only until the viewer has reached the shelf.
+                    guard let target, !shelfEngaged, focusedEpisodeId == nil else { return }
                     var tx = Transaction()
                     tx.disablesAnimations = true
                     withTransaction(tx) { proxy.scrollTo(target, anchor: .leading) }
                 }
             }
             .focusSection()
+            .onChange(of: focusedEpisodeId) { _, focused in
+                // EP-1: the viewer reached the shelf — pin the season on screen (see `shelfEngaged`).
+                guard focused != nil, !shelfEngaged else { return }
+                shelfEngaged = true
+                if selectedSeason == nil { selectedSeason = current }
+            }
 
             focusedOverviewPanel(episodes: episodes, restingEpisodeId: restingEpisodeId)
         }

@@ -111,6 +111,10 @@ fun buildContinueWatchingNextUpSeeds(
             markedAtEpochMs = normalizeWatchedMarkedAtEpochMs(item.markedAtEpochMs),
         )
     }
+    // Each series only scans its own records: the row is rebuilt on every progress emission —
+    // playback ticks included — and a profile can hold thousands of imported episode marks.
+    val progressRecordsByContent = progressRecords.groupBy { record -> record.content }
+    val watchedRecordsByContent = watchedRecords.groupBy { record -> record.content }
     // An in-progress card at least as recent as the series' last finished episode wins.
     val inProgressAtBySeries = inProgressEntries
         .filter { entry -> entry.parentMetaType.isSeriesTypeForContinueWatching() }
@@ -121,8 +125,8 @@ fun buildContinueWatchingNextUpSeeds(
         .mapNotNull { content ->
             val completed = latestCompletedSeriesEpisode(
                 content = content,
-                progressRecords = progressRecords,
-                watchedRecords = watchedRecords,
+                progressRecords = progressRecordsByContent[content].orEmpty(),
+                watchedRecords = watchedRecordsByContent[content].orEmpty(),
                 preferFurthestEpisode = preferFurthestEpisode,
             ) ?: return@mapNotNull null
             if (completed.seasonNumber == 0) return@mapNotNull null

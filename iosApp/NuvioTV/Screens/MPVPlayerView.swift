@@ -145,6 +145,11 @@ final class MPVTVPlayerViewController: UIViewController {
     private var skipSegments: [SkipSegment] = []
     /// Last raw eof-reached value (edge detection for the post-play cover).
     private var lastEofFlag = false
+    /// PLY-4: last cached pause flag — a pause pushes the position to the account (mobile flushes
+    /// on every playing → paused), as does leaving the app mid-playback (the TV button, sleep):
+    /// neither reaches `viewDidDisappear`'s flush.
+    private var lastPausedFlag = false
+    private var backgroundObserver: NSObjectProtocol?
 
     // MARK: Event-driven property cache
     //
@@ -236,6 +241,12 @@ final class MPVTVPlayerViewController: UIViewController {
         let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeDown))
         swipeDown.direction = .down
         view.addGestureRecognizer(swipeDown)
+
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.saveProgress(flush: true) }
+        }
 
         setupMpv()
     }
@@ -1191,6 +1202,10 @@ final class MPVTVPlayerViewController: UIViewController {
         state.positionSec = max(snap.position, 0)
         state.isPaused = snap.paused
         state.isBuffering = snap.cacheWait || (snap.coreIdle && !snap.paused)
+        if snap.paused != lastPausedFlag {
+            lastPausedFlag = snap.paused
+            if snap.paused, !snap.eof, !state.isEnded { saveProgress(flush: true) }   // PLY-4
+        }
 
         // Rising-edge detection: eof-reached STAYS true while keep-open holds the last frame, so
         // only propagate transitions — otherwise a dismissed end screen re-presents each tick.
@@ -1432,6 +1447,7 @@ final class MPVTVPlayerViewController: UIViewController {
     // MARK: - Teardown
 
     deinit {
+        if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
         pollTimer?.invalidate()
         seekTimer?.invalidate()
         subtitleWatcher?.cancel()

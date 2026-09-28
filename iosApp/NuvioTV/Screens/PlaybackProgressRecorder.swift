@@ -1,5 +1,6 @@
 import Foundation
 import SharedCore
+import UIKit
 
 /// Engine-agnostic watch-progress + Trakt scrobbling for a `PlaybackContext`. Mirrors the logic in
 /// `MPVTVPlayerViewController` exactly so both engines record identically; the native AVPlayer path
@@ -52,12 +53,32 @@ final class PlaybackProgressRecorder {
         lastSourceUrl: context.url.absoluteString
     )
 
+    /// PLY-4: the last periodic tick, and whether it was playing — a pause pushes the position to
+    /// the account (mobile flushes on every playing → paused), and so does the app leaving the
+    /// foreground mid-playback (the TV button, sleep): neither reaches the teardown flush.
+    private var lastTick: (positionSec: Double, durationSec: Double, speed: Double)?
+    private var lastTickWasPlaying = false
+    private var backgroundObserver: NSObjectProtocol?
+
     /// Record playback progress. `flush` forces an immediate write (use on teardown). `isEnded`
     /// records the entry as completed regardless of the watched fraction — the end of the file,
     /// or an Up Next hand-off during the credits — so Continue Watching moves on to the next one.
+    /// `isBuffering`: a stall, not a pause (a periodic tick while it lasts is not flushed).
     func record(positionSec: Double, durationSec: Double, isPaused: Bool, speed: Double, flush: Bool,
-                isEnded: Bool = false) {
+                isEnded: Bool = false, isBuffering: Bool = false) {
         guard durationSec > 0, positionSec > 1 else { return }
+        var flush = flush
+        if flush {
+            // A terminal write (teardown, the end of the file): nothing is left for a later
+            // background flush to re-send — it would overwrite this record with an older tick.
+            lastTick = nil
+            lastTickWasPlaying = false
+        } else {
+            observeBackgroundIfNeeded()
+            if isPaused && !isBuffering && lastTickWasPlaying { flush = true }
+            if !isBuffering { lastTickWasPlaying = !isPaused }
+            lastTick = (positionSec: positionSec, durationSec: durationSec, speed: speed)
+        }
         let snapshot = PlayerPlaybackSnapshot(
             isLoading: false,
             isPlaying: !isPaused,
@@ -77,6 +98,28 @@ final class PlaybackProgressRecorder {
         } else {
             WatchProgressRepository.shared.upsertPlaybackProgress(session: session, snapshot: snapshot, syncRemote: false)
         }
+    }
+
+    /// PLY-4: installed with the first tick, so a recorder that never plays observes nothing.
+    private func observeBackgroundIfNeeded() {
+        guard backgroundObserver == nil else { return }
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.flushLastTick() }
+        }
+    }
+
+    /// The app left the foreground: the last tick (at most one tick interval old) goes to the
+    /// account as it stands.
+    private func flushLastTick() {
+        guard let tick = lastTick else { return }
+        record(positionSec: tick.positionSec, durationSec: tick.durationSec, isPaused: !lastTickWasPlaying,
+               speed: tick.speed, flush: true)
+    }
+
+    deinit {
+        if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
     }
 
     // MARK: - Trakt scrobbling

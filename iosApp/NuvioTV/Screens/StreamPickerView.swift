@@ -193,9 +193,13 @@ struct StreamPickerView: View {
     }
 
     /// CW-1: the series name the progress record is filed under — the caller's (legacy episode
-    /// labels already dropped in `init`), else the one fetched with the episode list.
+    /// labels already dropped in `init`), else the one fetched with the episode list, else — a
+    /// stream picked before that fetch landed — the metadata cache's.
     private var resolvedSeriesTitle: String? {
-        seriesTitle ?? fetchedSeries?.name
+        if let seriesTitle { return seriesTitle }
+        if let name = fetchedSeries?.name { return name }
+        guard season != nil, episode != nil else { return nil }
+        return ProgressRecordTitles.cachedSeriesName(type: type, id: parentMetaId)
     }
 
     /// Kotlin-bridged optional strings: blank counts as missing.

@@ -2355,7 +2355,8 @@ struct HomeView: View {
             name: entry.title,
             poster: entry.poster,
             banner: entry.background,
-            logo: nil,
+            // CW-1: recorded with the progress entry (and on the Up Next cards) since this build.
+            logo: { let logo: String? = entry.logo; return (logo ?? "").isEmpty ? nil : logo }(),
             posterShape: .poster,
             description: nil,
             releaseInfo: nil,

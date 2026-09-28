@@ -846,7 +846,10 @@ final class HomeViewModel: ObservableObject {
     /// watcher that can change what the row contains: the progress entries themselves, the active
     /// progress source, the Trakt continue-watching days cap — and the Up Next cards (CW-2).
     private func refreshContinueWatching() {
-        continueWatching = nextUp.row(inProgress: inProgressContinueWatching())
+        let row = nextUp.row(inProgress: inProgressContinueWatching())
+        // A rebuild that changes nothing (a watched or preference emission elsewhere, a card that
+        // resolved to what the row already shows) republishes nothing.
+        if row != continueWatching { continueWatching = row }
     }
 
     private func inProgressContinueWatching() -> [WatchProgressEntry] {
@@ -864,8 +867,13 @@ final class HomeViewModel: ObservableObject {
             nextUp.dismiss(entry)
             return
         }
-        WatchProgressRepository.shared.removeProgress(contentId: entry.parentMetaId, seasonNumber: nil, episodeNumber: nil)
-        nextUp.dismissReplacement(forContentId: entry.parentMetaId, inProgress: inProgressContinueWatching())
+        let contentId = entry.parentMetaId
+        // The replacement Up Next card, as the seeds stand before the removal (a provider's
+        // completed history) and after it (explicit episode marks) — see `replacementDismissKeys`.
+        var replacements = nextUp.replacementDismissKeys(forContentId: contentId, inProgress: inProgressContinueWatching())
+        WatchProgressRepository.shared.removeProgress(contentId: contentId, seasonNumber: nil, episodeNumber: nil)
+        replacements.formUnion(nextUp.replacementDismissKeys(forContentId: contentId, inProgress: inProgressContinueWatching()))
+        nextUp.dismiss(keys: replacements)
     }
 
     /// The real teardown. Idempotent (`started` gates it) so a hard `stop()` on an already-stopped

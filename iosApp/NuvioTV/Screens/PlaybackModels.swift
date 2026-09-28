@@ -129,6 +129,15 @@ enum ProgressRecordTitles {
         return title
     }
 
+    /// The series name from the metadata cache, for a launch whose record held only a legacy label
+    /// and whose own fetch has not landed (a stream picked at once, the next episode it chains to).
+    /// nil when the title is not cached — the label is then kept, and repaired on a later resume.
+    static func cachedSeriesName(type: String, id: String) -> String? {
+        let name: String? = MetaDetailsRepository.shared.peek(type: type, id: id)?.name
+        guard let name, !name.isEmpty else { return nil }
+        return name
+    }
+
     /// The stream picker header: "S1E3 · Pilot" for an episode (the series name stands in for a
     /// missing episode name), the title itself for anything else.
     static func pickerTitle(title: String, season: Int?, episode: Int?, episodeTitle: String?) -> String {

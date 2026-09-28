@@ -1482,7 +1482,9 @@ object WatchProgressRepository {
             return
         }
 
-        if (entry.parentMetaType.equals("series", ignoreCase = true)) {
+        // Fork: every type Continue Watching seeds Up Next cards from ("tv" too, not only
+        // "series") — a dismissed card must come back once the show is played again.
+        if (entry.parentMetaType.isSeriesTypeForContinueWatching()) {
             ContinueWatchingPreferencesRepository.removeDismissedNextUpKeysForContent(entry.parentMetaId)
         }
 

@@ -60,8 +60,9 @@ final class DetailViewModel: ObservableObject {
     /// touching the watched items).
     private var fullyWatchedWatcher: FlowWatcher?
     private var libraryWatcher: FlowWatcher?
-    /// Installed add-ons → `isPlaybackAvailable`.
+    /// Installed add-ons and plugin scrapers → `isPlaybackAvailable`.
     private var addonsWatcher: FlowWatcher?
+    private var pluginsWatcher: FlowWatcher?
     /// A series watched toggle is in flight (the shared action fetches the episode list first).
     private var watchedToggleInFlight = false
     private var progressWatcher: FlowWatcher?
@@ -71,6 +72,12 @@ final class DetailViewModel: ObservableObject {
     private var latestProgressEntries: [WatchProgressEntry] = []
     private var latestWatchedItems: [WatchedItem] = []
     private var latestCwPrefs: ContinueWatchingPreferencesUiState?
+    /// DET-2: the series-level watched state is reconciled (mobile MetaDetailsScreen) only once both
+    /// stores have loaded — and only when what it reads has changed since the last run.
+    private var watchedStateLoaded = false
+    private var progressRemoteLoaded = false
+    private var watchedStateVersion = 0
+    private var lastReconcileSignature: String?
     private var didRequestTrailer = false
     private var didRequestComments = false
     private var didRequestRatings = false
@@ -156,7 +163,11 @@ final class DetailViewModel: ObservableObject {
         refreshEpisodeProgressIfNeeded()
         watchedWatcher = FlowWatcherKt.watch(WatchedRepository.shared.uiState) { [weak self] emitted in
             guard let self else { return }
-            if let state = emitted as? WatchedUiState { self.latestWatchedItems = state.items }
+            if let state = emitted as? WatchedUiState {
+                self.latestWatchedItems = state.items
+                self.watchedStateLoaded = state.isLoaded
+                self.watchedStateVersion += 1
+            }
             self.refreshFlags()
         }
         fullyWatchedWatcher = FlowWatcherKt.watch(WatchedRepository.shared.fullyWatchedSeriesKeys) { [weak self] _ in
@@ -169,9 +180,16 @@ final class DetailViewModel: ObservableObject {
         addonsWatcher = FlowWatcherKt.watch(AddonRepository.shared.uiState) { [weak self] _ in
             self?.refreshFlags()
         }
+        // A plugin repository synced from the phone brings its scrapers once its manifest lands.
+        pluginsWatcher = FlowWatcherKt.watch(PluginRepository.shared.uiState) { [weak self] _ in
+            self?.refreshFlags()
+        }
         progressWatcher = FlowWatcherKt.watch(WatchProgressRepository.shared.uiState) { [weak self] emitted in
             guard let self else { return }
-            if let state = emitted as? WatchProgressUiState { self.latestProgressEntries = state.entries }
+            if let state = emitted as? WatchProgressUiState {
+                self.latestProgressEntries = state.entries
+                self.progressRemoteLoaded = state.hasLoadedRemoteProgress
+            }
             self.refreshFlags()
         }
         cwPrefsWatcher = FlowWatcherKt.watch(ContinueWatchingPreferencesRepository.shared.uiState) { [weak self] emitted in
@@ -190,9 +208,11 @@ final class DetailViewModel: ObservableObject {
         fullyWatchedWatcher?.cancel(); fullyWatchedWatcher = nil
         libraryWatcher?.cancel(); libraryWatcher = nil
         addonsWatcher?.cancel(); addonsWatcher = nil
+        pluginsWatcher?.cancel(); pluginsWatcher = nil
         progressWatcher?.cancel(); progressWatcher = nil
         cwPrefsWatcher?.cancel(); cwPrefsWatcher = nil
         episodeProgressRequestedFor = nil
+        lastReconcileSignature = nil
         trailerVideoURL = nil
         trailerVideoId = nil
         didRequestTrailer = false
@@ -515,6 +535,32 @@ final class DetailViewModel: ObservableObject {
         seriesAction = computeSeriesAction()
         let playable = computePlaybackAvailability()
         if playable != isPlaybackAvailable { isPlaybackAvailable = playable }
+        reconcileSeriesWatchedStateIfNeeded()
+    }
+
+    /// DET-2 (mobile MetaDetailsScreen parity): re-derives the series-level watched state — the
+    /// series marker and the fully-watched flag — from its episodes, so a series finished episode by
+    /// episode (here before this build, or on another device) reads as Watched, and a marker a newly
+    /// released episode made stale is dropped (else "Watched" → press → clears the whole history).
+    /// The shared call is idempotent; it runs again only when its inputs moved: the watched state,
+    /// this series' episode completions (not the positions a playback tick moves), the day.
+    private func reconcileSeriesWatchedStateIfNeeded() {
+        guard let meta, EpisodesSection.isSeriesLike(meta), watchedStateLoaded, progressRemoteLoaded,
+              !watchedToggleInFlight else { return }
+        let today = CurrentDateProvider.shared.todayIsoDate()
+        let completions = latestProgressEntries
+            .filter { $0.parentMetaId == meta.id }
+            .map { (entry: WatchProgressEntry) -> String in
+                let season = entry.seasonNumber?.value ?? -1
+                let episode = entry.episodeNumber?.value ?? -1
+                return "\(season):\(episode):\(entry.isCompleted ? 1 : 0)"
+            }
+            .sorted()
+            .joined(separator: ",")
+        let signature = "\(meta.type)|\(meta.id)|\(meta.videos.count)|\(today)|\(watchedStateVersion)|\(completions)"
+        guard signature != lastReconcileSignature else { return }
+        lastReconcileSignature = signature
+        WatchingActions.shared.reconcileSeriesWatchedState(meta: meta, todayIsoDate: today)
     }
 
     /// The primary Play target as Detail requests it — the series action's episode, else the
@@ -617,6 +663,7 @@ final class DetailViewModel: ObservableObject {
         fullyWatchedWatcher?.cancel()
         libraryWatcher?.cancel()
         addonsWatcher?.cancel()
+        pluginsWatcher?.cancel()
         progressWatcher?.cancel()
         cwPrefsWatcher?.cancel()
     }

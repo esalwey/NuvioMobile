@@ -6,7 +6,9 @@ import com.nuvio.app.features.addons.AddonsUiState
 import com.nuvio.app.features.addons.enabledAddons
 import com.nuvio.app.features.addons.hasPendingEnabledManifests
 import com.nuvio.app.features.details.MetaDetailsRepository
+import com.nuvio.app.features.plugins.PluginScraper
 import com.nuvio.app.features.plugins.PluginScraperHostProvider
+import com.nuvio.app.features.plugins.PluginsUiState
 
 /**
  * Upstream 972109f9 ("disable play when no source is available"), tvOS port: whether any
@@ -21,14 +23,25 @@ import com.nuvio.app.features.plugins.PluginScraperHostProvider
 object StreamSourceAvailability {
     fun canStream(type: String, videoId: String): Boolean {
         if (addonsCanStream(AddonRepository.uiState.value, type, videoId) != false) return true
-        if (
-            FeaturePolicyProvider.policy.pluginsEnabled &&
-            PluginScraperHostProvider.host.getEnabledScrapersForType(type).isNotEmpty()
-        ) {
-            return true
+        if (FeaturePolicyProvider.policy.pluginsEnabled) {
+            val host = PluginScraperHostProvider.host
+            // First: the lookup initializes the plugin store, which may start a refresh.
+            val scrapers = host.getEnabledScrapersForType(type)
+            if (pluginsCanStream(host.uiState.value, scrapers) != false) return true
         }
         return MetaDetailsRepository.findEmbeddedStreams(videoId).isNotEmpty()
     }
+}
+
+/**
+ * Whether the plugin scrapers could serve a title: true when an enabled scraper covers its type
+ * ([enabledScrapersForType]). Null while that is not known yet — a plugin repository is still
+ * refreshing (one just synced from the phone has no scrapers until its manifest arrives).
+ */
+fun pluginsCanStream(state: PluginsUiState, enabledScrapersForType: List<PluginScraper>): Boolean? {
+    if (enabledScrapersForType.isNotEmpty()) return true
+    if (state.pluginsEnabled && state.repositories.any { repository -> repository.isRefreshing }) return null
+    return false
 }
 
 /**

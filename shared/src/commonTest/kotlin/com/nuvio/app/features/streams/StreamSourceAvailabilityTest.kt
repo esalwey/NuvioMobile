@@ -4,6 +4,9 @@ import com.nuvio.app.features.addons.AddonManifest
 import com.nuvio.app.features.addons.AddonResource
 import com.nuvio.app.features.addons.AddonsUiState
 import com.nuvio.app.features.addons.ManagedAddon
+import com.nuvio.app.features.plugins.PluginRepositoryItem
+import com.nuvio.app.features.plugins.PluginScraper
+import com.nuvio.app.features.plugins.PluginsUiState
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -61,5 +64,44 @@ class StreamSourceAvailabilityTest {
     @Test
     fun a_tmdb_id_reaches_tt_only_addons_through_the_remap() {
         assertEquals(true, addonsCanStream(state(addon(listOf(ttStreams))), "movie", "tmdb:550"))
+    }
+
+    private fun scraper(types: List<String>) = PluginScraper(
+        id = "scraper",
+        repositoryUrl = "https://plugins.example/manifest.json",
+        name = "Scraper",
+        description = "",
+        version = "1.0.0",
+        filename = "scraper.js",
+        supportedTypes = types,
+        enabled = true,
+        manifestEnabled = true,
+        code = "",
+    )
+
+    private fun repository(isRefreshing: Boolean) = PluginRepositoryItem(
+        manifestUrl = "https://plugins.example/manifest.json",
+        name = "Plugins",
+        isRefreshing = isRefreshing,
+    )
+
+    @Test
+    fun an_enabled_scraper_for_the_type_can_stream() {
+        assertEquals(true, pluginsCanStream(PluginsUiState(), listOf(scraper(listOf("movie")))))
+    }
+
+    @Test
+    fun plugins_are_unknown_while_a_repository_is_still_refreshing() {
+        val refreshing = PluginsUiState(repositories = listOf(repository(isRefreshing = true)))
+        assertNull(pluginsCanStream(refreshing, emptyList()))
+    }
+
+    @Test
+    fun settled_or_disabled_plugins_without_a_scraper_cannot_stream() {
+        val settled = PluginsUiState(repositories = listOf(repository(isRefreshing = false)))
+        val disabled = PluginsUiState(pluginsEnabled = false, repositories = listOf(repository(isRefreshing = true)))
+        assertEquals(false, pluginsCanStream(settled, emptyList()))
+        assertEquals(false, pluginsCanStream(disabled, emptyList()))
+        assertEquals(false, pluginsCanStream(PluginsUiState(), emptyList()))
     }
 }

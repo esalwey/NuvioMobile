@@ -34,6 +34,8 @@ final class ContinueWatchingNextUpModel {
     private var dismissKeyByVideoId: [String: String] = [:]
     /// Bumped by `reset()`: a resolution started for the previous profile never lands.
     private var generation = 0
+    /// A row build is scheduled for the next failed-resolution retry (`scheduleRetry(at:)`).
+    private var retryScheduled = false
     private var watchedWatcher: FlowWatcher?
     private var prefsWatcher: FlowWatcher?
     private var watchedItems: [WatchedItem] = []
@@ -81,7 +83,8 @@ final class ContinueWatchingNextUpModel {
     /// The row: the in-progress entries plus the resolved Up Next cards, most recent first, one card
     /// per title. Seeds not resolved yet are resolved in the background (`onChange` follows).
     func row(inProgress: [WatchProgressEntry]) -> [WatchProgressEntry] {
-        let preferFurthest = prefs?.upNextFromFurthestEpisode ?? true
+        let live = (ContinueWatchingPreferencesRepository.shared.uiState.value_ as? ContinueWatchingPreferencesUiState) ?? prefs
+        let preferFurthest = live?.upNextFromFurthestEpisode ?? true
         let seeds = currentSeeds(inProgress: inProgress, limit: Self.seedLimit)
         let today = CurrentDateProvider.shared.todayIsoDate()
         var cards: [WatchProgressEntry] = []
@@ -99,6 +102,8 @@ final class ContinueWatchingNextUpModel {
             case .failed(let retryAt)?:
                 if retryAt <= Date() {
                     resolve(seed, key: key, today: today, preferFurthest: preferFurthest)
+                } else {
+                    scheduleRetry(at: retryAt)
                 }
             case nil:
                 resolve(seed, key: key, today: today, preferFurthest: preferFurthest)
@@ -120,20 +125,37 @@ final class ContinueWatchingNextUpModel {
         ContinueWatchingPreferencesRepository.shared.addDismissedNextUpKey(key: key)
     }
 
-    /// CW-3: once a series' progress is removed, its episode marks would put an Up Next card back at
-    /// once — dismiss that one too, so "Remove" takes the show off the row until it is played again.
-    func dismissReplacement(forContentId contentId: String, inProgress: [WatchProgressEntry]) {
-        for seed in currentSeeds(inProgress: inProgress, limit: Int32.max) where seed.contentId == contentId {
-            ContinueWatchingPreferencesRepository.shared.addDismissedNextUpKey(key: seed.dismissKey)
+    /// CW-3: the dismiss keys of the Up Next cards `contentId` could put back on the row once its
+    /// progress is removed — the series' latest finished episode, as the other in-progress cards
+    /// leave it (its own no longer suppress it). `HomeViewModel.removeFromContinueWatching` takes
+    /// them before the removal (with a provider that owns the completed history — Trakt, Simkl —
+    /// the removed entries ARE the seeds, and its next refresh brings them back) and after it (the
+    /// explicit episode marks that remain), then dismisses both with `dismiss(keys:)`.
+    func replacementDismissKeys(forContentId contentId: String, inProgress: [WatchProgressEntry]) -> Set<String> {
+        let others = inProgress.filter { $0.parentMetaId != contentId }
+        var keys: Set<String> = []
+        for seed in currentSeeds(inProgress: others, limit: Int32.max) where seed.contentId == contentId {
+            keys.insert(seed.dismissKey)
+        }
+        return keys
+    }
+
+    /// Dismisses these Up Next cards until another episode of their series is played.
+    func dismiss(keys: Set<String>) {
+        for key in keys {
+            ContinueWatchingPreferencesRepository.shared.addDismissedNextUpKey(key: key)
         }
     }
 
     private func currentSeeds(inProgress: [WatchProgressEntry], limit: Int32) -> [ContinueWatchingNextUpSeed] {
-        let dismissed: Set<String> = prefs?.dismissedNextUpKeys ?? []
+        // The live preferences, not the watcher's copy: that trails a write by a main-queue turn,
+        // and a card dismissed just now must not flash back on the rebuild the removal triggers.
+        let live = (ContinueWatchingPreferencesRepository.shared.uiState.value_ as? ContinueWatchingPreferencesUiState) ?? prefs
+        let dismissed: Set<String> = live?.dismissedNextUpKeys ?? []
         return ContinueWatchingNextUp.shared.seeds(
             watchedItems: watchedItems,
             inProgressEntries: inProgress,
-            preferFurthestEpisode: prefs?.upNextFromFurthestEpisode ?? true,
+            preferFurthestEpisode: live?.upNextFromFurthestEpisode ?? true,
             dismissedNextUpKeys: dismissed,
             limit: limit
         )
@@ -165,6 +187,19 @@ final class ContinueWatchingNextUpModel {
                 // Also what starts the seeds the concurrency cap held back.
                 self.onChange?()
             }
+        }
+    }
+
+    /// A failed resolution is retried by the first row build past its `retryAt` — and nothing else
+    /// may trigger one (an offline launch, then no progress, watched or preference change): a build
+    /// is scheduled for then. That build schedules the next pending retry, if any.
+    private func scheduleRetry(at date: Date) {
+        guard !retryScheduled else { return }
+        retryScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(date.timeIntervalSinceNow, 0) + 1) { [weak self] in
+            guard let self else { return }
+            self.retryScheduled = false
+            self.onChange?()
         }
     }
 }
