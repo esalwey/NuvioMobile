@@ -18,13 +18,7 @@ object TmdbService {
     suspend fun ensureTmdbId(videoId: String, mediaType: String, fallbackImdbId: String? = null): String? {
         val apiKey = currentApiKey() ?: return null
 
-        val normalized = videoId
-            .removePrefix("tmdb:")
-            .removePrefix("movie:")
-            .removePrefix("series:")
-            .substringBefore(':')
-            .substringBefore('/')
-            .trim()
+        val normalized = normalizeLookupId(videoId)
 
         if (normalized.isBlank()) return null
         if (normalized.all(Char::isDigit)) return normalized
@@ -43,6 +37,24 @@ object TmdbService {
 
         return null
     }
+
+    /**
+     * True when [videoId] names a TMDB or IMDB title itself, which [ensureTmdbId] resolves without
+     * the addon's IMDB fallback.
+     */
+    internal fun isDirectLookupId(videoId: String): Boolean {
+        val normalized = normalizeLookupId(videoId)
+        return normalized.isNotBlank() &&
+            (normalized.all(Char::isDigit) || normalized.startsWith("tt", ignoreCase = true))
+    }
+
+    private fun normalizeLookupId(videoId: String): String = videoId
+        .removePrefix("tmdb:")
+        .removePrefix("movie:")
+        .removePrefix("series:")
+        .substringBefore(':')
+        .substringBefore('/')
+        .trim()
 
     suspend fun tmdbToImdb(tmdbId: Int, mediaType: String): String? {
         val apiKey = currentApiKey() ?: return null
