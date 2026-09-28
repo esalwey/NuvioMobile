@@ -77,6 +77,8 @@ struct StreamPickerView: View {
     /// continue-watching, Detail's primary Play). Filled from `MetaDetailsRepository.fetch`
     /// (cache-first, side-effect free) so next-episode autoplay works from every path.
     @State private var fetchedEpisodes: [MetaVideo] = []
+    /// The title's name, logo and backdrop for the header (AES-3) — see `loadHeaderArt()`.
+    @State private var headerArt: CachedTitleArt?
     /// Row key currently mid debrid-resolve (drives the row spinner; one resolve at a time).
     @State private var resolvingKey: String?
     /// Transient failure message (debrid resolve errors), auto-dismissed after a few seconds.
@@ -165,118 +167,65 @@ struct StreamPickerView: View {
     /// primary Play) get it fetched here so the player can offer next-episode autoplay. No-op for
     /// movies and for paths that already passed `episodes` (EpisodesSection).
     private func fetchEpisodesIfNeeded() {
-        guard episodes.isEmpty, fetchedEpisodes.isEmpty,
-              ["series", "tv", "show", "tvshow"].contains(type.lowercased()) else { return }
+        guard needsEpisodeFetch else { return }
         MetaDetailsRepository.shared.fetch(type: type, id: parentMetaId, cacheResult: true) { details, _ in
             let videos = details?.videos ?? []
-            guard !videos.isEmpty else { return }
+            // The header art comes from the same record (`loadHeaderArt` leaves it to this fetch).
+            let found = details != nil
+            let name: String? = details?.name
+            let logo: String? = details?.logo
+            let background: String? = details?.background
+            guard !videos.isEmpty || found else { return }
             // Suspend completions can land off-main; hop before mutating view state.
-            DispatchQueue.main.async { fetchedEpisodes = videos }
+            DispatchQueue.main.async {
+                if found, headerArt == nil {
+                    headerArt = CachedTitleArt(name: name, logo: logo, background: background)
+                }
+                if !videos.isEmpty { fetchedEpisodes = videos }
+            }
+        }
+    }
+
+    /// A series launch path without the episode list (see `fetchEpisodesIfNeeded`).
+    private var needsEpisodeFetch: Bool {
+        episodes.isEmpty && fetchedEpisodes.isEmpty
+            && ["series", "tv", "show", "tvshow"].contains(type.lowercased())
+    }
+
+    /// AES-3: the title's name, logo and backdrop for the header — from the shared meta cache when
+    /// the Details page already loaded it, else from one cache-first fetch (Home's Continue
+    /// Watching, a Top Shelf resume). A series without its episode list gets it from the fetch
+    /// `fetchEpisodesIfNeeded` makes anyway, never a second one.
+    private func loadHeaderArt() {
+        if let cached = CachedTitleArt.peek(type: type, id: parentMetaId) {
+            headerArt = cached
+            return
+        }
+        guard !needsEpisodeFetch else { return }
+        MetaDetailsRepository.shared.fetch(type: type, id: parentMetaId, cacheResult: true) { details, _ in
+            guard let details else { return }
+            let name: String? = details.name
+            let logo: String? = details.logo
+            let background: String? = details.background
+            DispatchQueue.main.async {
+                headerArt = CachedTitleArt(name: name, logo: logo, background: background)
+            }
         }
     }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                // Lazy so collapsed groups' rows (the overwhelming majority while addons are
-                // still streaming in) are never built at all — this was the lag source (BUG-5):
-                // a non-lazy VStack built every row of every addon up front.
-                LazyVStack(alignment: .leading, spacing: Theme.Spacing.xl - Theme.Spacing.xs) {
-                    Text(title)
-                        .font(Theme.Font.screenTitle)
-                        .foregroundStyle(Theme.Palette.textPrimary)
-
-                    // BUG-21 follow-up: the active debrid credential failed auth on a recent
-                    // call — without this banner the only symptom is every resolve failing
-                    // while Settings still says "Connected". Not focusable; purely advisory.
-                    if let warning = model.credentialWarning {
-                        HStack(alignment: .top, spacing: Theme.Spacing.sm) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.yellow)
-                            Text(warning)
-                                .font(Theme.Font.caption)
-                                .foregroundStyle(Theme.Palette.textPrimary)
-                        }
-                        .padding(Theme.Spacing.md)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(.yellow.opacity(0.12))
-                        )
-                        .frame(maxWidth: 1100, alignment: .leading)
-                    }
-
-                    if model.isLoading {
-                        HStack(spacing: Theme.Spacing.md) {
-                            ProgressView()
-                            Text("Finding streams\u{2026}").foregroundStyle(Theme.Palette.textSecondary)
-                        }
-                    }
-
-                    ForEach(model.groups) { group in
-                        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                            groupHeader(group)
-                            // Collapsed groups render nothing at all (not just off-screen —
-                            // absent from the hierarchy), which is what actually kills the lag:
-                            // the old always-expanded list built every row of every addon.
-                            if expandedGroups.contains(group.id) {
-                                LazyVStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                                    ForEach(Array(group.streams.enumerated()), id: \.offset) { index, stream in
-                                        streamRow(stream, key: StreamsViewModel.rowKey(groupId: group.id, index: index))
-                                    }
-                                }
-                                .padding(.top, Theme.Spacing.xs)
-                            }
-                        }
-                        // Each addon group is its own focus section: D-pad up/down navigates
-                        // between group headers and (when expanded) that group's rows without
-                        // leaking focus into a sibling group's rows.
-                        .focusSection()
-                    }
-
-                    if let reason = model.emptyReason {
-                        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                            // Primary reason renders at full text-primary weight — prominent,
-                            // not the muted secondary tone the plain "nothing found" empty
-                            // states get elsewhere on tvOS — since the debrid/filtered case is
-                            // actionable rather than a dead end.
-                            Text(reason)
-                                .font(Theme.Font.body)
-                                .foregroundStyle(Theme.Palette.textPrimary)
-                            if let hint = model.emptyReasonHint {
-                                Text(hint)
-                                    .font(Theme.Font.caption)
-                                    .foregroundStyle(Theme.Palette.textSecondary)
-                            }
-                        }
-                        .padding(.top, Theme.Spacing.xs)
-                    }
-
-                    // Dev/diagnostics affordance — only when there is nothing real to play, so it
-                    // can never steal initial focus from the stream list (the old always-visible
-                    // button was the only focusable view while loading → focus started at the
-                    // bottom of the screen).
-                    if model.groups.isEmpty && !model.isLoading {
-                        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                            Text("Test")
-                                .font(Theme.Font.sectionTitle)
-                                .foregroundStyle(Theme.Palette.textPrimary)
-                            Button {
-                                selected = context(url: testStreamURL, stream: nil)
-                            } label: {
-                                Label("Play test stream (Apple HLS sample)", systemImage: "play.circle")
-                                    .padding(.vertical, Theme.Spacing.xs)
-                            }
-                            .buttonStyle(.glass)
-                            .focused($focusedRow, equals: Self.testRowKey)
-                        }
-                        .padding(.top, Theme.Spacing.lg)
-                    }
-                }
-                .padding(Theme.Spacing.screen)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // AES-3: the title's artwork and an episode/movie header on the left, the addon list on
+            // a panel on the right — it was one full-width column of text on flat #0D0D0D, with the
+            // series name nowhere and poster/still/synopsis passed in but never drawn.
+            HStack(alignment: .top, spacing: Theme.Spacing.xl) {
+                headerColumn
+                listPanel
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.Palette.background.ignoresSafeArea())
+            .padding(.horizontal, Theme.Spacing.screen)
+            .padding(.vertical, Theme.Spacing.xl)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background { ArtworkBackdrop(url: backdrop.url, blurRadius: backdrop.blurRadius) }
             .overlay(alignment: .bottom) {
                 if let toast {
                     Text(toast)
@@ -312,6 +261,7 @@ struct StreamPickerView: View {
                 }
             }
             .onAppear {
+                loadHeaderArt()
                 model.start()
                 fetchEpisodesIfNeeded()
                 // Main-thread only (UIApplication.canOpenURL); cheap enough to re-probe every
@@ -357,6 +307,247 @@ struct StreamPickerView: View {
                 .ignoresSafeArea()
                 .id(ctx.id)
             }
+        }
+    }
+
+    // MARK: - Stream list panel
+
+    /// The addon groups and their rows on a panel material (`Theme.Surface.panel`, the surface the
+    /// Theme reserves for this picker), which also keeps them legible over bright artwork.
+    private var listPanel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // BUG-21 follow-up: the active debrid credential failed auth on a recent call —
+            // without this banner the only symptom is every resolve failing while Settings still
+            // says "Connected". Not focusable; purely advisory. Pinned above the list so it can't
+            // scroll away while the rows fail.
+            if let warning = model.credentialWarning {
+                debridWarning(warning)
+                    .padding([.horizontal, .top], Theme.Spacing.lg)
+            }
+            streamList
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Theme.Surface.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous))
+    }
+
+    private var streamList: some View {
+        ScrollView {
+            // Lazy so collapsed groups' rows (the overwhelming majority while addons are
+            // still streaming in) are never built at all — this was the lag source (BUG-5):
+            // a non-lazy VStack built every row of every addon up front.
+            LazyVStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                if model.isLoading {
+                    HStack(spacing: Theme.Spacing.md) {
+                        ProgressView()
+                        Text("Finding streams\u{2026}")
+                            .font(Theme.Font.body)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                    }
+                    .padding(.vertical, Theme.Spacing.xs)
+                }
+
+                ForEach(model.groups) { group in
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                        groupHeader(group)
+                        // Collapsed groups render nothing at all (not just off-screen —
+                        // absent from the hierarchy), which is what actually kills the lag:
+                        // the old always-expanded list built every row of every addon.
+                        if expandedGroups.contains(group.id) {
+                            LazyVStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                                ForEach(Array(group.streams.enumerated()), id: \.offset) { index, stream in
+                                    streamRow(stream, key: StreamsViewModel.rowKey(groupId: group.id, index: index))
+                                }
+                            }
+                            // Rows sit under their addon's name, not under its chevron.
+                            .padding(.leading, Self.rowIndent)
+                            .padding(.top, Theme.Spacing.xxs)
+                        }
+                    }
+                    // Each addon group is its own focus section: D-pad up/down navigates
+                    // between group headers and (when expanded) that group's rows without
+                    // leaking focus into a sibling group's rows.
+                    .focusSection()
+                }
+
+                if let reason = model.emptyReason {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                        // Primary reason renders at full text-primary weight — prominent,
+                        // not the muted secondary tone the plain "nothing found" empty
+                        // states get elsewhere on tvOS — since the debrid/filtered case is
+                        // actionable rather than a dead end.
+                        Text(reason)
+                            .font(Theme.Font.body)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                        if let hint = model.emptyReasonHint {
+                            Text(hint)
+                                .font(Theme.Font.caption)
+                                .foregroundStyle(Theme.Palette.textSecondary)
+                        }
+                    }
+                    .padding(.top, Theme.Spacing.xs)
+                }
+
+                // Dev/diagnostics affordance — only when there is nothing real to play, so it
+                // can never steal initial focus from the stream list (the old always-visible
+                // button was the only focusable view while loading → focus started at the
+                // bottom of the screen).
+                if model.groups.isEmpty && !model.isLoading {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                        Text("Test")
+                            .font(Theme.Font.sectionTitle)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                        Button {
+                            selected = context(url: testStreamURL, stream: nil)
+                        } label: {
+                            Label("Play test stream (Apple HLS sample)", systemImage: "play.circle")
+                                .padding(.vertical, Theme.Spacing.xs)
+                        }
+                        .buttonStyle(.glass)
+                        .focused($focusedRow, equals: Self.testRowKey)
+                    }
+                    .padding(.top, Theme.Spacing.lg)
+                }
+            }
+            // Inside the scroll content, so a focused row's lift never meets the panel's clip.
+            .padding(Theme.Spacing.lg)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// AES-11: the debrid-session warning in the Theme's warning amber — tinted fill, a leading
+    /// accent bar and body-size text readable at 10 ft (it was caption text on a raw `.yellow`
+    /// fill with a hard-coded radius).
+    private func debridWarning(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Theme.Palette.warning)
+            Text(text)
+                .foregroundStyle(Theme.Palette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(Theme.Font.body)
+        .padding(.vertical, Theme.Spacing.md)
+        .padding(.leading, Theme.Spacing.lg)
+        .padding(.trailing, Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.Palette.warning.opacity(0.12))
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Theme.Palette.warning)
+                .frame(width: Theme.Spacing.xxs)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: - Header (AES-3)
+
+    /// Fixed width of the artwork/header column; the list panel takes the rest, so long release
+    /// names (BUG-16) keep most of the screen.
+    private static let headerWidth: CGFloat = 520
+    private static let logoMaxHeight: CGFloat = 140
+    /// Stream rows are indented under their addon's name (header padding + chevron + spacing).
+    private static let rowIndent: CGFloat = Theme.Spacing.lg + Theme.Spacing.xs
+
+    /// Series · code · episode name for the header, from the launch title, the episode list and
+    /// the series record (`headerArt`).
+    private var headerTitleParts: PlaybackTitleParts {
+        PlaybackTitleParts(launchTitle: title, season: season, episode: episode,
+                           seriesName: headerArt?.name,
+                           episodes: episodes.isEmpty ? fetchedEpisodes : episodes)
+    }
+
+    /// Full-bleed art behind everything: the title's backdrop, else — blurred, since they're
+    /// low-resolution at full screen — the episode still or the poster.
+    private var backdrop: (url: String?, blurRadius: CGFloat) {
+        if let background = headerArt?.background { return (background, 0) }
+        return (CachedTitleArt.nonEmpty(episodeStill) ?? CachedTitleArt.nonEmpty(poster), 24)
+    }
+
+    /// Not focusable: the list panel holds every control. Logo (or name), then for an episode its
+    /// still, "S1 · E4" and name; for a movie its year · runtime · rating; then the synopsis.
+    private var headerColumn: some View {
+        let parts = headerTitleParts
+        return VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            titleArt(name: parts.isEpisode ? parts.series : title)
+            if parts.isEpisode {
+                if let still = CachedTitleArt.nonEmpty(episodeStill) {
+                    CachedAsyncImage(string: still)
+                        .frame(width: Self.headerWidth, height: Self.headerWidth * 9 / 16)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+                        .accessibilityHidden(true)
+                }
+                VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                    if let code = parts.code {
+                        Text(code)
+                            .font(Theme.Font.meta)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                    }
+                    if let line = parts.episodeLine {
+                        Text(line)
+                            .font(Theme.Font.screenTitle)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                            .lineLimit(3)
+                    }
+                }
+            } else {
+                movieFacts
+            }
+            if let synopsis = CachedTitleArt.nonEmpty(synopsis) {
+                Text(synopsis)
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .lineLimit(parts.isEpisode ? 4 : 7)
+            }
+        }
+        .frame(width: Self.headerWidth, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The title logo (the series' for an episode), else its name; nothing for an episode whose
+    /// series isn't known yet — the code and episode name below still say what this is.
+    @ViewBuilder
+    private func titleArt(name: String?) -> some View {
+        if let logo = headerArt?.logo {
+            // A broken logo falls back to the name (the logo and the name come from one record).
+            CachedAsyncImage(string: logo, contentMode: .fit, failure: {
+                Self.titleText(name ?? title)
+            })
+            .frame(maxWidth: Self.headerWidth, maxHeight: Self.logoMaxHeight, alignment: .leading)
+            .accessibilityLabel(Text(name ?? title))
+        } else if let name {
+            Self.titleText(name)
+        }
+    }
+
+    private static func titleText(_ name: String) -> some View {
+        Text(name)
+            .font(Theme.Font.hero)
+            .foregroundStyle(Theme.Palette.textPrimary)
+            .lineLimit(2)
+    }
+
+    /// Year · runtime · IMDb rating for a movie (the same facts the player's Info chips show).
+    @ViewBuilder
+    private var movieFacts: some View {
+        let year: String? = CachedTitleArt.nonEmpty(meta?.year)
+        let runtime: String? = CachedTitleArt.nonEmpty(meta?.runtime)
+        let rating: String? = CachedTitleArt.nonEmpty(meta?.imdbRating)
+        if year != nil || runtime != nil || rating != nil {
+            HStack(spacing: Theme.Spacing.md) {
+                if let year { Text(year) }
+                if let runtime { Text(runtime) }
+                if let rating {
+                    HStack(spacing: Theme.Spacing.xxs) {
+                        Image(systemName: "star.fill")
+                            .foregroundStyle(Theme.Palette.star)
+                        Text(rating)
+                    }
+                }
+            }
+            .font(Theme.Font.meta)
+            .foregroundStyle(Theme.Palette.textSecondary)
         }
     }
 
@@ -498,13 +689,15 @@ struct StreamPickerView: View {
                     addonLogoColumn(stream)
                 }
             }
-            .padding(.vertical, Theme.Spacing.xs + 2)
-            .padding(.horizontal, Theme.Spacing.sm)
+            .padding(.vertical, Theme.Spacing.sm)
+            .padding(.horizontal, Theme.Spacing.md)
         }
         // `.settingsRow` (platter-free, soft white highlight + accent ring) replaces the system
         // `.glass` style: Liquid Glass's focus platter goes near-white, which made this row's
-        // title text (statically `textPrimary`, near-white) unreadable on focus.
-        .buttonStyle(.settingsRow)
+        // title text (statically `textPrimary`, near-white) unreadable on focus. AES-3: with a
+        // faint resting card, so unfocused rows read as separate items instead of one wall of text
+        // (focus still swaps it for the white platter).
+        .buttonStyle(.settingsRow(restingFill: Theme.Palette.restingRowFill))
         .focused($focusedRow, equals: key)
         // FEAT-5: long-press → the OTHER player(s). With the built-in default, the menu offers
         // the installed external players; with an external default (plain Select already hands

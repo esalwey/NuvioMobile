@@ -128,6 +128,13 @@ enum Theme {
         static let outline = Color(hex: 0x252A2A)
         /// Rating star.
         static let star = Color(hex: 0xFFC857)
+        /// Advisory warnings (the stream picker's debrid-session banner, AES-11) — the star's amber,
+        /// so the app keeps a single warm signal colour instead of a raw `.yellow`.
+        static let warning = Color(hex: 0xFFC857)
+        /// Resting fill of a focusable row drawn over artwork or a panel material (the stream
+        /// picker's rows, AES-3): the chips' translucent white, a step quieter, so a list reads as
+        /// separate cards without competing with the white focus platter.
+        static let restingRowFill = Color.white.opacity(0.07)
         /// Progress bar fill (continue watching). AES-5: derived from `accentFocus`, never a fixed
         /// hex — it was pinned to CRIMSON's `FF5252` when theme switching was added, so Ocean,
         /// Emerald, Violet… still drew red bars. Computed, so it follows `applyTheme` through the same

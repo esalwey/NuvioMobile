@@ -79,12 +79,19 @@ extension EnvironmentValues {
 /// content rows. Transparent at rest; focused it renders the system look: near-white platter,
 /// dark label, slight lift.
 struct SettingsRowButtonStyle: ButtonStyle {
+    /// Fill behind the label while NOT focused. Clear by default (every existing call site); the
+    /// stream picker's rows pass `Theme.Palette.restingRowFill` so unfocused rows read as separate
+    /// cards over the artwork (AES-3). Focus always replaces it with the white platter — the
+    /// focused look (and its BUG-65 label flip) is unchanged.
+    var restingFill: Color = .clear
+
     func makeBody(configuration: Configuration) -> some View {
-        RowBody(configuration: configuration)
+        RowBody(configuration: configuration, restingFill: restingFill)
     }
 
     private struct RowBody: View {
         let configuration: Configuration
+        let restingFill: Color
         @Environment(\.isFocused) private var isFocused
         // BUG-65: rows that carry their own `@FocusState` (SettingsToggleRow & co.) publish it
         // through this key; the style treats either signal as focus — see the key's doc above.
@@ -104,7 +111,7 @@ struct SettingsRowButtonStyle: ButtonStyle {
                 .environment(\.settingsRowIsFocused, focused)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.Radius.card)
-                        .fill(focused ? FocusLook.platter : .clear)
+                        .fill(focused ? FocusLook.platter : restingFill)
                 )
                 .shadow(color: FocusLook.liftShadow(focused), radius: 16, y: 8)
                 .scaleEffect(focused ? 1.02 : 1)
@@ -118,6 +125,8 @@ struct SettingsRowButtonStyle: ButtonStyle {
 extension ButtonStyle where Self == SettingsRowButtonStyle {
     /// Platter-free-at-rest style for full-width text rows (system-look focus).
     static var settingsRow: SettingsRowButtonStyle { .init() }
+    /// `.settingsRow` with a resting fill (the stream picker's rows) — same focus treatment.
+    static func settingsRow(restingFill: Color) -> SettingsRowButtonStyle { .init(restingFill: restingFill) }
 }
 
 /// Capsule chip. System focus language: grey platter at rest, near-white platter + dark label
