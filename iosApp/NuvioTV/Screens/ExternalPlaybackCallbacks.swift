@@ -66,7 +66,7 @@ enum ExternalPlaybackCallbacks {
         case "success":
             // The viewer may have played something else in Infuse meanwhile: only this file counts.
             // Whole seconds per upstream; a fractional value is accepted too (truncated).
-            guard parameter("lastPlayedUrl") == launch.sourceUrl,
+            guard reportsSameFile(parameter("lastPlayedUrl"), as: launch.sourceUrl),
                   let raw = parameter("position"), let seconds = Double(raw),
                   seconds.isFinite, seconds >= 0, seconds < 1_000_000_000 else {
                 print("[ExternalPlayback] ignored Infuse callback (other file or no position)")
@@ -81,6 +81,23 @@ enum ExternalPlaybackCallbacks {
             break
         }
         return true
+    }
+
+    /// Infuse names the file it played last (`lastPlayedUrl`), maybe re-encoded on the way back —
+    /// escapes decoded or added, another letter case: the same host, path and (decoded) query are the
+    /// same file; anything else is a file the viewer went on to play in Infuse. No URL at all: the
+    /// launch id in the callback's path already names this hand-off.
+    static func reportsSameFile(_ reported: String?, as launched: String) -> Bool {
+        guard let reported, !reported.isEmpty else { return true }
+        if reported == launched { return true }
+        guard let reportedURL = URL(string: reported), let launchedURL = URL(string: launched) else {
+            return reported.removingPercentEncoding == launched.removingPercentEncoding
+        }
+        func key(_ url: URL) -> String {
+            let query = url.query ?? ""
+            return "\(url.host?.lowercased() ?? "")\(url.path)?\(query.removingPercentEncoding ?? query)"
+        }
+        return key(reportedURL) == key(launchedURL)
     }
 
     private static func pending() -> PendingLaunch? {
