@@ -1,5 +1,6 @@
 package com.nuvio.app.features.watchprogress
 
+import co.touchlab.kermit.Logger
 import com.nuvio.app.features.details.MetaDetails
 import com.nuvio.app.features.details.MetaDetailsRepository
 import com.nuvio.app.features.details.MetaVideo
@@ -12,6 +13,8 @@ import com.nuvio.app.features.watching.domain.WatchingContentRef
 import com.nuvio.app.features.watching.domain.WatchingProgressRecord
 import com.nuvio.app.features.watching.domain.WatchingWatchedRecord
 import com.nuvio.app.features.watching.domain.latestCompletedSeriesEpisode
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
 
 /*
@@ -64,6 +67,10 @@ data class ContinueWatchingNextUpResolution(
  * "Series" is [canonicalSeriesId]'s (CW alias fix, REMAINING_FIX #2): an in-progress card under
  * one id of a show suppresses the seed of its other id, and a show stored under two ids yields
  * one seed, the most recent. Each seed keeps the id its episode was stored under.
+ *
+ * With [nowEpochMs], an episode mark dated more than 10 minutes ahead of it (a device with a wrong
+ * clock marked it) counts as undated, as a server progress row does (CW legacy #3): it can no
+ * longer outrank, and hide, the series' in-progress card.
  */
 fun buildContinueWatchingNextUpSeeds(
     progressEntries: List<WatchProgressEntry>,
@@ -78,6 +85,7 @@ fun buildContinueWatchingNextUpSeeds(
     },
     isContentHidden: (String) -> Boolean = { false },
     canonicalSeriesId: (String) -> String = ContinueWatchingSeriesIdentity::canonical,
+    nowEpochMs: Long? = null,
 ): List<ContinueWatchingNextUpSeed> {
     val progressSeeds = progressEntries.filter { entry ->
         entry.parentMetaType.isSeriesTypeForContinueWatching() &&
@@ -113,7 +121,9 @@ fun buildContinueWatchingNextUpSeeds(
             content = WatchingContentRef(type = item.type, id = item.id),
             seasonNumber = item.season,
             episodeNumber = item.episode,
-            markedAtEpochMs = normalizeWatchedMarkedAtEpochMs(item.markedAtEpochMs),
+            markedAtEpochMs = normalizeWatchedMarkedAtEpochMs(item.markedAtEpochMs).let { markedAt ->
+                if (nowEpochMs == null) markedAt else undatedWhenAheadOfClock(markedAt, nowEpochMs)
+            },
         )
     }
     // Each series only scans its own records: the row is rebuilt on every progress emission —
@@ -155,6 +165,52 @@ fun buildContinueWatchingNextUpSeeds(
         // The same series filed under two type aliases ("series"/"tv"), or two ids, yields one card.
         .distinctBy { seed -> canonicalSeriesId(seed.contentId) }
         .take(limit)
+}
+
+/**
+ * CW alias fix (review): the dismiss keys of every Up Next seed [card]'s series has now, under
+ * each of its stored ids — the card's own and every id [canonicalSeriesId] groups with it.
+ * [buildContinueWatchingNextUpSeeds] keeps one seed per series, the newest; dismissing only that
+ * one would let another id's older seed take its place on the next build (an "Up Next S1E4" for a
+ * show just removed at S1E9). The series' own in-progress cards are left out of
+ * [inProgressEntries], so every seed it has is listed, whatever those cards suppress on the row.
+ * None for a card that is no series: a movie has no Up Next card, and a `tmdb:` movie id may be a
+ * series' id too.
+ */
+internal fun continueWatchingNextUpSeriesDismissKeys(
+    card: WatchProgressEntry,
+    progressEntries: List<WatchProgressEntry>,
+    watchedItems: List<WatchedItem>,
+    inProgressEntries: List<WatchProgressEntry>,
+    preferFurthestEpisode: Boolean,
+    dismissedNextUpKeys: Set<String>,
+    recencyCutoffEpochMs: Long?,
+    shouldUseProgressSeed: (WatchProgressEntry) -> Boolean = { entry ->
+        entry.shouldUseAsCompletedSeedForContinueWatching()
+    },
+    isContentHidden: (String) -> Boolean = { false },
+    canonicalSeriesId: (String) -> String = ContinueWatchingSeriesIdentity::canonical,
+    nowEpochMs: Long? = null,
+): Set<String> {
+    if (!card.isContinueWatchingSeries() || card.parentMetaId.isBlank()) return emptySet()
+    val series = canonicalSeriesId(card.parentMetaId)
+    val isOfSeries: (String) -> Boolean = { id -> canonicalSeriesId(id) == series }
+    return buildContinueWatchingNextUpSeeds(
+        progressEntries = progressEntries,
+        watchedItems = watchedItems,
+        inProgressEntries = inProgressEntries.filterNot { entry -> isOfSeries(entry.parentMetaId) },
+        preferFurthestEpisode = preferFurthestEpisode,
+        dismissedNextUpKeys = dismissedNextUpKeys,
+        recencyCutoffEpochMs = recencyCutoffEpochMs,
+        limit = Int.MAX_VALUE,
+        shouldUseProgressSeed = shouldUseProgressSeed,
+        isContentHidden = isContentHidden,
+        // Every stored id on its own, so no seed of the series hides another.
+        canonicalSeriesId = { id -> id.trim() },
+        nowEpochMs = nowEpochMs,
+    )
+        .filter { seed -> isOfSeries(seed.contentId) }
+        .mapTo(linkedSetOf()) { seed -> seed.dismissKey }
 }
 
 /**
@@ -261,6 +317,46 @@ internal fun mergeContinueWatchingNextUp(
 
 /** Swift-facing entry points over the active profile's live state (see the file comment). */
 object ContinueWatchingNextUp {
+    private val log = Logger.withTag("ContinueWatchingNextUp")
+    private const val MAX_REMEMBERED_OUTCOMES = 200
+    private val outcomeLock = SynchronizedObject()
+    /** Seed dismiss key → what its last [resolveCard] gave, oldest first (the diagnostics' `up=`). */
+    private val outcomeBySeedKey = LinkedHashMap<String, String>()
+
+    /** The active provider's seams over the live state, as [seeds] and [seriesDismissKeys] apply them. */
+    private class SeedSeams(
+        val progressEntries: List<WatchProgressEntry>,
+        val watchedItems: List<WatchedItem>,
+        val recencyCutoffEpochMs: Long?,
+        val shouldUseProgressSeed: (WatchProgressEntry) -> Boolean,
+        val isContentHidden: (String) -> Boolean,
+        val nowEpochMs: Long,
+    )
+
+    private fun seedSeams(watchedItems: List<WatchedItem>): SeedSeams {
+        WatchProgressRepository.ensureLoaded()
+        TraktSettingsRepository.ensureLoaded()
+        val state = WatchProgressRepository.uiState.value
+        val nowEpochMs = WatchProgressClock.nowEpochMs()
+        return SeedSeams(
+            progressEntries = state.entries,
+            watchedItems = if (WatchProgressRepository.activeProviderOwnsCompletedHistoryProjection()) {
+                emptyList()
+            } else {
+                watchedItems
+            },
+            recencyCutoffEpochMs = WatchProgressRepository.activeProviderContinueWatchingCutoffEpochMs(
+                daysCap = TraktSettingsRepository.uiState.value.continueWatchingDaysCap,
+                nowEpochMs = nowEpochMs,
+            ),
+            shouldUseProgressSeed = { entry -> WatchProgressRepository.shouldUseAsNextUpSeed(entry, nowEpochMs) },
+            isContentHidden = { contentId ->
+                contentId in state.hiddenContentIds || WatchProgressRepository.isDroppedShow(contentId)
+            },
+            nowEpochMs = nowEpochMs,
+        )
+    }
+
     /**
      * Seeds for the row given its current in-progress entries (`continueWatchingRow`), with the
      * active provider's seams applied: its next-up seed rule, hidden/dropped shows, its Continue
@@ -273,30 +369,75 @@ object ContinueWatchingNextUp {
         dismissedNextUpKeys: Set<String>,
         limit: Int,
     ): List<ContinueWatchingNextUpSeed> {
-        WatchProgressRepository.ensureLoaded()
-        TraktSettingsRepository.ensureLoaded()
-        val state = WatchProgressRepository.uiState.value
-        val nowEpochMs = WatchProgressClock.nowEpochMs()
+        val seams = seedSeams(watchedItems)
         return buildContinueWatchingNextUpSeeds(
-            progressEntries = state.entries,
-            watchedItems = if (WatchProgressRepository.activeProviderOwnsCompletedHistoryProjection()) {
-                emptyList()
-            } else {
-                watchedItems
-            },
+            progressEntries = seams.progressEntries,
+            watchedItems = seams.watchedItems,
             inProgressEntries = inProgressEntries,
             preferFurthestEpisode = preferFurthestEpisode,
             dismissedNextUpKeys = dismissedNextUpKeys,
-            recencyCutoffEpochMs = WatchProgressRepository.activeProviderContinueWatchingCutoffEpochMs(
-                daysCap = TraktSettingsRepository.uiState.value.continueWatchingDaysCap,
-                nowEpochMs = nowEpochMs,
-            ),
+            recencyCutoffEpochMs = seams.recencyCutoffEpochMs,
             limit = limit,
-            shouldUseProgressSeed = { entry -> WatchProgressRepository.shouldUseAsNextUpSeed(entry, nowEpochMs) },
-            isContentHidden = { contentId ->
-                contentId in state.hiddenContentIds || WatchProgressRepository.isDroppedShow(contentId)
-            },
+            shouldUseProgressSeed = seams.shouldUseProgressSeed,
+            isContentHidden = seams.isContentHidden,
+            nowEpochMs = seams.nowEpochMs,
         )
+    }
+
+    /**
+     * CW alias fix: the dismiss keys that keep every Up Next card of [card]'s series off the row,
+     * under all of its stored ids ([continueWatchingNextUpSeriesDismissKeys]), with the same seams
+     * as [seeds]. For "Remove from Continue Watching" on [card], in progress or Up Next.
+     *
+     * Called from the Swift main thread, so it never throws: on a failure nothing more is dismissed.
+     */
+    fun seriesDismissKeys(
+        card: WatchProgressEntry,
+        watchedItems: List<WatchedItem>,
+        inProgressEntries: List<WatchProgressEntry>,
+        preferFurthestEpisode: Boolean,
+        dismissedNextUpKeys: Set<String>,
+    ): Set<String> = try {
+        val seams = seedSeams(watchedItems)
+        continueWatchingNextUpSeriesDismissKeys(
+            card = card,
+            progressEntries = seams.progressEntries,
+            watchedItems = seams.watchedItems,
+            inProgressEntries = inProgressEntries,
+            preferFurthestEpisode = preferFurthestEpisode,
+            dismissedNextUpKeys = dismissedNextUpKeys,
+            recencyCutoffEpochMs = seams.recencyCutoffEpochMs,
+            shouldUseProgressSeed = seams.shouldUseProgressSeed,
+            isContentHidden = seams.isContentHidden,
+            nowEpochMs = seams.nowEpochMs,
+        )
+    } catch (error: Throwable) {
+        log.e(error) { "Failed to list the Up Next dismiss keys of ${card.parentMetaId}" }
+        emptySet()
+    }
+
+    /** What the last [resolveCard] of each seed gave, by dismiss key (the diagnostics' `up=`). */
+    internal fun resolutionOutcomes(): Map<String, String> = synchronized(outcomeLock) { outcomeBySeedKey.toMap() }
+
+    /** Sign-out: another account's seeds start unresolved. */
+    internal fun clearResolutionOutcomes() {
+        synchronized(outcomeLock) { outcomeBySeedKey.clear() }
+    }
+
+    private fun noteResolutionOutcome(seed: ContinueWatchingNextUpSeed, resolution: ContinueWatchingNextUpResolution) {
+        val entry = resolution.entry
+        val outcome = when {
+            !resolution.isConclusive -> "fail"
+            entry == null -> "none"
+            else -> "S${entry.seasonNumber}E${entry.episodeNumber}"
+        }
+        synchronized(outcomeLock) {
+            outcomeBySeedKey.remove(seed.dismissKey)
+            outcomeBySeedKey[seed.dismissKey] = outcome
+            while (outcomeBySeedKey.size > MAX_REMEMBERED_OUTCOMES) {
+                outcomeBySeedKey.remove(outcomeBySeedKey.keys.first())
+            }
+        }
     }
 
     /**
@@ -305,6 +446,26 @@ object ContinueWatchingNextUp {
      * resolution the caller may retry.
      */
     suspend fun resolveCard(
+        seed: ContinueWatchingNextUpSeed,
+        watchedItems: List<WatchedItem>,
+        todayIsoDate: String,
+        preferFurthestEpisode: Boolean,
+    ): ContinueWatchingNextUpResolution {
+        val resolution = resolveCardOrFailure(
+            seed = seed,
+            watchedItems = watchedItems,
+            todayIsoDate = todayIsoDate,
+            preferFurthestEpisode = preferFurthestEpisode,
+        )
+        try {
+            noteResolutionOutcome(seed, resolution)
+        } catch (error: Throwable) {
+            log.w { "Up Next outcome not noted for ${seed.dismissKey}: ${error.message}" }
+        }
+        return resolution
+    }
+
+    private suspend fun resolveCardOrFailure(
         seed: ContinueWatchingNextUpSeed,
         watchedItems: List<WatchedItem>,
         todayIsoDate: String,

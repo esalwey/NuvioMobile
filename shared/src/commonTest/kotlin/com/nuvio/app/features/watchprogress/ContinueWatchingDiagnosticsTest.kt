@@ -52,7 +52,8 @@ class ContinueWatchingDiagnosticsTest {
 
         val lines = report(listOf(future, present))
 
-        assertTrue(lines.cardLine("tt0903747").endsWith(" FUTURE"), lines.cardLine("tt0903747"))
+        // The marker comes right after the id, where a narrow screen never cuts it.
+        assertTrue(lines.cardLine("tt0903747").startsWith("card tt0903747 FUTURE S1E2 "), lines.cardLine("tt0903747"))
         assertTrue("d=+60m" in lines.cardLine("tt0903747"), lines.cardLine("tt0903747"))
         assertFalse("FUTURE" in lines.cardLine("tt0944947"))
         // The row behind the card carries the flag too.
@@ -75,8 +76,8 @@ class ContinueWatchingDiagnosticsTest {
 
         val lines = report(listOf(legacy, chain, other))
 
-        assertTrue(lines.cardLine("tmdb:1396").endsWith(" ALIAS?"))
-        assertTrue(lines.cardLine("tt0903747").endsWith(" ALIAS?"))
+        assertTrue(lines.cardLine("tmdb:1396").startsWith("card tmdb:1396 ALIAS? "))
+        assertTrue(lines.cardLine("tt0903747").startsWith("card tt0903747 ALIAS? "))
         assertFalse("ALIAS?" in lines.cardLine("tt0944947"))
     }
 
@@ -89,7 +90,7 @@ class ContinueWatchingDiagnosticsTest {
         val lines = report(listOf(legacy, chainEnd))
 
         assertEquals(listOf("tmdb:1396"), lines.filter { it.startsWith("card ") }.map { it.split(' ')[1] })
-        assertTrue(lines.cardLine("tmdb:1396").endsWith(" ALIAS?"))
+        assertTrue(" ALIAS? " in lines.cardLine("tmdb:1396"))
         assertTrue(lines.any { it.startsWith("row tt0903747 ") && " done=1 " in it })
     }
 
@@ -165,7 +166,7 @@ class ContinueWatchingDiagnosticsTest {
         val lines = groupedReport(listOf(legacy, chain))
 
         assertEquals(
-            listOf("card tt0903747 S1E5 d=-60s local \"Breaking Bad\" MERGED"),
+            listOf("card tt0903747 MERGED S1E5 d=-60s local \"Breaking Bad\""),
             lines.filter { it.startsWith("card ") },
         )
         // The merged id's rows follow the card's.
@@ -187,10 +188,51 @@ class ContinueWatchingDiagnosticsTest {
         val lines = groupedReport(listOf(resumed, chainEnd), nextUpSeeds = listOf(seed))
 
         assertEquals(
-            listOf("card tmdb:1396 id=tt0903747 S1E6 d=-10s local \"Breaking Bad\" MERGED"),
+            listOf("card tmdb:1396 id=tt0903747 MERGED S1E6 d=-10s local \"Breaking Bad\""),
             lines.filter { it.startsWith("card ") },
         )
-        assertEquals(listOf("seed tmdb:1396 id=tt0903747 S1E5 d=-60s"), lines.filter { it.startsWith("seed ") })
+        assertEquals(listOf("seed tmdb:1396 id=tt0903747 S1E5 d=-60s up=?"), lines.filter { it.startsWith("seed ") })
+    }
+
+    @Test
+    fun `a seed line says what its Up Next card resolved to`() {
+        val chainEnd = episode("tt0903747", episode = 5, updatedAt = now - 60_000L, completed = true)
+        val resolved = ContinueWatchingNextUpSeed("tt0903747", "series", 1, 5, now - 60_000L)
+        val empty = ContinueWatchingNextUpSeed("tt0944947", "series", 8, 6, now - 120_000L)
+        val failed = ContinueWatchingNextUpSeed("tt0386676", "series", 2, 3, now - 180_000L)
+
+        val lines = buildContinueWatchingDiagnosticLines(
+            header = listOf("header"),
+            entries = listOf(chainEnd),
+            dirtyKeys = emptySet(),
+            rowEntries = emptyList(),
+            nowEpochMs = now,
+            nextUpSeeds = listOf(resolved, empty, failed),
+            nextUpOutcomes = mapOf(resolved.dismissKey to "S1E6", empty.dismissKey to "none"),
+        )
+
+        assertEquals(
+            listOf(
+                "seed tt0903747 S1E5 d=-60s up=S1E6",
+                "seed tt0944947 S8E6 d=-2m up=none",
+                "seed tt0386676 S2E3 d=-3m up=?",
+            ),
+            lines.filter { it.startsWith("seed ") },
+        )
+    }
+
+    @Test
+    fun `a long title comes last and is cut`() {
+        val card = episode(
+            "tt7631058",
+            episode = 4,
+            updatedAt = now - 30_000L,
+            title = "The Lord of the Rings: The Rings of Power",
+        )
+
+        val lines = report(listOf(card))
+
+        assertEquals("card tt7631058 S1E4 d=-30s local \"The Lord of the Rin…\"", lines.cardLine("tt7631058"))
     }
 
     @Test

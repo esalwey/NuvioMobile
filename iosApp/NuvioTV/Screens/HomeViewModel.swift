@@ -873,16 +873,16 @@ final class HomeViewModel: ObservableObject {
     /// locally and, with Nuvio Sync, on the account (`removeContinueWatchingProgress`).
     func removeFromContinueWatching(_ entry: WatchProgressEntry) {
         if ContinueWatchingNextUpModel.isNextUp(entry) {
-            nextUp.dismiss(entry)
+            nextUp.dismiss(entry, inProgress: inProgressContinueWatching())
             return
         }
         let contentIds = WatchProgressRepository.shared.continueWatchingCardContentIds(card: entry)
-        let seriesIds = Set(contentIds)
-        // The replacement Up Next card, as the seeds stand before the removal (a provider's
-        // completed history) and after it (explicit episode marks) — see `replacementDismissKeys`.
-        var replacements = nextUp.replacementDismissKeys(forContentIds: seriesIds, inProgress: inProgressContinueWatching())
+        // The replacement Up Next cards, as the seeds stand before the removal (a provider's
+        // completed history) and after it (explicit episode marks) — under every id of the series,
+        // see `replacementDismissKeys`.
+        var replacements = nextUp.replacementDismissKeys(for: entry, inProgress: inProgressContinueWatching())
         WatchProgressRepository.shared.removeContinueWatchingProgress(contentIds: contentIds)
-        replacements.formUnion(nextUp.replacementDismissKeys(forContentIds: seriesIds, inProgress: inProgressContinueWatching()))
+        replacements.formUnion(nextUp.replacementDismissKeys(for: entry, inProgress: inProgressContinueWatching()))
         nextUp.dismiss(keys: replacements)
     }
 

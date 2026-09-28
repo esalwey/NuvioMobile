@@ -1,5 +1,6 @@
 package com.nuvio.app.features.watchprogress
 
+import com.nuvio.app.features.watched.WatchedItem
 import com.nuvio.app.features.watching.sync.ProgressDeltaEvent
 import com.nuvio.app.features.watching.sync.ProgressSyncRecord
 import kotlin.test.Test
@@ -152,5 +153,45 @@ class WatchProgressFutureServerRowTest {
             isLocalDirty = false,
         )
         assertEquals(WatchProgressDeltaDecisionType.IGNORE, again.type)
+    }
+
+    // Episode marks (review)
+
+    @Test
+    fun `a watched mark dated ahead of the clock no longer hides the in-progress card`() {
+        // A device hours ahead marked S1E3 watched; this TV then played S1E4 half way.
+        val inProgress = episode(episode = 4, updatedAt = now - 60_000L)
+        val futureMark = WatchedItem(
+            id = showId,
+            type = "series",
+            name = "Breaking Bad",
+            season = 1,
+            episode = 3,
+            markedAtEpochMs = now + 6 * 3_600_000L,
+        )
+
+        fun seeds(nowEpochMs: Long?) = buildContinueWatchingNextUpSeeds(
+            progressEntries = listOf(inProgress),
+            watchedItems = listOf(futureMark),
+            inProgressEntries = listOf(inProgress).continueWatchingEntries(),
+            preferFurthestEpisode = true,
+            dismissedNextUpKeys = emptySet(),
+            recencyCutoffEpochMs = null,
+            limit = 20,
+            canonicalSeriesId = { id -> id.trim() },
+            nowEpochMs = nowEpochMs,
+        )
+
+        // Dated in the future, the mark beats the card: an Up Next S1E4 seed that would take the
+        // series' place on the row.
+        assertEquals(listOf(3), seeds(nowEpochMs = null).map { it.episodeNumber })
+        // Against the clock it is undated, and the in-progress card keeps the series.
+        assertTrue(seeds(nowEpochMs = now).isEmpty())
+    }
+
+    @Test
+    fun `a watched mark within the tolerance keeps its date`() {
+        assertEquals(now + 5 * 60_000L, undatedWhenAheadOfClock(now + 5 * 60_000L, now))
+        assertEquals(0L, undatedWhenAheadOfClock(now + 11 * 60_000L, now))
     }
 }

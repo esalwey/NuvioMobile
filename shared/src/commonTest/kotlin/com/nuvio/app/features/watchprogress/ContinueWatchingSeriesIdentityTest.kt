@@ -2,6 +2,7 @@ package com.nuvio.app.features.watchprogress
 
 import com.nuvio.app.features.details.MetaDetails
 import com.nuvio.app.features.details.MetaVideo
+import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.watched.WatchedItem
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -308,7 +309,7 @@ class ContinueWatchingSeriesIdentityTest {
     // The warm-up
 
     @Test
-    fun `the warm-up looks up the row's series cards stored under another id, once`() {
+    fun `the warm-up looks up the row's series cards stored under a TMDB id, most recent first`() {
         val rowEntries = listOf(
             episode(tmdbId, episode = 2, updatedAt = 9_000L),
             episode(imdbId, episode = 5, updatedAt = 8_000L),
@@ -322,17 +323,16 @@ class ContinueWatchingSeriesIdentityTest {
 
         val keys = selectSeriesIdentityWarmUpKeys(
             rowEntries = rowEntries,
-            isResolved = { id -> id.startsWith("tt") || id == "tmdb:42" },
-            alreadyAttempted = setOf("kitsu:1"),
-            limit = 2,
+            isResolved = { id -> id == "tmdb:42" },
         )
 
-        // The IMDb id, the resolved one, the attempted one and the malformed id are left out, the
-        // movie is no series, and tmdb:44 is past the 2 most recent candidates.
+        // The IMDb id, the anime id, the malformed id and the resolved one are left out, and the
+        // movie is no series.
         assertEquals(
             listOf(
                 WatchProgressMetadataKey(metaId = tmdbId, metaType = "series"),
                 WatchProgressMetadataKey(metaId = "tmdb:43", metaType = "series"),
+                WatchProgressMetadataKey(metaId = "tmdb:44", metaType = "series"),
             ),
             keys,
         )
@@ -346,9 +346,205 @@ class ContinueWatchingSeriesIdentityTest {
         val keys = selectSeriesIdentityWarmUpKeys(
             rowEntries = recentImdbCards + oldAliasCard,
             isResolved = ContinueWatchingSeriesIdentity::isResolved,
-            alreadyAttempted = emptySet(),
         )
 
         assertEquals(listOf(tmdbId), keys.map(WatchProgressMetadataKey::metaId))
+    }
+
+    @Test
+    fun `the warm-up budget is per profile load, not per row build`() {
+        val budget = SeriesIdentityWarmUpBudget(maxIds = 3, maxAttemptsPerId = 2, retryDelayMs = 1_000L)
+        val ids = (1..5).map { number -> "tmdb:$number" }
+
+        val first = budget.claim(ids, nowEpochMs = 0L)
+        assertEquals(listOf("tmdb:1", "tmdb:2", "tmdb:3"), first.ids)
+        // Every later build asks again: nothing more once the budget is spent.
+        assertTrue(budget.claim(ids, nowEpochMs = 10L).ids.isEmpty())
+
+        // A fetched meta is done for the load; a lookup that fetched nothing is tried again once
+        // its delay is over, while attempts remain.
+        budget.finish(first.generation, "tmdb:1", fetched = true, nowEpochMs = 20L)
+        budget.finish(first.generation, "tmdb:2", fetched = false, nowEpochMs = 20L)
+        assertTrue(budget.claim(ids, nowEpochMs = 500L).ids.isEmpty())
+        assertEquals(listOf("tmdb:2"), budget.claim(ids, nowEpochMs = 1_020L).ids)
+        budget.finish(first.generation, "tmdb:2", fetched = false, nowEpochMs = 1_100L)
+        assertTrue(budget.claim(ids, nowEpochMs = 60_000L).ids.isEmpty(), "out of attempts")
+        assertEquals(3, budget.claimedCount())
+
+        // A profile load starts over; a lookup of the previous load reports into nothing.
+        budget.reset()
+        assertFalse(budget.isCurrent(first.generation))
+        budget.finish(first.generation, "tmdb:3", fetched = true, nowEpochMs = 60_000L)
+        assertEquals(listOf("tmdb:1", "tmdb:2", "tmdb:3"), budget.claim(ids, nowEpochMs = 60_000L).ids)
+    }
+
+    @Test
+    fun `ids of other families are never grouped nor looked up`() {
+        // An anime database files each season as its own entry, all naming one IMDb series.
+        assertFalse(ContinueWatchingSeriesIdentity.record("kitsu:7442", seriesMeta(id = "kitsu:7442", imdbId = "tt2560140")))
+        assertFalse(ContinueWatchingSeriesIdentity.record("mal:16498", seriesMeta(id = "mal:16498", imdbId = "tt2560140")))
+
+        assertEquals("kitsu:7442", ContinueWatchingSeriesIdentity.canonical("kitsu:7442"))
+        assertTrue(ContinueWatchingSeriesIdentity.isResolved("kitsu:7442"))
+        assertTrue(
+            selectSeriesIdentityWarmUpKeys(
+                rowEntries = listOf(episode("kitsu:7442", 1, 1_000L), episode("mal:16498", 1, 900L)),
+                isResolved = ContinueWatchingSeriesIdentity::isResolved,
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `the learned ids survive a profile load and are forgotten on sign-out`() {
+        try {
+            WatchProgressRepository.ensureLoaded()
+            ContinueWatchingSeriesIdentity.record(tmdbId, seriesMeta(id = imdbId, imdbId = imdbId))
+
+            WatchProgressRepository.onProfileChanged(ProfileRepository.activeProfileId + 5)
+
+            // Metadata, not the profile: Home's Up Next cache that taught it is still there too.
+            assertEquals(imdbId, ContinueWatchingSeriesIdentity.canonical(tmdbId))
+        } finally {
+            WatchProgressRepository.clearLocalState()
+        }
+        assertEquals(tmdbId, ContinueWatchingSeriesIdentity.canonical(tmdbId))
+    }
+
+    // Confirmation, and what the removal takes
+
+    @Test
+    fun `a mapping is confirmed when the meta answered for the IMDb id itself`() {
+        // The repository's TMDB conversion: the tmdb request was answered with the tt meta.
+        ContinueWatchingSeriesIdentity.record(tmdbId, seriesMeta(id = imdbId, imdbId = imdbId))
+        assertTrue(ContinueWatchingSeriesIdentity.isConfirmed(tmdbId))
+
+        // An add-on's claim about its own tmdb meta.
+        ContinueWatchingSeriesIdentity.record("tmdb:1399", seriesMeta(id = "tmdb:1399", imdbId = "tt0944947"))
+        assertFalse(ContinueWatchingSeriesIdentity.isConfirmed("tmdb:1399"))
+        assertTrue(ContinueWatchingSeriesIdentity.isConfirmed("tt0944947"), "an IMDb id is its own")
+
+        // A later confirmed answer confirms it without regrouping anything...
+        assertFalse(ContinueWatchingSeriesIdentity.record("tmdb:1399", seriesMeta(id = "tt0944947", imdbId = null)))
+        assertTrue(ContinueWatchingSeriesIdentity.isConfirmed("tmdb:1399"))
+        // ...and another add-on's claim never replaces a confirmed mapping.
+        assertFalse(ContinueWatchingSeriesIdentity.record("tmdb:1399", seriesMeta(id = "tmdb:1399", imdbId = "tt0000009")))
+        assertEquals("tt0944947", ContinueWatchingSeriesIdentity.canonical("tmdb:1399"))
+    }
+
+    @Test
+    fun `an alias only an add-on's imdb_id names is removed only when it carries the card's title`() {
+        val unconfirmed: (String) -> Boolean = { id -> id.trim() != tmdbId }
+        val sameShow = listOf(episode(tmdbId, 1, 1_000L), episode(imdbId, 5, 5_000L))
+        val otherShow = listOf(
+            episode(tmdbId, 1, 1_000L).copy(title = "Better Call Saul"),
+            episode(imdbId, 5, 5_000L),
+        )
+        val leftOut = mutableListOf<String>()
+
+        assertEquals(
+            listOf(imdbId, tmdbId),
+            continueWatchingSeriesContentIds(sameShow, sameShow[1], breakingBad, isConfirmedAlias = unconfirmed),
+        )
+        // A wrong imdb_id groups two shows on the row; removing one must not delete the other.
+        assertEquals(
+            listOf(imdbId),
+            continueWatchingSeriesContentIds(
+                otherShow,
+                otherShow[1],
+                breakingBad,
+                isConfirmedAlias = unconfirmed,
+                onAliasLeftOut = { alias -> leftOut += alias },
+            ),
+        )
+        assertEquals(listOf(tmdbId), leftOut)
+        // Confirmed by the TMDB conversion: removed together whatever the titles.
+        assertEquals(
+            listOf(imdbId, tmdbId),
+            continueWatchingSeriesContentIds(otherShow, otherShow[1], breakingBad, isConfirmedAlias = { true }),
+        )
+    }
+
+    // Up Next dismissal across ids
+
+    private fun mark(showId: String, episode: Int, markedAt: Long): WatchedItem = WatchedItem(
+        id = showId,
+        type = "series",
+        name = "Breaking Bad",
+        season = 1,
+        episode = episode,
+        markedAtEpochMs = markedAt,
+    )
+
+    private fun dismissKeys(
+        card: WatchProgressEntry,
+        watchedItems: List<WatchedItem>,
+        progressEntries: List<WatchProgressEntry> = emptyList(),
+        inProgressEntries: List<WatchProgressEntry> = emptyList(),
+    ): Set<String> = continueWatchingNextUpSeriesDismissKeys(
+        card = card,
+        progressEntries = progressEntries,
+        watchedItems = watchedItems,
+        inProgressEntries = inProgressEntries,
+        preferFurthestEpisode = true,
+        dismissedNextUpKeys = emptySet(),
+        recencyCutoffEpochMs = null,
+        canonicalSeriesId = breakingBad,
+    )
+
+    private fun seedsDismissing(watchedItems: List<WatchedItem>, dismissed: Set<String>) =
+        buildContinueWatchingNextUpSeeds(
+            progressEntries = emptyList(),
+            watchedItems = watchedItems,
+            inProgressEntries = emptyList(),
+            preferFurthestEpisode = true,
+            dismissedNextUpKeys = dismissed,
+            recencyCutoffEpochMs = null,
+            limit = 20,
+            canonicalSeriesId = breakingBad,
+        )
+
+    @Test
+    fun `removing a series dismisses the Up Next seeds of all its ids`() {
+        // Episode marks under the old TMDB id (S1E3) and under the IMDb id (S1E8).
+        val marks = listOf(mark(tmdbId, 3, 3_000L), mark(imdbId, 8, 8_000L), mark("tt0944947", 2, 2_000L))
+        assertEquals(
+            listOf(imdbId to 8, "tt0944947" to 2),
+            seedsDismissing(marks, emptySet()).map { it.contentId to it.episodeNumber },
+        )
+
+        // The Up Next card the row shows for the series, under the IMDb id.
+        val upNextCard = episode(imdbId, episode = 9, updatedAt = 8_000L).copy(
+            lastPositionMs = 0L,
+            source = WatchProgressSourceNextUp,
+        )
+        val keys = dismissKeys(card = upNextCard, watchedItems = marks)
+
+        assertEquals(setOf(nextUpDismissKey(imdbId, 1, 8), nextUpDismissKey(tmdbId, 1, 3)), keys)
+        // The newest seed alone: the other id's older one takes its place ("Up Next S1E4").
+        assertEquals(
+            listOf(tmdbId to 3, "tt0944947" to 2),
+            seedsDismissing(marks, setOf(nextUpDismissKey(imdbId, 1, 8))).map { it.contentId to it.episodeNumber },
+        )
+        // All of them: no seed of the series is left, and the other show keeps its own.
+        assertEquals(listOf("tt0944947"), seedsDismissing(marks, keys).map { it.contentId })
+        // Asked from a card under the TMDB id, the same keys.
+        assertEquals(keys, dismissKeys(card = episode(" $tmdbId ", episode = 4, updatedAt = 1_000L), watchedItems = marks))
+        // A movie card has no Up Next card, whatever series shares its id.
+        assertTrue(dismissKeys(card = movie(tmdbId, updatedAt = 9_000L), watchedItems = marks).isEmpty())
+    }
+
+    @Test
+    fun `the series' own in-progress card hides none of its seeds from the dismissal`() {
+        val marks = listOf(mark(tmdbId, 3, 3_000L), mark(imdbId, 8, 8_000L))
+        val resumed = episode(imdbId, episode = 9, updatedAt = 9_000L)
+
+        val keys = dismissKeys(
+            card = resumed,
+            watchedItems = marks,
+            progressEntries = listOf(resumed),
+            inProgressEntries = listOf(resumed),
+        )
+
+        assertEquals(setOf(nextUpDismissKey(imdbId, 1, 8), nextUpDismissKey(tmdbId, 1, 3)), keys)
     }
 }
