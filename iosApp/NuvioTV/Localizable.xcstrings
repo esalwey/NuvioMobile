@@ -25333,6 +25333,16 @@
         }
       }
     },
+    "This source needs request headers that external players can’t send — playing in NuvioTV.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cette source exige des en-têtes HTTP que les lecteurs externes ne peuvent pas transmettre — lecture dans NuvioTV."
+          }
+        }
+      }
+    },
     "This stream needs a debrid account. Connect one in Settings → Debrid.": {
       "localizations": {
         "de": {

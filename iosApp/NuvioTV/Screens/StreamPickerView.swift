@@ -762,6 +762,16 @@ struct StreamPickerView: View {
     /// whose URL builders consume `sub`/`position` (VidHub `/play`, Infuse, VLC) resume and
     /// subtitle like the built-in player instead of starting cold.
     private func openExternally(urlString: String, stream: StreamItem, playerId: String, fallbackToInternal: Bool = false) {
+        // PLY-7: request headers the addon requires for this stream (Referer / User-Agent / auth —
+        // the built-in player sends them). None of the tvOS external players' URL schemes can carry
+        // headers, so such a stream would only fail over there: play it here, and say why.
+        let requestHeaders = StreamModelsKt.sanitizePlaybackHeaders(headers: stream.behaviorHints.proxyHeaders?.request)
+        if !requestHeaders.isEmpty, let url = URL(string: urlString) {
+            showToast(String(localized: "This source needs request headers that external players can’t send — playing in NuvioTV."))
+            NextEpisodeEngine.consecutiveAutoPlays = 0
+            selected = context(url: url, stream: stream)
+            return
+        }
         let progress = WatchProgressRepository.shared.progressForVideo(
             videoId: videoId,
             parentMetaId: parentMetaId,
@@ -776,7 +786,8 @@ struct StreamPickerView: View {
             sourceUrl: urlString,
             title: title,
             streamTitle: nil,
-            sourceHeaders: [:],
+            // For a URL builder that can carry them — none of the tvOS ones can (the guard above).
+            sourceHeaders: requestHeaders,
             resumePositionMs: resumeMs,
             subtitles: stream.externalSubtitles.map { sub in
                 SubtitleInput(url: sub.url, name: { let n: String? = sub.name; return n }() ?? sub.language, lang: sub.language)
