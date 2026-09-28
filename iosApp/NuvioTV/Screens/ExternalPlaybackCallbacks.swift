@@ -65,14 +65,15 @@ enum ExternalPlaybackCallbacks {
         switch parts[2] {
         case "success":
             // The viewer may have played something else in Infuse meanwhile: only this file counts.
+            // Whole seconds per upstream; a fractional value is accepted too (truncated).
             guard parameter("lastPlayedUrl") == launch.sourceUrl,
-                  let raw = parameter("position"), let seconds = Int64(raw),
-                  seconds >= 0, seconds < Int64.max / 1000 else {
+                  let raw = parameter("position"), let seconds = Double(raw),
+                  seconds.isFinite, seconds >= 0, seconds < 1_000_000_000 else {
                 print("[ExternalPlayback] ignored Infuse callback (other file or no position)")
                 return true
             }
             UserDefaults.standard.removeObject(forKey: storageKey)
-            record(launch, positionMs: seconds * 1000)
+            record(launch, positionMs: Int64(seconds * 1000))
         case "error":
             UserDefaults.standard.removeObject(forKey: storageKey)
             print("[ExternalPlayback] Infuse reported an error — nothing recorded")
