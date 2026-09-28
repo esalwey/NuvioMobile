@@ -56,7 +56,9 @@ private data class ProviderCredentialScope(
  *
  * Since upstream 1854dfc3 the pull is authoritative: a provider with no remote row is cleared
  * locally (except the device-local BACKEND_UNSUPPORTED_PROVIDERS), a sync never pushes before it
- * pulls unless an earlier push failed, and only legacy-blob credentials are seeded.
+ * pulls unless an earlier push failed or a local edit is still in the observer's debounce window,
+ * and only legacy-blob credentials are seeded. A failed push is retried in-session only (the next
+ * sync); it is not persisted across launches.
  *
  * Persists nothing of its own — the snapshot maps below are in-memory bookkeeping, and the
  * credentials themselves live in the existing per-feature storages (already covered by
@@ -188,11 +190,18 @@ object ProviderCredentialSync {
             // with its stale values and resurrected keys removed on another device. Local edits
             // reach the server through the observer's push (handleLocalSnapshot) instead.
             // Fork-only, kept: a push that FAILED (pendingScopes) is retried here before the pull,
-            // or the authoritative pull below would erase the user's unsent edit.
-            val shouldPush = synchronized(stateLock) { credentialScope in pendingScopes }
+            // or the authoritative pull below would erase the user's unsent edit. The same goes for
+            // an edit the observer has not handled yet (saved less than
+            // PROVIDER_CREDENTIAL_PUSH_DEBOUNCE_MS ago): the pull would overwrite it, and its
+            // debounced emission would then be dropped as stale by handleLocalSnapshot — a key the
+            // user had just saved would silently go back to the old one.
+            val shouldPush = synchronized(stateLock) {
+                credentialScope in pendingScopes || hasUnhandledLocalEdit(profileId, credentialScope, localSnapshot)
+            }
             if (shouldPush) {
                 pushSnapshot(localSnapshot)
                 synchronized(stateLock) {
+                    observedSnapshots[profileId] = localSnapshot
                     baselineSnapshots[credentialScope] = localSnapshot
                     pendingScopes.remove(credentialScope)
                 }
@@ -494,6 +503,27 @@ object ProviderCredentialSync {
                 log.e(error) { "Failed to push provider credentials for profile ${snapshot.profileId}" }
             }
         }
+    }
+
+    /**
+     * Whether [live] holds a local edit the observer has not handled yet (it is still in the
+     * debounce window). The observer records every snapshot it handles, and remote applies and
+     * profile switches ([onProfileChanged]) re-baseline it, so a syncable difference from the last
+     * observed snapshot that is ALSO a difference from the last pushed baseline is a real, unsent
+     * edit — not the drift upstream 1854dfc3 stopped pushing. Before the observer's first emission
+     * there is nothing to compare with, and nothing to flush. Caller holds [stateLock].
+     */
+    private fun hasUnhandledLocalEdit(
+        profileId: Int,
+        credentialScope: ProviderCredentialScope,
+        live: ProviderCredentialSnapshot,
+    ): Boolean {
+        if (observeJob?.isActive != true) return false
+        val observed = observedSnapshots[profileId] ?: return false
+        val liveSyncable = live.syncableSubset()
+        if (observed.syncableSubset() == liveSyncable) return false
+        val baseline = baselineSnapshots[credentialScope] ?: observed
+        return baseline.syncableSubset() != liveSyncable
     }
 
     /**
