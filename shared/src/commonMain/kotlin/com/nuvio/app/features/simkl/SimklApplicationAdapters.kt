@@ -10,6 +10,8 @@ import com.nuvio.app.features.tracking.TrackingRefreshIntent
 import com.nuvio.app.features.tracking.TrackingWatchedProvider
 import com.nuvio.app.features.watched.WatchedItem
 import com.nuvio.app.features.watchprogress.WatchProgressEntry
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -149,6 +151,7 @@ data class SimklProgressUiState(
     val isLoading: Boolean = false,
     val hasLoadedRemoteProgress: Boolean = false,
     val errorMessage: String? = null,
+    val hiddenContentIds: Set<String> = emptySet(),
 )
 
 /**
@@ -178,6 +181,9 @@ object SimklProgressRepository {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _uiState = MutableStateFlow(SimklProgressUiState())
     val uiState: StateFlow<SimklProgressUiState> = _uiState.asStateFlow()
+    private val publicationLock = SynchronizedObject()
+    private val projectionCache = SimklSnapshotProjectionCache(SimklSyncSnapshot::toSimklProgressEntries)
+    private var publishedSyncState: SimklSyncUiState? = null
 
     init {
         scope.launch {
@@ -232,13 +238,41 @@ object SimklProgressRepository {
         SimklSyncRepository.commitPlaybackRemoval(removed)
     }
 
+    // Upstream 73005d996: the same sync state is published once, and its progress projection and
+    // hidden ids are computed once per snapshot instead of on every read.
     private fun publish(syncState: SimklSyncUiState) {
-        _uiState.value = SimklProgressUiState(
-            entries = syncState.snapshot.toSimklProgressEntries(),
-            isLoading = syncState.isLoading,
-            hasLoadedRemoteProgress = syncState.hasLoaded && syncState.errorMessage == null,
-            errorMessage = syncState.errorMessage,
-        )
+        synchronized(publicationLock) {
+            if (syncState === publishedSyncState || syncState !== SimklSyncRepository.state.value) return
+            _uiState.value = SimklProgressUiState(
+                entries = projectionCache.get(syncState),
+                isLoading = syncState.isLoading,
+                hasLoadedRemoteProgress = syncState.hasLoaded && syncState.errorMessage == null,
+                errorMessage = syncState.errorMessage,
+                hiddenContentIds = syncState.snapshot.hiddenFromContinueWatchingContentIds(),
+            )
+            publishedSyncState = syncState
+        }
+    }
+}
+
+/** One projection per snapshot and projection version (upstream 73005d996). */
+internal class SimklSnapshotProjectionCache<T : Any>(
+    private val project: (SimklSyncSnapshot) -> T,
+) {
+    private var snapshot: SimklSyncSnapshot? = null
+    private var projectionVersion = 0L
+    private var projection: T? = null
+
+    fun get(state: SimklSyncUiState): T {
+        val current = projection
+        if (current != null && snapshot === state.snapshot && projectionVersion == state.projectionVersion) {
+            return current
+        }
+        return project(state.snapshot).also { updated ->
+            snapshot = state.snapshot
+            projectionVersion = state.projectionVersion
+            projection = updated
+        }
     }
 }
 
@@ -257,8 +291,7 @@ object SimklTrackingProgressProvider : TrackingProgressProvider {
         val state = SimklProgressRepository.uiState.value
         return TrackingProgressSnapshot(
             entries = state.entries,
-            hiddenContentIds = SimklSyncRepository.state.value.snapshot
-                .hiddenFromContinueWatchingContentIds(),
+            hiddenContentIds = state.hiddenContentIds,
             hasLoadedRemoteProgress = state.hasLoadedRemoteProgress,
             errorMessage = state.errorMessage,
         )
