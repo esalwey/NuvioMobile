@@ -60,6 +60,10 @@ data class ContinueWatchingNextUpResolution(
  * next-up seeds, plus explicit episode marks unless the provider owns completed history — minus
  * series whose in-progress card is at least as recent, hidden/dropped shows, dismissed cards and
  * seeds older than the provider's Continue Watching window. Most recent first, one per series.
+ *
+ * "Series" is [canonicalSeriesId]'s (CW alias fix, REMAINING_FIX #2): an in-progress card under
+ * one id of a show suppresses the seed of its other id, and a show stored under two ids yields
+ * one seed, the most recent. Each seed keeps the id its episode was stored under.
  */
 fun buildContinueWatchingNextUpSeeds(
     progressEntries: List<WatchProgressEntry>,
@@ -73,6 +77,7 @@ fun buildContinueWatchingNextUpSeeds(
         entry.shouldUseAsCompletedSeedForContinueWatching()
     },
     isContentHidden: (String) -> Boolean = { false },
+    canonicalSeriesId: (String) -> String = ContinueWatchingSeriesIdentity::canonical,
 ): List<ContinueWatchingNextUpSeed> {
     val progressSeeds = progressEntries.filter { entry ->
         entry.parentMetaType.isSeriesTypeForContinueWatching() &&
@@ -118,7 +123,7 @@ fun buildContinueWatchingNextUpSeeds(
     // An in-progress card at least as recent as the series' last finished episode wins.
     val inProgressAtBySeries = inProgressEntries
         .filter { entry -> entry.parentMetaType.isSeriesTypeForContinueWatching() }
-        .groupBy { entry -> entry.parentMetaId.trim() }
+        .groupBy { entry -> canonicalSeriesId(entry.parentMetaId) }
         .mapValues { (_, entries) -> entries.maxOf { entry -> entry.lastUpdatedEpochMs } }
 
     return contents
@@ -130,7 +135,7 @@ fun buildContinueWatchingNextUpSeeds(
                 preferFurthestEpisode = preferFurthestEpisode,
             ) ?: return@mapNotNull null
             if (completed.seasonNumber == 0) return@mapNotNull null
-            val inProgressAt = inProgressAtBySeries[content.id.trim()]
+            val inProgressAt = inProgressAtBySeries[canonicalSeriesId(content.id)]
             if (inProgressAt != null && inProgressAt >= completed.markedAtEpochMs) return@mapNotNull null
             ContinueWatchingNextUpSeed(
                 contentId = content.id,
@@ -147,8 +152,8 @@ fun buildContinueWatchingNextUpSeeds(
                 .thenByDescending { seed -> seed.seasonNumber }
                 .thenByDescending { seed -> seed.episodeNumber },
         )
-        // The same series filed under two type aliases ("series"/"tv") yields one card.
-        .distinctBy { seed -> seed.contentId.trim() }
+        // The same series filed under two type aliases ("series"/"tv"), or two ids, yields one card.
+        .distinctBy { seed -> canonicalSeriesId(seed.contentId) }
         .take(limit)
 }
 
@@ -225,11 +230,23 @@ private fun MetaDetails.videoForNextUpAction(action: SeriesPrimaryAction): MetaV
 
 /**
  * The row: in-progress entries and Up Next cards, most recent first, one card per title — the
- * in-progress one wins a tie (mobile `buildHomeContinueWatchingItems`).
+ * in-progress one wins a tie (mobile `buildHomeContinueWatchingItems`). A series is one title
+ * under all its ids ([ContinueWatchingSeriesIdentity], CW alias fix).
  */
 fun mergeContinueWatchingNextUp(
     inProgressEntries: List<WatchProgressEntry>,
     nextUpEntries: List<WatchProgressEntry>,
+): List<WatchProgressEntry> = mergeContinueWatchingNextUp(
+    inProgressEntries = inProgressEntries,
+    nextUpEntries = nextUpEntries,
+    canonicalSeriesId = ContinueWatchingSeriesIdentity::canonical,
+)
+
+// The two-parameter form above is what Swift calls (Kotlin defaults do not cross the bridge).
+internal fun mergeContinueWatchingNextUp(
+    inProgressEntries: List<WatchProgressEntry>,
+    nextUpEntries: List<WatchProgressEntry>,
+    canonicalSeriesId: (String) -> String,
 ): List<WatchProgressEntry> {
     if (nextUpEntries.isEmpty()) return inProgressEntries
     val seen = mutableSetOf<String>()
@@ -239,7 +256,7 @@ fun mergeContinueWatchingNextUp(
                 .thenByDescending { (_, isProgress) -> isProgress },
         )
         .map { (entry, _) -> entry }
-        .filter { entry -> seen.add(entry.parentMetaId.trim().ifBlank { entry.videoId }) }
+        .filter { entry -> seen.add(entry.continueWatchingSeriesKey(canonicalSeriesId).ifBlank { entry.videoId }) }
 }
 
 /** Swift-facing entry points over the active profile's live state (see the file comment). */
@@ -294,6 +311,8 @@ object ContinueWatchingNextUp {
         preferFurthestEpisode: Boolean,
     ): ContinueWatchingNextUpResolution = try {
         val meta = MetaDetailsRepository.fetch(type = seed.contentType, id = seed.contentId)
+        // CW alias fix: the series meta names its IMDb id, which the row groups the seed under.
+        meta?.let { ContinueWatchingSeriesIdentity.record(requestedId = seed.contentId, meta = it) }
         if (meta == null) {
             ContinueWatchingNextUpResolution(entry = null, isConclusive = false)
         } else {

@@ -59,6 +59,7 @@ private const val WATCH_PROGRESS_REMOTE_WRITE_DEDUP_WINDOW_MS = 5_000L
 internal const val WATCH_PROGRESS_BACKLOG_PUSH_LIMIT = 200
 /** Mirrors `ContinueWatchingNextUpModel.seedLimit` (Swift): the seeds a Home row build considers. */
 private const val CONTINUE_WATCHING_DIAGNOSTICS_SEED_LIMIT = 20
+private const val CONTINUE_WATCHING_SERIES_IDENTITY_WARM_UP_CONCURRENCY = 2
 
 /**
  * CW sync (REMAINING_FIX #2): the rows the one-time post-pull backlog push sends — local rows whose
@@ -425,6 +426,13 @@ object WatchProgressRepository {
      */
     private var crossProfileWriteCount = 0
     private var lastCrossProfileWrite = ""
+    /**
+     * CW alias fix (REMAINING_FIX #2): the series ids whose IMDb id the row's warm-up already
+     * looked up ([warmUpContinueWatchingSeriesIdentity]) — once per id until the next profile load.
+     */
+    private val seriesIdentityWarmUpLock = SynchronizedObject()
+    private val seriesIdentityWarmUpAttemptedIds = mutableSetOf<String>()
+    private val seriesIdentityWarmUpPermits = Semaphore(CONTINUE_WATCHING_SERIES_IDENTITY_WARM_UP_CONCURRENCY)
 
     init {
         ensureTrackingProvidersRegistered()
@@ -458,6 +466,15 @@ object WatchProgressRepository {
         syncScope.launch {
             AddonRepository.uiState.collectLatest { state ->
                 retryMetadataResolutionWhenAddonMetaProvidersReady(state)
+            }
+        }
+
+        // CW alias fix (REMAINING_FIX #2): a learned alias regroups the Continue Watching row
+        // without touching a single entry, so the state is published again (it carries the
+        // version, see WatchProgressUiState.seriesIdentityVersion).
+        syncScope.launch {
+            ContinueWatchingSeriesIdentity.version.collect {
+                if (hasLoaded) publish()
             }
         }
 
@@ -511,6 +528,7 @@ object WatchProgressRepository {
         profileGeneration += 1L
         updateActiveSource(WatchProgressSource.NUVIO_SYNC)
         providerMetadataOverlay.clear()
+        clearSeriesIdentity()
         clearLocalEntries()
         lastSuccessfulPushEpochMs = 0L
         deltaCursorEventId = 0L
@@ -532,6 +550,7 @@ object WatchProgressRepository {
         hasLoaded = true
         hasLoadedNuvioRemoteProgress = false
         providerMetadataOverlay.clear()
+        clearSeriesIdentity()
         clearLocalEntries()
 
         val payload = WatchProgressStorage.loadPayload(profileId).orEmpty().trim()
@@ -553,6 +572,12 @@ object WatchProgressRepository {
         }
         publish()
         resolveRemoteMetadata()
+    }
+
+    /** CW alias fix: a profile load or a sign-out learns the series ids again; the caller publishes. */
+    private fun clearSeriesIdentity() {
+        ContinueWatchingSeriesIdentity.clear()
+        synchronized(seriesIdentityWarmUpLock) { seriesIdentityWarmUpAttemptedIds.clear() }
     }
 
     private fun activeOperationGeneration(profileId: Int): Long? {
@@ -1279,6 +1304,8 @@ object WatchProgressRepository {
                     if (meta == null) {
                         return@repeat
                     }
+                    // CW alias fix: the series meta names the IMDb id these rows are grouped under.
+                    ContinueWatchingSeriesIdentity.record(requestedId = result.key.metaId, meta = meta)
 
                     // Rows backed by local storage keep the shipped path: enrich in place and
                     // persist. Rows that exist only inside a provider projection are read-only, so
@@ -1451,6 +1478,48 @@ object WatchProgressRepository {
                 true
             }
         }
+        removeProgressEntries(entriesToRemove)
+    }
+
+    /**
+     * CW alias fix (REMAINING_FIX #2): every stored id a Continue Watching card stands for — the
+     * card's own, then, for a series, its other ids ([ContinueWatchingSeriesIdentity]): the ids
+     * "Remove from Continue Watching" passes to [removeContinueWatchingProgress].
+     *
+     * Called from the Swift main thread, so it never throws (it falls back to the card's own id).
+     */
+    fun continueWatchingCardContentIds(card: WatchProgressEntry): List<String> = try {
+        ensureLoaded()
+        continueWatchingSeriesContentIds(
+            entries = currentEntries(),
+            card = card,
+            canonicalSeriesId = ContinueWatchingSeriesIdentity::canonical,
+        )
+    } catch (error: Throwable) {
+        log.e(error) { "Failed to list the ids of the Continue Watching card ${card.parentMetaId}" }
+        listOf(card.parentMetaId.trim()).filter(String::isNotEmpty)
+    }
+
+    /**
+     * CW alias fix (REMAINING_FIX #2): removes every progress row of [contentIds] (all the ids of
+     * one series, [continueWatchingCardContentIds]) in one go — one publish, and with Nuvio Sync one
+     * delete on the account covering every alias row, the ones the post-pull backlog push may have
+     * sent there included. The same removal as [removeProgress] for a whole title otherwise.
+     *
+     * Called from the Swift main thread, so it never throws.
+     */
+    fun removeContinueWatchingProgress(contentIds: List<String>) {
+        try {
+            ensureLoaded()
+            val ids = contentIds.map(String::trim).filterTo(mutableSetOf(), String::isNotEmpty)
+            if (ids.isEmpty()) return
+            removeProgressEntries(currentEntries().filter { entry -> entry.parentMetaId.trim() in ids })
+        } catch (error: Throwable) {
+            log.e(error) { "Failed to remove Continue Watching progress for $contentIds" }
+        }
+    }
+
+    private fun removeProgressEntries(entriesToRemove: List<WatchProgressEntry>) {
         if (entriesToRemove.isEmpty()) return
 
         activeProgressProvider()?.let { provider ->
@@ -1512,12 +1581,62 @@ object WatchProgressRepository {
             daysCap = TraktSettingsRepository.uiState.value.continueWatchingDaysCap,
             nowEpochMs = WatchProgressClock.nowEpochMs(),
         )
+        val entries = currentEntries()
+        warmUpContinueWatchingSeriesIdentity(entries)
         return buildContinueWatchingRowEntries(
-            entries = currentEntries(),
+            entries = entries,
             isDroppedShow = ::isDroppedShow,
             recencyCutoffEpochMs = cutoffEpochMs,
             limit = limit,
         )
+    }
+
+    /**
+     * CW alias fix (REMAINING_FIX #2): looks up, in the background, the IMDb id of the row's recent
+     * series stored under another id ([selectSeriesIdentityWarmUpKeys]), so the row can group them
+     * with their `tt` rows. Rows whose metadata is complete are never enriched, so nothing else
+     * would ever fetch their series. Each id once per profile load, [MetaDetailsRepository]'s cache
+     * first; a learned id republishes the state (see the collector in `init`).
+     *
+     * Like the metadata enrichment, it leaves out the rows a display-ready provider (Trakt) can
+     * represent: that is network the shipped build never issued. Runs on the Swift main thread's
+     * call to [continueWatchingRow], so it never throws.
+     */
+    private fun warmUpContinueWatchingSeriesIdentity(entries: List<WatchProgressEntry>) {
+        try {
+            val displayReadyProvider = activeProgressProvider()
+                ?.takeIf(TrackingProgressProvider::providesCompleteMetadata)
+            val attempted = synchronized(seriesIdentityWarmUpLock) { seriesIdentityWarmUpAttemptedIds.toSet() }
+            val candidates = selectSeriesIdentityWarmUpKeys(
+                entries = entries.filter { entry ->
+                    displayReadyProvider?.canRepresentContentId(entry.parentMetaId) != true
+                },
+                isResolved = ContinueWatchingSeriesIdentity::isResolved,
+                alreadyAttempted = attempted,
+            )
+            if (candidates.isEmpty()) return
+            val keys = synchronized(seriesIdentityWarmUpLock) {
+                candidates.filter { key -> seriesIdentityWarmUpAttemptedIds.add(key.metaId.trim()) }
+            }
+            keys.forEach { key ->
+                syncScope.launch {
+                    seriesIdentityWarmUpPermits.withPermit {
+                        val meta = try {
+                            MetaDetailsRepository.fetch(type = key.metaType, id = key.metaId)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            null
+                        }
+                        if (meta != null) {
+                            ContinueWatchingSeriesIdentity.record(requestedId = key.metaId, meta = meta)
+                        }
+                    }
+                }
+            }
+        } catch (error: Throwable) {
+            log.w { "Continue Watching series id warm-up skipped: ${error.message}" }
+        }
     }
 
     /**
@@ -1544,7 +1663,8 @@ object WatchProgressRepository {
                 add(
                     "cur=$currentProfileId act=${ProfileRepository.activeProfileId} src=$activeSource " +
                         "n=${localEntries.size} dirty=${dirtyKeys.size} deltaInit=$deltaInitialized " +
-                        "remote=$hasLoadedNuvioRemoteProgress xprof=$crossProfileWriteCount",
+                        "remote=$hasLoadedNuvioRemoteProgress xprof=$crossProfileWriteCount " +
+                        "map=${ContinueWatchingSeriesIdentity.aliasCount()}",
                 )
                 if (lastCrossProfileWrite.isNotEmpty()) add("xprof last $lastCrossProfileWrite")
             },
@@ -1553,6 +1673,7 @@ object WatchProgressRepository {
             rowEntries = rowEntries,
             nowEpochMs = nowEpochMs,
             nextUpSeeds = seeds,
+            canonicalSeriesId = ContinueWatchingSeriesIdentity::canonical,
         )
     } catch (error: Throwable) {
         log.e(error) { "Continue Watching diagnostics failed" }
@@ -1882,13 +2003,21 @@ object WatchProgressRepository {
         }
     }
 
+    /**
+     * The delete waits for [nuvioPullMutex] (CW alias fix): the one-time backlog push picks and
+     * sends its rows under it, so a removal made while that push is in flight — which may carry
+     * the rows just removed, alias rows included — reaches the account after it, and the removed
+     * rows stay removed. A pull in flight is waited for the same way.
+     */
     private fun pushDeleteToServer(entries: Collection<WatchProgressEntry>) {
         if (activeSource.providerId != null) return
         val profileId = currentProfileId
         accountScopeSnapshot().launch {
             runCatching {
                 if (entries.isEmpty()) return@runCatching
-                syncAdapter.delete(profileId = profileId, entries = entries)
+                nuvioPullMutex.withLock {
+                    syncAdapter.delete(profileId = profileId, entries = entries)
+                }
             }.onFailure { e ->
                 log.e(e) { "Failed to push watch progress delete" }
             }
@@ -1905,6 +2034,7 @@ object WatchProgressRepository {
             entries = sortedEntries,
             providerSnapshot = providerSnapshot,
             hasLoadedNuvioRemoteProgress = hasLoadedNuvioRemoteProgress,
+            seriesIdentityVersion = ContinueWatchingSeriesIdentity.version.value,
         )
     }
 

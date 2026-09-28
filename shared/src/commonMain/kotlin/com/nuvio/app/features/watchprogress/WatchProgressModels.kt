@@ -138,6 +138,12 @@ data class WatchProgressUiState(
     val entries: List<WatchProgressEntry> = emptyList(),
     val hiddenContentIds: Set<String> = emptySet(),
     val hasLoadedRemoteProgress: Boolean = false,
+    /**
+     * CW alias fix (REMAINING_FIX #2): [ContinueWatchingSeriesIdentity.version] when published. A
+     * learned alias regroups the Continue Watching row without changing a single entry; this is
+     * what makes that state differ from the last one, so the row's observers rebuild it.
+     */
+    val seriesIdentityVersion: Long = 0L,
 ) {
     val byProgressKey: Map<String, WatchProgressEntry>
         get() = entries.newestByProgressKey()

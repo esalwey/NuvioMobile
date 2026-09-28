@@ -125,16 +125,19 @@ final class ContinueWatchingNextUpModel {
         ContinueWatchingPreferencesRepository.shared.addDismissedNextUpKey(key: key)
     }
 
-    /// CW-3: the dismiss keys of the Up Next cards `contentId` could put back on the row once its
+    /// CW-3: the dismiss keys of the Up Next cards `contentIds` could put back on the row once their
     /// progress is removed — the series' latest finished episode, as the other in-progress cards
     /// leave it (its own no longer suppress it). `HomeViewModel.removeFromContinueWatching` takes
     /// them before the removal (with a provider that owns the completed history — Trakt, Simkl —
     /// the removed entries ARE the seeds, and its next refresh brings them back) and after it (the
     /// explicit episode marks that remain), then dismisses both with `dismiss(keys:)`.
-    func replacementDismissKeys(forContentId contentId: String, inProgress: [WatchProgressEntry]) -> Set<String> {
-        let others = inProgress.filter { $0.parentMetaId != contentId }
+    ///
+    /// `contentIds` are all the stored ids of one series (CW alias fix): its seed may be filed under
+    /// any of them.
+    func replacementDismissKeys(forContentIds contentIds: Set<String>, inProgress: [WatchProgressEntry]) -> Set<String> {
+        let others = inProgress.filter { !contentIds.contains($0.parentMetaId) }
         var keys: Set<String> = []
-        for seed in currentSeeds(inProgress: others, limit: Int32.max) where seed.contentId == contentId {
+        for seed in currentSeeds(inProgress: others, limit: Int32.max) where contentIds.contains(seed.contentId) {
             keys.insert(seed.dismissKey)
         }
         return keys

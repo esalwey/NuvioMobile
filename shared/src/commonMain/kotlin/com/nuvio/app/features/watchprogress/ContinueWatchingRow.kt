@@ -21,15 +21,20 @@ const val ContinueWatchingRowScanLimit = 300
  * placeholders join the list.
  *
  * No next-up construction happens here either: tvOS deliberately has no Up Next row.
+ *
+ * CW alias fix (REMAINING_FIX #2): a series is grouped under [canonicalSeriesId] — its IMDb id
+ * once [ContinueWatchingSeriesIdentity] knows it — so one show stored under a `tmdb:` and a `tt`
+ * id is one card, the newest row of both. The stored ids stay as they are.
  */
 fun buildContinueWatchingRowEntries(
     entries: List<WatchProgressEntry>,
     isDroppedShow: (contentId: String) -> Boolean,
     recencyCutoffEpochMs: Long?,
     limit: Int = ContinueWatchingRowScanLimit,
+    canonicalSeriesId: (String) -> String = ContinueWatchingSeriesIdentity::canonical,
 ): List<WatchProgressEntry> = entries
     .filterNot { entry -> isDroppedShow(entry.parentMetaId) }
     .filter { entry ->
         recencyCutoffEpochMs == null || entry.lastUpdatedEpochMs >= recencyCutoffEpochMs
     }
-    .continueWatchingEntries(limit = limit)
+    .continueWatchingEntries(limit = limit, canonicalSeriesId = canonicalSeriesId)

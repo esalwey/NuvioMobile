@@ -17,8 +17,12 @@ import kotlin.math.abs
  * Markers:
  * - `FUTURE`: dated more than a minute ahead of this Apple TV's clock. Such a row outranks every
  *   real one of its series.
- * - `ALIAS?`: another card, or another series of the list, has the same title under another id.
- *   The same show is then stored twice (`tmdb:…` and `tt…`) and makes two cards.
+ * - `ALIAS?`: another card, or another series of the list, has the same title under another id
+ *   the row does not group with this one. The same show is then stored twice (`tmdb:…` and
+ *   `tt…`) and makes two cards.
+ * - `id=tt…`: the IMDb id the row groups this series under (REMAINING_FIX #2), when it is not the
+ *   stored id. `MERGED`: another stored id of the series is grouped into this card; its rows
+ *   follow the card's.
  */
 
 /** A row dated more than this ahead of the clock is flagged `FUTURE`. */
@@ -29,8 +33,9 @@ internal const val ContinueWatchingDiagnosticsMaxLines = 120
 /**
  * The report's lines. [entries] are what the row is built from (the active source's entries),
  * [dirtyKeys] the local keys not yet acknowledged by the server, [rowEntries] the in-progress cards
- * as Home shows them and [nextUpSeeds] the series of its Up Next cards. Pure: [nowEpochMs] is the
- * clock every age is measured against.
+ * as Home shows them and [nextUpSeeds] the series of its Up Next cards. [canonicalSeriesId] is
+ * the row's series grouping ([ContinueWatchingSeriesIdentity]). Pure: [nowEpochMs] is the clock
+ * every age is measured against.
  */
 internal fun buildContinueWatchingDiagnosticLines(
     header: List<String>,
@@ -39,6 +44,7 @@ internal fun buildContinueWatchingDiagnosticLines(
     rowEntries: List<WatchProgressEntry>,
     nowEpochMs: Long,
     nextUpSeeds: List<ContinueWatchingNextUpSeed> = emptyList(),
+    canonicalSeriesId: (String) -> String = { id -> id.trim() },
     maxRowsPerSeries: Int = ContinueWatchingDiagnosticsMaxRowsPerSeries,
     maxLines: Int = ContinueWatchingDiagnosticsMaxLines,
 ): List<String> {
@@ -47,48 +53,68 @@ internal fun buildContinueWatchingDiagnosticLines(
     val titlesByGroup: Map<String, Set<String>> = groups.mapValues { (_, rows) ->
         rows.mapNotNullTo(linkedSetOf()) { row -> row.diagnosticTitleKey() }
     }
+    val seriesGroupIds: Set<String> = groups
+        .filterValues { rows -> rows.any(WatchProgressEntry::isContinueWatchingSeries) }
+        .keys
     val cardIds = rowEntries.mapTo(linkedSetOf()) { card -> card.parentMetaId.trim() }
 
-    // The other ids stored under the same title as [card]: the ALIAS? suspects.
+    // The other stored ids of [card]'s series, grouped into its card: MERGED.
+    fun mergedIds(card: WatchProgressEntry): List<String> {
+        if (!card.isContinueWatchingSeries()) return emptyList()
+        val id = card.parentMetaId.trim()
+        val canonical = canonicalSeriesId(id)
+        return seriesGroupIds.filter { groupId -> groupId != id && canonicalSeriesId(groupId) == canonical }
+    }
+
+    // The other ids stored under the same title as [card] and not grouped with it: ALIAS? suspects.
     fun sameTitleOtherIds(card: WatchProgressEntry): List<String> {
         val id = card.parentMetaId.trim()
         val title = card.diagnosticTitleKey() ?: return emptyList()
+        val merged = mergedIds(card).toSet()
         val fromCards = rowEntries
             .filter { other -> other.parentMetaId.trim() != id && other.diagnosticTitleKey() == title }
             .map { other -> other.parentMetaId.trim() }
         val fromGroups = titlesByGroup
             .filter { (groupId, titles) -> groupId != id && title in titles }
             .keys
-        return (fromCards + fromGroups).distinct()
+        return (fromCards + fromGroups).distinct().filterNot { other -> other in merged }
+    }
+
+    fun StringBuilder.appendSeriesId(id: String, isSeries: Boolean) {
+        append(id)
+        val canonical = if (isSeries) canonicalSeriesId(id) else id
+        if (canonical != id) append(" id=").append(canonical)
     }
 
     if (rowEntries.isEmpty()) lines += "no in-progress card"
     rowEntries.forEach { card ->
         lines += buildString {
-            append("card ").append(card.parentMetaId.trim())
+            append("card ").appendSeriesId(card.parentMetaId.trim(), card.isContinueWatchingSeries())
             append(' ').append(card.diagnosticEpisodeLabel())
             append(" d=").append(diagnosticAge(card.lastUpdatedEpochMs, nowEpochMs))
             append(' ').append(card.source)
             append(" \"").append(card.title.trim()).append('"')
             if (card.isDiagnosticFuture(nowEpochMs)) append(" FUTURE")
             if (sameTitleOtherIds(card).isNotEmpty()) append(" ALIAS?")
+            if (mergedIds(card).isNotEmpty()) append(" MERGED")
         }
     }
 
     nextUpSeeds.forEach { seed ->
         lines += buildString {
-            append("seed ").append(seed.contentId.trim())
+            append("seed ").appendSeriesId(seed.contentId.trim(), isSeries = true)
             append(" S").append(seed.seasonNumber).append('E').append(seed.episodeNumber)
             append(" d=").append(diagnosticAge(seed.markedAtEpochMs, nowEpochMs))
             if (isDiagnosticFuture(seed.markedAtEpochMs, nowEpochMs)) append(" FUTURE")
         }
     }
 
-    // The series behind every card first (the card's own, then its suspects), then every other
-    // series with an in-progress row, most recent first.
+    // The series behind every card first (the card's own, the ids merged into it, then its
+    // suspects), then every other series with an in-progress row, most recent first.
     val printedGroups = linkedSetOf<String>()
     rowEntries.forEach { card ->
         printedGroups += card.parentMetaId.trim()
+        printedGroups += mergedIds(card)
         printedGroups += sameTitleOtherIds(card)
     }
     groups

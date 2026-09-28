@@ -133,6 +133,66 @@ class ContinueWatchingDiagnosticsTest {
         assertTrue(lines.last().endsWith("more lines not shown"), lines.last())
     }
 
+    // With the row's series grouping (REMAINING_FIX #2).
+
+    private val breakingBad: (String) -> String = { id ->
+        if (id.trim() == "tmdb:1396") "tt0903747" else id.trim()
+    }
+
+    private fun groupedReport(
+        entries: List<WatchProgressEntry>,
+        nextUpSeeds: List<ContinueWatchingNextUpSeed> = emptyList(),
+    ): List<String> = buildContinueWatchingDiagnosticLines(
+        header = listOf("header"),
+        entries = entries,
+        dirtyKeys = emptySet(),
+        rowEntries = buildContinueWatchingRowEntries(
+            entries = entries,
+            isDroppedShow = { false },
+            recencyCutoffEpochMs = null,
+            canonicalSeriesId = breakingBad,
+        ),
+        nowEpochMs = now,
+        nextUpSeeds = nextUpSeeds,
+        canonicalSeriesId = breakingBad,
+    )
+
+    @Test
+    fun `ids the row groups together are MERGED, not ALIAS`() {
+        val legacy = episode("tmdb:1396", episode = 1, updatedAt = now - 86_400_000L)
+        val chain = episode("tt0903747", episode = 5, updatedAt = now - 60_000L)
+
+        val lines = groupedReport(listOf(legacy, chain))
+
+        assertEquals(
+            listOf("card tt0903747 S1E5 d=-60s local \"Breaking Bad\" MERGED"),
+            lines.filter { it.startsWith("card ") },
+        )
+        // The merged id's rows follow the card's.
+        assertEquals(listOf("tt0903747", "tmdb:1396"), lines.filter { it.startsWith("row ") }.map { it.split(' ')[1] })
+    }
+
+    @Test
+    fun `a card stored under another id shows the IMDb id it is grouped under`() {
+        val resumed = episode("tmdb:1396", episode = 6, updatedAt = now - 10_000L)
+        val chainEnd = episode("tt0903747", episode = 5, updatedAt = now - 60_000L, completed = true)
+        val seed = ContinueWatchingNextUpSeed(
+            contentId = "tmdb:1396",
+            contentType = "series",
+            seasonNumber = 1,
+            episodeNumber = 5,
+            markedAtEpochMs = now - 60_000L,
+        )
+
+        val lines = groupedReport(listOf(resumed, chainEnd), nextUpSeeds = listOf(seed))
+
+        assertEquals(
+            listOf("card tmdb:1396 id=tt0903747 S1E6 d=-10s local \"Breaking Bad\" MERGED"),
+            lines.filter { it.startsWith("card ") },
+        )
+        assertEquals(listOf("seed tmdb:1396 id=tt0903747 S1E5 d=-60s"), lines.filter { it.startsWith("seed ") })
+    }
+
     @Test
     fun `ages read at a glance`() {
         assertEquals("-40s", diagnosticAge(now - 40_000L, now))

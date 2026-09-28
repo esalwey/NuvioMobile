@@ -866,17 +866,23 @@ final class HomeViewModel: ObservableObject {
     /// `removeProgress(contentId)`), not the one episode an older in-progress episode of the same
     /// show would replace at once — and the Up Next card its episode marks would put back is
     /// dismissed with it. An Up Next card itself is dismissed until another episode is finished.
+    ///
+    /// CW alias fix (REMAINING_FIX #2): the row shows a series stored under several ids (`tmdb:…`
+    /// and `tt…`) as one card, so the removal takes every one of them — otherwise the other id's
+    /// card would take the removed one's place. The shared side removes all their rows at once,
+    /// locally and, with Nuvio Sync, on the account (`removeContinueWatchingProgress`).
     func removeFromContinueWatching(_ entry: WatchProgressEntry) {
         if ContinueWatchingNextUpModel.isNextUp(entry) {
             nextUp.dismiss(entry)
             return
         }
-        let contentId = entry.parentMetaId
+        let contentIds = WatchProgressRepository.shared.continueWatchingCardContentIds(card: entry)
+        let seriesIds = Set(contentIds)
         // The replacement Up Next card, as the seeds stand before the removal (a provider's
         // completed history) and after it (explicit episode marks) — see `replacementDismissKeys`.
-        var replacements = nextUp.replacementDismissKeys(forContentId: contentId, inProgress: inProgressContinueWatching())
-        WatchProgressRepository.shared.removeProgress(contentId: contentId, seasonNumber: nil, episodeNumber: nil)
-        replacements.formUnion(nextUp.replacementDismissKeys(forContentId: contentId, inProgress: inProgressContinueWatching()))
+        var replacements = nextUp.replacementDismissKeys(forContentIds: seriesIds, inProgress: inProgressContinueWatching())
+        WatchProgressRepository.shared.removeContinueWatchingProgress(contentIds: contentIds)
+        replacements.formUnion(nextUp.replacementDismissKeys(forContentIds: seriesIds, inProgress: inProgressContinueWatching()))
         nextUp.dismiss(keys: replacements)
     }
 
