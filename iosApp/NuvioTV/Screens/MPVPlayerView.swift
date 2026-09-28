@@ -1533,7 +1533,10 @@ final class MPVTVPlayerViewController: UIViewController {
     private func applyPendingResume() {
         guard let seconds = pendingResumeSec else { return }
         pendingResumeSec = nil
-        command("seek", args: [String(format: "%.3f", seconds), "absolute"])
+        // PLY-5: through `eventQueue` like every other seek. This runs at FILE_LOADED, the core's
+        // busiest moment — a synchronous `mpv_command` here parked the main thread on the core lock
+        // (the BUG-2/BUG-3 rule above `PropSnapshot`).
+        seekAbsolute(seconds)
     }
 
     // MARK: - libmpv C-interop helpers
