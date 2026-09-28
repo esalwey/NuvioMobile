@@ -118,6 +118,9 @@ final class MPVTVPlayerViewController: UIViewController {
     /// A saved row with a percentage and no timecode (Simkl episode or Trakt playback row, upstream
     /// b7657dbe4): scaled by this file's own duration once mpv has loaded it.
     private var pendingResumeFraction: Double?
+    /// The file is loaded but mpv did not know its duration yet: the first `duration` change
+    /// applies `pendingResumeFraction` (main thread only).
+    private var resumeFractionAwaitsDuration = false
     private var seekTimer: Timer?
     private var seekDirection: Double = 0
     private var seekHoldCount = 0
@@ -1513,7 +1516,12 @@ final class MPVTVPlayerViewController: UIViewController {
         case .timePos:
             if let v = asDouble() { updateProps { $0.position = v } }
         case .duration:
-            if let v = asDouble() { updateProps { $0.duration = v } }
+            if let v = asDouble() {
+                updateProps { $0.duration = v }
+                if v > 0 {
+                    DispatchQueue.main.async { [weak self] in self?.applyPendingResumeFraction(duration: v) }
+                }
+            }
         case .pause:
             if let v = asFlag() { updateProps { $0.paused = v } }
         case .coreIdle:
@@ -1543,16 +1551,21 @@ final class MPVTVPlayerViewController: UIViewController {
             command("seek", args: [String(format: "%.3f", seconds), "absolute"])
             return
         }
-        guard let fraction = pendingResumeFraction else { return }
+        guard pendingResumeFraction != nil else { return }
+        resumeFractionAwaitsDuration = true
+        applyPendingResumeFraction(duration: getDouble("duration"))
+    }
+
+    /// Main thread. Scales `pendingResumeFraction` by the file's duration once the file is loaded and
+    /// mpv knows it (at file-loaded, or on the first `duration` change after it), behind the same
+    /// 10 s floor as every other resume path. Dropped when playback already got past that floor.
+    private func applyPendingResumeFraction(duration: Double) {
+        guard resumeFractionAwaitsDuration, let fraction = pendingResumeFraction, duration > 0 else { return }
+        resumeFractionAwaitsDuration = false
         pendingResumeFraction = nil
-        let duration = getDouble("duration")
-        if duration > 0 {
-            let seconds = duration * fraction
-            if seconds > 10 { command("seek", args: [String(format: "%.3f", seconds), "absolute"]) }
-        } else {
-            // Duration not known at file-loaded yet: mpv scales the percentage itself.
-            command("seek", args: [String(format: "%.3f", fraction * 100), "absolute-percent"])
-        }
+        let seconds = duration * fraction
+        guard seconds > 10, getDouble("time-pos") < 10 else { return }
+        command("seek", args: [String(format: "%.3f", seconds), "absolute"])
     }
 
     // MARK: - libmpv C-interop helpers
