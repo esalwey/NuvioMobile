@@ -1,5 +1,7 @@
 package com.nuvio.app.features.debrid
 
+import kotlin.concurrent.Volatile
+
 data class DebridProvider(
     val id: String,
     val displayName: String,
@@ -79,9 +81,22 @@ object DebridProviders {
 
     private val registered = listOf(Torbox, Premiumize, RealDebrid, AllDebrid)
 
+    /**
+     * Fork (DEB-1): providers a platform lists — and resolves with — although their shared
+     * definition keeps them hidden. Upstream ships Real-Debrid with `visibleInUi = false` (it has
+     * no device sign-in), which on tvOS meant an RD key synced from another device was neither
+     * shown nor used. tvOS opts RD in from `installTvOsSharedProviders()`; everywhere else this
+     * stays empty, so the shared definitions keep their upstream meaning.
+     */
+    @Volatile
+    var platformVisibleProviderIds: Set<String> = emptySet()
+
+    fun isVisibleInUi(provider: DebridProvider): Boolean =
+        provider.visibleInUi || provider.id in platformVisibleProviderIds
+
     fun all(): List<DebridProvider> = registered
 
-    fun visible(): List<DebridProvider> = registered.filter { it.visibleInUi }
+    fun visible(): List<DebridProvider> = registered.filter(::isVisibleInUi)
 
     fun byId(id: String?): DebridProvider? {
         val normalized = id?.trim()?.takeIf { it.isNotBlank() } ?: return null
@@ -90,7 +105,7 @@ object DebridProviders {
 
     fun isSupported(id: String?): Boolean = byId(id) != null
 
-    fun isVisible(id: String?): Boolean = byId(id)?.visibleInUi == true
+    fun isVisible(id: String?): Boolean = byId(id)?.let(::isVisibleInUi) == true
 
     fun instantName(id: String?): String = "${displayName(id)} Instant"
 
@@ -107,7 +122,7 @@ object DebridProviders {
         registered.mapNotNull { provider ->
             settings.apiKeyFor(provider.id)
                 .trim()
-                .takeIf { provider.visibleInUi && it.isNotBlank() }
+                .takeIf { isVisibleInUi(provider) && it.isNotBlank() }
                 ?.let { apiKey -> DebridServiceCredential(provider, apiKey) }
         }
 

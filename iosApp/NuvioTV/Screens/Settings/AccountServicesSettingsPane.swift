@@ -333,14 +333,30 @@ struct AccountServicesSettingsPane: View {
                 EmptyView()
             }
         } else {
-            SettingsActionRow(
-                title: String(localized: "Connect \(provider.displayName)"),
-                subtitle: String(localized: "Shows a short code to enter on your phone (device sign-in)."),
-                systemImage: "antenna.radiowaves.left.and.right"
-            ) {
-                debrid.connect(provider)
+            if debrid.supportsDeviceSignIn(provider) {
+                SettingsActionRow(
+                    title: String(localized: "Connect \(provider.displayName)"),
+                    subtitle: String(localized: "Shows a short code to enter on your phone (device sign-in)."),
+                    systemImage: "antenna.radiowaves.left.and.right"
+                ) {
+                    debrid.connect(provider)
+                }
+            } else {
+                // DEB-1: Real-Debrid has no device sign-in — API key only.
+                Text("\(provider.displayName) has no device sign-in here: paste the API key from your \(provider.displayName) account. It resolves the links of add-ons that hand them to \(provider.displayName).")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .frame(maxWidth: 1100, alignment: .leading)
             }
-            DebridKeyEntryRow(providerName: provider.displayName) { key in
+            // DEB-2: checked with the provider before it is saved; a rejected key stays in the
+            // field with the reason below it.
+            DebridKeyEntryRow(
+                providerName: provider.displayName,
+                placeholder: debrid.supportsDeviceSignIn(provider) ? nil : String(localized: "\(provider.displayName) API key"),
+                clearsOnSave: false,
+                isValidating: debrid.validatingKeyProviderId == provider.id,
+                errorMessage: debrid.keyErrors[provider.id]
+            ) { key in
                 debrid.saveManualKey(provider.id, key: key)
             }
         }

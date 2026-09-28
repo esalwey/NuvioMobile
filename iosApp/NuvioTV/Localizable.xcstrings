@@ -71,7 +71,37 @@
         }
       }
     },
+    "%@ API key": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clé API %@"
+          }
+        }
+      }
+    },
+    "%@ didn't accept this key. Check it and try again.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ n’a pas accepté cette clé. Vérifiez-la et réessayez."
+          }
+        }
+      }
+    },
     "%@ f=%lld t=%lld y=%lld i=%lld r=%lld": {},
+    "%@ has no device sign-in here: paste the API key from your %@ account. It resolves the links of add-ons that hand them to %@.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ n’a pas de connexion par code ici : collez la clé API de votre compte %@. Elle résout les liens des addons qui les confient à %@."
+          }
+        }
+      }
+    },
     "%@ of the episode": {
       "localizations": {
         "fr": {
@@ -4912,6 +4942,16 @@
         }
       }
     },
+    "Checking the key…": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vérification de la clé…"
+          }
+        }
+      }
+    },
     "Checking…": {
       "localizations": {
         "de": {
@@ -6373,6 +6413,16 @@
       }
     },
     "Couldn't load your add-ons.": {},
+    "Couldn't reach %@ to check this key. Check the connection and try again.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Impossible de joindre %@ pour vérifier cette clé. Vérifiez la connexion et réessayez."
+          }
+        }
+      }
+    },
     "Couldn't resolve a playback link.": {
       "localizations": {
         "de": {
