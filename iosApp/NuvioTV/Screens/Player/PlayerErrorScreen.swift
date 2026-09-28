@@ -15,6 +15,11 @@ struct PlayerPlaybackError: Equatable {
         case timedOut
         /// The stream reached its end a few seconds after it started: it dropped or is truncated.
         case endedEarly
+        /// The stream ended mid-way, well short of its duration: the connection dropped or the link
+        /// expired (FFmpeg ends the file there rather than reporting an error).
+        case dropped
+        /// A short error/placeholder clip played instead of the video (a debrid "not cached" notice).
+        case placeholder
     }
 
     let kind: Kind
@@ -29,6 +34,10 @@ struct PlayerPlaybackError: Equatable {
             return String(localized: "The source isn’t responding — it may be overloaded or offline. Playback starts on its own if it answers.")
         case .endedEarly:
             return String(localized: "The stream stopped right after it started. The file may be incomplete, or the connection dropped.")
+        case .dropped:
+            return String(localized: "The stream stopped before the end. The connection may have dropped, or the link may have expired. Retry picks up where it stopped.")
+        case .placeholder:
+            return String(localized: "The source played a short clip instead of the video — often a notice from the debrid service that the file isn’t ready yet.")
         }
     }
 
@@ -177,16 +186,17 @@ final class PlayerErrorHostController: UIHostingController<PlayerErrorScreen> {
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if presses.contains(where: { $0.type == .menu }) {
-            onMenu?()
-            return
-        }
+        // Menu acts on its release (below): the card goes away before the player does, and a release
+        // arriving after that would reach whatever is underneath as half a press.
+        if presses.contains(where: { $0.type == .menu }) { return }
         super.pressesBegan(presses, with: event)
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        // Swallow the matching Menu release too, so nothing below sees a half press.
-        if presses.contains(where: { $0.type == .menu }) { return }
+        if presses.contains(where: { $0.type == .menu }) {
+            onMenu?()
+            return
+        }
         super.pressesEnded(presses, with: event)
     }
 }

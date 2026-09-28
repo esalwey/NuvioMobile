@@ -24881,6 +24881,26 @@
         }
       }
     },
+    "The source played a short clip instead of the video — often a notice from the debrid service that the file isn’t ready yet.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La source a lu un court extrait au lieu de la vidéo — souvent un avis du service debrid indiquant que le fichier n’est pas encore prêt."
+          }
+        }
+      }
+    },
+    "The stream stopped before the end. The connection may have dropped, or the link may have expired. Retry picks up where it stopped.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le flux s’est arrêté avant la fin. La connexion a peut-être été coupée, ou le lien a expiré. « Réessayer » reprend là où il s’est arrêté."
+          }
+        }
+      }
+    },
     "The stream stopped right after it started. The file may be incomplete, or the connection dropped.": {
       "localizations": {
         "fr": {

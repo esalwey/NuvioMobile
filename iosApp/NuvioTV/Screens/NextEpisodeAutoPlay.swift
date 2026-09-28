@@ -370,6 +370,15 @@ final class NextEpisodeEngine: ObservableObject {
     /// The engine is done with this player: it cancelled (exit, choose a source) or handed off.
     var isFinished: Bool { cancelled || handedOff }
 
+    /// A file this long is a short error/placeholder clip, not the playing episode — unless its
+    /// metadata runtime says the episode really is that short (mpv's error card, PLY-1).
+    func isPlaceholderClip(durationSec: Double) -> Bool {
+        UpNextTrigger.isPlaceholder(
+            durationSec: durationSec,
+            expectedRuntimeSec: expectedRuntimeSec ?? Self.runtimeSec(parsing: context.meta?.runtime)
+        )
+    }
+
     init(context: PlaybackContext, onPlayNext: @escaping (PlaybackContext) -> Void) {
         self.context = context
         self.onPlayNext = onPlayNext

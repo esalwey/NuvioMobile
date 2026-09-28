@@ -91,6 +91,12 @@ final class MPVPlaybackState: ObservableObject {
     /// The engine is prefetching the NEXT episode's addon subtitles into the shared repository —
     /// stop side-loading that list into this file.
     var freezeAddonSubtitles = false
+    /// Wired by `MPVPlayerScreen` to the engine: the Up Next card is on screen. An end of file then
+    /// belongs to its hand-off (the episode is in its credits), never to the error card (PLY-1).
+    var upNextCardUp: (() -> Bool)?
+    /// Wired likewise: a file this long is a short error/placeholder clip, not the episode (unless its
+    /// metadata runtime is that short too).
+    var isPlaceholderClip: ((Double) -> Bool)?
 
     let title: String
     init(title: String) { self.title = title }
@@ -251,6 +257,8 @@ final class MPVTVPlayerViewController: UIViewController {
     /// the core logged before it did (the likely reason for an END_FILE error).
     private var coreOpenedFile = false
     private var lastHttpErrorStatus: Int?
+    /// The viewer is leaving the player from the card: nothing may present it again meanwhile.
+    private var leavingFromErrorCard = false
 
     init(context: PlaybackContext, state: MPVPlaybackState, startPositionSec: Double? = nil) {
         self.context = context
@@ -1478,14 +1486,11 @@ final class MPVTVPlayerViewController: UIViewController {
         // only propagate transitions — otherwise a dismissed end screen re-presents each tick.
         if snap.eof != lastEofFlag {
             lastEofFlag = snap.eof
-            // PLY-1: an end of file a few seconds after this load started — short of the duration —
-            // is a stream that dropped or is truncated, not the end of the episode: the error card
-            // (Retry, another source) instead of the end-of-playback flow, and nothing recorded.
-            if snap.eof, playbackError == nil,
-               snap.position < loadStartPositionSec + Self.earlyEndSec,
-               !UpNextTrigger.isNaturalEnd(positionSec: snap.position, durationSec: snap.duration) {
-                print("[MPV] end of file at \(Int(snap.position))s, right after the load started — failed stream")
-                showPlaybackError(PlayerPlaybackError(kind: .endedEarly))
+            // PLY-1: an end of file that is really a failed source — the stream dropped or is
+            // truncated, or a placeholder clip stood in for the video — gets the error card (Retry,
+            // another source) instead of the end-of-playback flow, and nothing is recorded as watched.
+            if snap.eof, playbackError == nil, let failure = failedSourceAtEndOfFile(snap) {
+                showPlaybackError(failure)
                 return
             }
             // eof-reached also rises when a debrid/HTTP stream drops or expires mid-way: only an end
@@ -1746,30 +1751,71 @@ final class MPVTVPlayerViewController: UIViewController {
         presentErrorCardIfNeeded()
     }
 
+    /// The end of file `snap` just reached, when it is a failed source rather than the end of the
+    /// episode — except with the Up Next card up: the episode is in its credits there, and the engine's
+    /// hand-off carries on as before.
+    ///  - Right after this load started, short of the duration: truncated, or dropped at once — with no
+    ///    duration known too (nothing real ends seconds after it started).
+    ///  - Later, short of a known duration: the connection dropped or the link expired mid-way (FFmpeg
+    ///    ends the file there rather than reporting an error). Unknown duration: nothing to be short of.
+    ///  - A short error/placeholder clip (a debrid "not cached" video) that played to its end.
+    private func failedSourceAtEndOfFile(_ snap: PropSnapshot) -> PlayerPlaybackError? {
+        if state.upNextCardUp?() == true { return nil }
+        if !UpNextTrigger.isNaturalEnd(positionSec: snap.position, durationSec: snap.duration) {
+            if snap.position < loadStartPositionSec + Self.earlyEndSec {
+                print("[MPV] end of file at \(Int(snap.position))s, right after the load started — failed stream")
+                return PlayerPlaybackError(kind: .endedEarly)
+            }
+            guard snap.duration > 0 else { return nil }
+            print("[MPV] end of file at \(Int(snap.position))s of \(Int(snap.duration))s — the stream dropped")
+            return PlayerPlaybackError(kind: .dropped)
+        }
+        let placeholder = state.isPlaceholderClip?(snap.duration)
+            ?? UpNextTrigger.isPlaceholder(durationSec: snap.duration, expectedRuntimeSec: nil)
+        guard placeholder else { return nil }
+        print("[MPV] a \(Int(snap.duration))s clip played to its end — a placeholder, not the video")
+        return PlayerPlaybackError(kind: .placeholder)
+    }
+
     /// Present (or refresh) the card. Presented from this controller like the top panel
     /// (`.overFullScreen`), so the player keeps its session for "Retry".
     private func presentErrorCardIfNeeded() {
-        guard let error = playbackError else { return }
+        guard let error = playbackError, !leavingFromErrorCard else { return }
         if let host = errorHost {
             host.rootView = makeErrorScreen(error)
+            return
+        }
+        // Something presented here is still animating in or out — the previous card going away after
+        // Retry (straight into another refusal), the top panel: once it's done. An `.overFullScreen`
+        // dismissal never brings `viewDidAppear` back to present it.
+        if let presented = presentedViewController, presented.isBeingPresented || presented.isBeingDismissed {
+            presentErrorCardShortly()
             return
         }
         // The top panel can be open over a stream that is still loading: close it first.
         if let panel = presentedViewController as? PlayerPanelPresenting {
             panel.close(animated: false)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                self?.presentErrorCardIfNeeded()
-            }
+            presentErrorCardShortly()
             return
         }
-        // Covered by something else, or not on screen: `viewDidAppear` presents it.
+        // Covered by a full-screen cover (the end screen), or not on screen: `viewDidAppear` presents it.
         guard presentedViewController == nil, view.window != nil else { return }
         let host = PlayerErrorHostController(rootView: makeErrorScreen(error))
         host.modalPresentationStyle = .overFullScreen
         host.modalTransitionStyle = .crossDissolve
-        host.onMenu = { [weak self] in self?.onExit?() }
+        host.onMenu = { [weak self] in
+            guard let self else { return }
+            let leave = self.onExit
+            self.leaveFromErrorCard { leave?() }
+        }
         errorHost = host
         present(host, animated: !UIAccessibility.isReduceMotionEnabled)
+    }
+
+    private func presentErrorCardShortly() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.presentErrorCardIfNeeded()
+        }
     }
 
     private func makeErrorScreen(_ error: PlayerPlaybackError) -> PlayerErrorScreen {
@@ -1790,6 +1836,46 @@ final class MPVTVPlayerViewController: UIViewController {
         errorHost = nil
         host.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in
             self?.becomeFirstResponder()     // libmpv's controller owns the remote again
+            // An error that arrived while this card was going away (Retry straight into another
+            // refusal) gets its card now.
+            self?.presentErrorCardIfNeeded()
+        }
+    }
+
+    /// Leave the player from the card (Menu, "Choose Another Source"): the card goes first, then
+    /// `action` closes the player. The player sits in a SwiftUI cover, and closing that must not
+    /// depend on UIKit also taking down this card, which SwiftUI doesn't own — only the card might go,
+    /// stranding a dead player. `playbackError` stays set on the way out: no spinner, no end-of-file
+    /// handling, and the Up Next countdown stays held.
+    private func leaveFromErrorCard(_ action: @escaping () -> Void) {
+        guard !leavingFromErrorCard else { return }
+        leavingFromErrorCard = true
+        guard let host = errorHost else {
+            action()
+            return
+        }
+        errorHost = nil
+        guard host.presentingViewController != nil, !host.isBeingPresented, !host.isBeingDismissed else {
+            action()
+            return
+        }
+        host.dismiss(animated: false) { [weak self] in
+            self?.becomeFirstResponder()
+            action()
+        }
+    }
+
+    /// SwiftUI is removing this player (a hand-off rebuilt it for the next episode, its cover
+    /// closed): its card goes with it — never left over the next player, talking to a dead one.
+    func tearDownErrorCard() {
+        leavingFromErrorCard = true
+        guard let host = errorHost else { return }
+        errorHost = nil
+        guard host.presentingViewController != nil, !host.isBeingDismissed else { return }
+        if host.isBeingPresented {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { host.dismiss(animated: false) }
+        } else {
+            host.dismiss(animated: false)
         }
     }
 
@@ -1816,10 +1902,17 @@ final class MPVTVPlayerViewController: UIViewController {
     }
 
     /// Card → "Retry": load the same stream again, from where it stopped (or the resume position,
-    /// if it never loaded).
+    /// if it never loaded; where this load started, after a placeholder clip).
     private func retryLoad() {
         guard mpv != nil else { return }
-        let resumeAt: Double? = fileLoaded ? max(state.positionSec, loadStartPositionSec) : pendingResumeSec
+        let resumeAt: Double?
+        if !fileLoaded {
+            resumeAt = pendingResumeSec
+        } else if playbackError?.kind == .placeholder {
+            resumeAt = loadStartPositionSec
+        } else {
+            resumeAt = max(state.positionSec, loadStartPositionSec)
+        }
         clearPlaybackError()
         print("[MPV] retrying the stream" + (resumeAt.map { " at \(Int($0))s" } ?? ""))
         pendingResumeSec = (resumeAt ?? 0) > 1 ? resumeAt : nil
@@ -1837,7 +1930,7 @@ final class MPVTVPlayerViewController: UIViewController {
         subtitleRestoreDeadlinePassed = false
         traktStartPending = false
         lastEofFlag = false
-        updateProps { $0.eof = false }
+        updateProps { $0.eof = false; $0.paused = false }
         state.isBuffering = true
         UIApplication.shared.isIdleTimerDisabled = true
         armLoadWatchdog()
@@ -1847,6 +1940,8 @@ final class MPVTVPlayerViewController: UIViewController {
             self.coreOpenedFile = false
             self.lastHttpErrorStatus = nil
             self.pendingSubtitleSelectURL = nil
+            // An end of file left mpv paused (keep-open), and a new file would open paused too.
+            self.setFlag("pause", false)
             self.command("loadfile", args: [url, "replace"])
         }
     }
@@ -1859,13 +1954,10 @@ final class MPVTVPlayerViewController: UIViewController {
     }
 
     /// Card → "Choose Another Source": the presenter closes the player onto a stream list for this
-    /// episode (the card goes down with it). No picker behind the player → just leave it.
+    /// episode, once the card is down. No picker behind the player → just leave it.
     private func chooseAnotherSource() {
-        if let onChooseAnotherSource {
-            onChooseAnotherSource()
-        } else {
-            onExit?()
-        }
+        let leave = onChooseAnotherSource ?? onExit
+        leaveFromErrorCard { leave?() }
     }
 
     // MARK: - Teardown
@@ -2090,6 +2182,11 @@ private struct MPVPlayerRepresentable: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: MPVTVPlayerViewController, context: Context) {}
+
+    /// The player is going away (a hand-off's rebuild, its cover closing): no error card outlives it.
+    static func dismantleUIViewController(_ controller: MPVTVPlayerViewController, coordinator: ()) {
+        controller.tearDownErrorCard()
+    }
 }
 
 /// SwiftUI host for the libmpv player + transport overlay; presented full-screen over the stream
@@ -2253,8 +2350,10 @@ struct MPVPlayerScreen: View {
                 upNext.playbackResumedFromEnd()
             }
         }
-        // The Up Next countdown waits while the top panel is open.
-        .onChange(of: state.panelOpen) { _, open in upNext.setPanelOpen(open) }
+        // The Up Next countdown waits while the top panel — or the error card (PLY-1) — is up: no
+        // automatic hand-off may replace the player from under either.
+        .onChange(of: state.panelOpen) { _, open in upNext.setPanelOpen(open || state.playbackErrorShown) }
+        .onChange(of: state.playbackErrorShown) { _, shown in upNext.setPanelOpen(shown || state.panelOpen) }
         .onChange(of: state.isPaused) { _, paused in
             // The Up Next countdown pauses with the video.
             upNext.setPaused(paused)
@@ -2295,7 +2394,12 @@ struct MPVPlayerScreen: View {
             upNext?.skipCreditsToNext(creditsEndSec: creditsEnd) ?? false
         }
         state.onSkipSegmentsLoaded = { [weak upNext] segments in upNext?.setSkipSegments(segments) }
-        upNext.setPanelOpen(state.panelOpen)
+        state.upNextCardUp = { [weak upNext] in upNext?.isCardVisible ?? false }
+        state.isPlaceholderClip = { [weak upNext] durationSec in
+            upNext?.isPlaceholderClip(durationSec: durationSec)
+                ?? UpNextTrigger.isPlaceholder(durationSec: durationSec, expectedRuntimeSec: nil)
+        }
+        upNext.setPanelOpen(state.panelOpen || state.playbackErrorShown)
     }
 
     private var endScreenPresented: Binding<Bool> {
