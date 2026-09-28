@@ -94,6 +94,7 @@ struct PlayerErrorScreen: View {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                         Text("Can’t Play This Source")
                             .font(Theme.Font.screenTitle)
+                            .foregroundStyle(.white)
                         if !title.isEmpty {
                             Text(verbatim: title)
                                 .font(Theme.Font.body)
@@ -104,6 +105,7 @@ struct PlayerErrorScreen: View {
                 }
                 Text(verbatim: error.message)
                     .font(Theme.Font.body)
+                    .foregroundStyle(.white)
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail = error.detail {
                     Text(verbatim: detail)
@@ -111,10 +113,11 @@ struct PlayerErrorScreen: View {
                         .foregroundStyle(.white.opacity(0.6))
                         .lineLimit(2)
                 }
+                // No foreground style over the buttons: the glass style colours its own labels (a
+                // forced white would vanish on the near-white focus platter).
                 buttons
                     .padding(.top, Theme.Spacing.xs)
             }
-            .foregroundStyle(.white)
             .padding(Theme.Spacing.xl)
             .frame(maxWidth: 1100, alignment: .leading)
             .glassEffect(.regular.tint(.black.opacity(0.45)), in: RoundedRectangle(cornerRadius: 24))
