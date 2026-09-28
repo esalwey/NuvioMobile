@@ -49,6 +49,31 @@ object WatchingActions {
             return
         }
 
+        applySeriesWatchedToggle(meta = meta, isCurrentlyWatched = isCurrentlyWatched)
+    }
+
+    /**
+     * [togglePosterWatched] for a series whose details are already loaded (the tvOS Detail screen):
+     * the series is marked together with each released main-season episode. Simkl never receives the
+     * series-level mark (it would stamp every episode of the show, see `simklHistoryPushItems`), so
+     * the episode marks are what reach it. The state is read under the loaded meta's id, the one the
+     * marks are written under, even when the catalog preview that opened the page had another one (a
+     * `tmdb:` recommendation resolved to the addon's `tt` id), and no second fetch is needed.
+     */
+    fun toggleSeriesWatched(meta: MetaDetails) {
+        val isCurrentlyWatched = WatchedRepository.isWatched(id = meta.id, type = meta.type) ||
+            WatchedRepository.isFullyWatchedSeries(id = meta.id, type = meta.type)
+        if (!isCurrentlyWatched && meta.releasedMainSeasonEpisodes(CurrentDateProvider.todayIsoDate()).isEmpty()) {
+            // No released main-season episode to mark one by one (an unaired show, or episodes that
+            // carry no season number): the title-level mark this screen has always set. Simkl
+            // leaves it out, as it would any whole-series mark.
+            WatchedRepository.markWatched(meta.toSeriesWatchedItem())
+            return
+        }
+        applySeriesWatchedToggle(meta = meta, isCurrentlyWatched = isCurrentlyWatched)
+    }
+
+    private fun applySeriesWatchedToggle(meta: MetaDetails, isCurrentlyWatched: Boolean) {
         val todayIsoDate = CurrentDateProvider.todayIsoDate()
         val releasedMainEpisodes = meta.releasedMainSeasonEpisodes(todayIsoDate)
         if (releasedMainEpisodes.isEmpty()) {

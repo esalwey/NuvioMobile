@@ -403,11 +403,21 @@ final class DetailViewModel: ObservableObject {
 
     // MARK: - Actions
 
-    /// Toggle the title-level watched marker. Uses the shared `MetaPreview.toWatchedItem` builder
-    /// (a Kotlin extension → Swift instance method; matches mobile's Detail screen). The repo stamps
-    /// `markedAtEpochMs` itself, so we pass 0.
+    /// Toggle the title's watched state. A series goes through the shared action mobile's Detail
+    /// screen runs, which marks it together with each released main-season episode: upstream
+    /// ba7862154 keeps series-level marks away from Simkl (Simkl would stamp every episode of the
+    /// show), so the episode marks are what sync. A movie keeps the plain title-level toggle, built
+    /// with the shared `MetaPreview.toWatchedItem` (the repo stamps `markedAtEpochMs` itself).
     func toggleWatched() {
-        WatchedRepository.shared.toggleWatched(item: preview.toWatchedItem(markedAtEpochMs: 0))
+        if let meta, EpisodesSection.isSeriesLike(meta) {
+            WatchingActions.shared.toggleSeriesWatched(meta: meta)
+        } else if meta == nil {
+            // Details still loading: the poster action fetches them itself (a movie gets the same
+            // title-level toggle as below).
+            WatchingActions.shared.togglePosterWatched(preview: preview) { _ in }
+        } else {
+            WatchedRepository.shared.toggleWatched(item: preview.toWatchedItem(markedAtEpochMs: 0))
+        }
     }
 
     /// Toggle library membership. Prefers the enriched `meta`, falling back to the preview card.
@@ -420,7 +430,7 @@ final class DetailViewModel: ObservableObject {
     }
 
     private func refreshFlags() {
-        isWatched = WatchedRepository.shared.isWatched(id: id, type: type, season: nil, episode: nil)
+        isWatched = computeIsWatched()
         isSaved = LibraryRepository.shared.isSaved(id: id, type: type)
         watchedEpisodeKeys = computeWatchedEpisodeKeys()
         seriesAction = computeSeriesAction()
@@ -440,23 +450,39 @@ final class DetailViewModel: ObservableObject {
         )
     }
 
+    /// The state `toggleWatched()` flips. A series is read the way the shared series toggle reads it:
+    /// under the loaded meta's id (the one it writes, and the one the player records progress under;
+    /// a `tmdb:` catalog preview resolves to the addon's `tt` id), marked or fully watched. A movie,
+    /// or a page still loading, reads the catalog preview's title-level mark.
+    private func computeIsWatched() -> Bool {
+        if let meta, EpisodesSection.isSeriesLike(meta) {
+            return WatchedRepository.shared.isWatched(id: meta.id, type: meta.type, season: nil, episode: nil)
+                || WatchedRepository.shared.isFullyWatchedSeries(id: meta.id, type: meta.type)
+        }
+        return WatchedRepository.shared.isWatched(id: id, type: type, season: nil, episode: nil)
+    }
+
     /// "season:episode" keys for every episode that is explicitly marked watched or whose watch
-    /// progress is effectively complete. Pure in-memory lookups against the shared repositories.
+    /// progress is effectively complete. Pure in-memory lookups against the shared repositories,
+    /// under the loaded meta's id and, when it differs, the catalog preview's too.
     private func computeWatchedEpisodeKeys() -> Set<String> {
         guard let meta, EpisodesSection.isSeriesLike(meta) else { return [] }
+        let owners: [(id: String, type: String)] = meta.id == id ? [(id, type)] : [(meta.id, meta.type), (id, type)]
         var keys: Set<String> = []
         for episode in meta.videos {
             guard let s = episode.season?.value, let e = episode.episode?.value else { continue }
             let season = KotlinInt(int: Int32(s))
             let number = KotlinInt(int: Int32(e))
-            let marked = WatchedRepository.shared.isWatched(id: id, type: type, season: season, episode: number)
-            let completed = WatchProgressRepository.shared.progressForVideo(
-                videoId: "\(id):\(s):\(e)",
-                parentMetaId: id,
-                seasonNumber: season,
-                episodeNumber: number
-            )?.isEffectivelyCompleted == true
-            if marked || completed { keys.insert("\(s):\(e)") }
+            let watched = owners.contains { owner in
+                WatchedRepository.shared.isWatched(id: owner.id, type: owner.type, season: season, episode: number)
+                    || WatchProgressRepository.shared.progressForVideo(
+                        videoId: "\(owner.id):\(s):\(e)",
+                        parentMetaId: owner.id,
+                        seasonNumber: season,
+                        episodeNumber: number
+                    )?.isEffectivelyCompleted == true
+            }
+            if watched { keys.insert("\(s):\(e)") }
         }
         return keys
     }
