@@ -1,5 +1,6 @@
 package com.nuvio.app.features.simkl
 
+import co.touchlab.kermit.Logger
 import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.tracking.TrackingEpisode
 import com.nuvio.app.features.tracking.TrackingExternalIds
@@ -16,6 +17,9 @@ import com.nuvio.app.features.tracking.TrackingRefreshIntent
 import com.nuvio.app.features.tracking.TrackingScrobbleAction
 import com.nuvio.app.features.tracking.TrackingScrobbleEvent
 import com.nuvio.app.features.tracking.TrackingScrobbler
+import com.nuvio.app.features.watchprogress.TrackerOptimisticFailedStopRetentionMs
+import com.nuvio.app.features.watchprogress.TrackerOptimisticStopInFlightHoldMs
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -124,6 +128,7 @@ internal class SimklMutationService(
 
 object SimklMutationRepository : TrackingListWriter, TrackingHistoryWriter, TrackingScrobbler {
     override val providerId: TrackingProviderId = TrackingProviderId.SIMKL
+    private val log = Logger.withTag("SimklMutation")
 
     private val service by lazy {
         SimklMutationService(
@@ -194,13 +199,51 @@ object SimklMutationRepository : TrackingListWriter, TrackingHistoryWriter, Trac
     ) {
         if (!isActiveProfile(profileId)) return
         SimklSyncRepository.ensureLoaded()
+        // CW sync #3: a stop is the moment the snapshot catches up with local playback. Until it
+        // commits — and for a day if it fails — the title's local rows stay on Continue Watching
+        // (SimklProgressRepository's overlay; a no-op unless Simkl is the Watch Progress Source).
+        val playedContentId = event.media.catalog?.contentId?.takeIf(String::isNotBlank)
+            .takeIf { action == TrackingScrobbleAction.STOP }
+        if (playedContentId != null) {
+            SimklProgressRepository.holdOptimisticProgress(
+                profileId = profileId,
+                contentId = playedContentId,
+                forMs = TrackerOptimisticStopInFlightHoldMs,
+            )
+        }
         val enriched = SimklSyncRepository.state.value.snapshot.enrichMediaReference(event.media)
-        val result = service.scrobble(
-            action = action,
-            event = event.copy(
-                media = enriched.resolveAnimeEpisodeForSimkl(),
-            ),
-        )
+        val result = try {
+            service.scrobble(
+                action = action,
+                event = event.copy(
+                    media = enriched.resolveAnimeEpisodeForSimkl(),
+                ),
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (playedContentId != null) {
+                val kept = SimklProgressRepository.holdOptimisticProgress(
+                    profileId = profileId,
+                    contentId = playedContentId,
+                    forMs = TrackerOptimisticFailedStopRetentionMs,
+                )
+                log.w {
+                    val consequence = if (kept > 0) {
+                        "Continue Watching keeps its $kept local row(s) for up to 24 h, until Simkl " +
+                            "confirms or supersedes them"
+                    } else {
+                        "no local row of it is on Continue Watching (Simkl is not the Watch Progress " +
+                            "Source, or the rows expired)"
+                    }
+                    "Simkl scrobble stop FAILED for $playedContentId " +
+                        "(${event.media.episode?.season ?: "-"}x${event.media.episode?.number ?: "-"}) at " +
+                        "${event.progressPercent}%: Simkl did not record this viewing; $consequence. " +
+                        "Cause: ${error.message}"
+                }
+            }
+            throw error
+        }
         if (action != TrackingScrobbleAction.START) {
             SimklSyncRepository.commitScrobble(result)
         }
