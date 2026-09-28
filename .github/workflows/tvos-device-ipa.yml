@@ -59,7 +59,24 @@ jobs:
       KEEP_TOPSHELF: ${{ inputs.include_top_shelf && '1' || '0' }}
       PUBLISH: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && github.ref == 'refs/heads/tvos-shared-extraction') }}
       DD: ${{ github.workspace }}/iosApp/build/tvos-ipa
+      # Runtime config baked into SharedCore by :shared:generateSharedRuntimeConfigs
+      # (read from env when local.properties is absent). Without these the app falls back
+      # to https://localhost and sign-in/sync break.
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+      TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
+      SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
+      INTRODB_API_URL: ${{ secrets.INTRODB_API_URL }}
     steps:
+      - name: Check runtime config secrets
+        run: |
+          missing=0
+          for k in SUPABASE_URL SUPABASE_ANON_KEY TRAKT_CLIENT_ID TRAKT_CLIENT_SECRET SIMKL_CLIENT_ID; do
+            if [ -z "${!k}" ]; then echo "::error::secret $k is not set"; missing=1; fi
+          done
+          exit $missing
+
       - uses: actions/checkout@v4
 
       # Only MPVKit: libass-android, enginefs, TorrServer and quickjs-kt are gitlinks
@@ -163,6 +180,10 @@ jobs:
           echo "Version: $VER ($BUILD)"
           echo "Commit : $(/usr/libexec/PlistBuddy -c 'Print :NuvioCommitSHA' "$APP/Info.plist" 2>/dev/null || echo '?')"
           echo "Archs  : $(lipo -archs "$APP/NuvioTV")"
+          # Guard: the backend URL must be compiled in (a localhost build cannot sign in).
+          if ! strings -a "$APP/NuvioTV" | grep -qF "$SUPABASE_URL"; then
+            echo "::error::SUPABASE_URL not found in the binary"; exit 1
+          fi
           OUT="$RUNNER_TEMP/ipa"; rm -rf "$OUT"; mkdir -p "$OUT/Payload"
           cp -R "$APP" "$OUT/Payload/"
           if [ "$KEEP_TOPSHELF" != "1" ]; then
