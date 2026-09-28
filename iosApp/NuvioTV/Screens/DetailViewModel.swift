@@ -547,6 +547,9 @@ final class DetailViewModel: ObservableObject {
     private func reconcileSeriesWatchedStateIfNeeded() {
         guard let meta, EpisodesSection.isSeriesLike(meta), watchedStateLoaded, progressRemoteLoaded,
               !watchedToggleInFlight else { return }
+        // A meta without its episode list (an add-on that sends none) proves nothing — reconciling
+        // against it would drop the viewer's own series mark, and sync that removal.
+        guard meta.videos.contains(where: { EpisodesSection.normalizeSeasonNumber($0.season) > 0 }) else { return }
         let today = CurrentDateProvider.shared.todayIsoDate()
         let completions = latestProgressEntries
             .filter { $0.parentMetaId == meta.id }
