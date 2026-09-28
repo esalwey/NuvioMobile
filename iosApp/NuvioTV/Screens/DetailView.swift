@@ -1451,14 +1451,14 @@ struct DetailView: View {
                         // BUG-4) covers both states: accent-contrasting text unfocused, dark text
                         // on the near-white focus lift.
                         actionButtonPadding(
-                            actionLabel("Play", systemImage: "play.fill")
-                                .font(Theme.Font.meta)
-                                .prominentAccentLabel(),
+                            playActionLabel(verbatim: nil),
                             horizontal: Theme.Spacing.lg
                         )
                     }
                 )
                 .tint(Theme.Palette.accent)
+                // Upstream 972109f9: no configured source can stream this title.
+                .disabled(!model.isPlaybackAvailable)
             } else if let action = model.seriesAction, let meta = model.meta {
                 prominentActionButtonStyle(
                     Button {
@@ -1466,14 +1466,13 @@ struct DetailView: View {
                     } label: {
                         // BUG-14: see the non-series Play button above.
                         actionButtonPadding(
-                            actionLabel(verbatim: action.label, systemImage: "play.fill")
-                                .font(Theme.Font.meta)
-                                .prominentAccentLabel(),
+                            playActionLabel(verbatim: action.label),
                             horizontal: Theme.Spacing.lg
                         )
                     }
                 )
                 .tint(Theme.Palette.accent)
+                .disabled(!model.isPlaybackAvailable)
             }
 
             if model.trailerVideoURL != nil {
@@ -1552,6 +1551,23 @@ struct DetailView: View {
         } else {
             label
         }
+    }
+
+    /// The primary Play button's label: "Play", or the series action's already-localized label —
+    /// "Playback unavailable" instead once no configured source can stream it (upstream 972109f9).
+    @ViewBuilder
+    private func playActionLabel(verbatim seriesLabel: String?) -> some View {
+        Group {
+            if !model.isPlaybackAvailable {
+                actionLabel("Playback unavailable", systemImage: "play.slash")
+            } else if let seriesLabel {
+                actionLabel(verbatim: seriesLabel, systemImage: "play.fill")
+            } else {
+                actionLabel("Play", systemImage: "play.fill")
+            }
+        }
+        .font(Theme.Font.meta)
+        .prominentAccentLabel()
     }
 
     /// `actionLabel` for a title that is already localized (the shared series action's

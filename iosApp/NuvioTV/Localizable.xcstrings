@@ -17249,6 +17249,16 @@
         }
       }
     },
+    "Playback unavailable": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lecture indisponible"
+          }
+        }
+      }
+    },
     "Playing": {
       "localizations": {
         "de": {

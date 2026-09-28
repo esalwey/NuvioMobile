@@ -36,6 +36,10 @@ final class DetailViewModel: ObservableObject {
     /// Series-level primary play action (Resume SxEy / Play SxEy, honoring behaviorHints
     /// defaultVideoId) from the shared resolver; nil for movies or while meta loads.
     @Published private(set) var seriesAction: SeriesPrimaryAction?
+    /// Upstream 972109f9: false once it is certain no configured source (stream add-on, plugin,
+    /// embedded stream) can stream the primary Play target — Detail greys Play out instead of
+    /// opening a stream list that can only say so. True while that is not known.
+    @Published private(set) var isPlaybackAvailable = true
     /// IMDb parental-guide severities (empty when the title has no tt-id or no guide data).
     @Published private(set) var parentalWarnings: [ParentalWarning] = []
     /// Resolved full-screen trailer (from the Trailers row); drives a player cover with sound.
@@ -56,6 +60,8 @@ final class DetailViewModel: ObservableObject {
     /// touching the watched items).
     private var fullyWatchedWatcher: FlowWatcher?
     private var libraryWatcher: FlowWatcher?
+    /// Installed add-ons → `isPlaybackAvailable`.
+    private var addonsWatcher: FlowWatcher?
     /// A series watched toggle is in flight (the shared action fetches the episode list first).
     private var watchedToggleInFlight = false
     private var progressWatcher: FlowWatcher?
@@ -160,6 +166,9 @@ final class DetailViewModel: ObservableObject {
             guard let self else { return }
             self.refreshFlags()
         }
+        addonsWatcher = FlowWatcherKt.watch(AddonRepository.shared.uiState) { [weak self] _ in
+            self?.refreshFlags()
+        }
         progressWatcher = FlowWatcherKt.watch(WatchProgressRepository.shared.uiState) { [weak self] emitted in
             guard let self else { return }
             if let state = emitted as? WatchProgressUiState { self.latestProgressEntries = state.entries }
@@ -180,6 +189,7 @@ final class DetailViewModel: ObservableObject {
         watchedWatcher?.cancel(); watchedWatcher = nil
         fullyWatchedWatcher?.cancel(); fullyWatchedWatcher = nil
         libraryWatcher?.cancel(); libraryWatcher = nil
+        addonsWatcher?.cancel(); addonsWatcher = nil
         progressWatcher?.cancel(); progressWatcher = nil
         cwPrefsWatcher?.cancel(); cwPrefsWatcher = nil
         episodeProgressRequestedFor = nil
@@ -503,6 +513,20 @@ final class DetailViewModel: ObservableObject {
         let progress = computeEpisodeProgress(excluding: watchedEpisodeKeys)
         if progress != episodeProgress { episodeProgress = progress }
         seriesAction = computeSeriesAction()
+        let playable = computePlaybackAvailability()
+        if playable != isPlaybackAvailable { isPlaybackAvailable = playable }
+    }
+
+    /// The primary Play target as Detail requests it — the series action's episode, else the
+    /// movie under the meta's id — checked once the meta has resolved (a press before that is
+    /// covered by the stream repository's own tmdb → IMDb retry).
+    private func computePlaybackAvailability() -> Bool {
+        guard let meta else { return true }
+        if EpisodesSection.isSeriesLike(meta) {
+            guard let action = seriesAction else { return true }
+            return StreamSourceAvailability.shared.canStream(type: meta.type, videoId: action.videoId)
+        }
+        return StreamSourceAvailability.shared.canStream(type: preview.type, videoId: meta.id)
     }
 
     /// EP-2: mark / unmark one episode (mobile's episode long-press, shared
@@ -592,6 +616,7 @@ final class DetailViewModel: ObservableObject {
         watchedWatcher?.cancel()
         fullyWatchedWatcher?.cancel()
         libraryWatcher?.cancel()
+        addonsWatcher?.cancel()
         progressWatcher?.cancel()
         cwPrefsWatcher?.cancel()
     }
