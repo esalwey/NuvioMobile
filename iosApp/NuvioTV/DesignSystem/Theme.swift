@@ -454,6 +454,10 @@ enum Theme {
         static let chip: CGFloat = 6
         static let card: CGFloat = 12
         static let hero: CGFloat = 16
+        /// Floating panels over media and artwork — the player's transport bar, its pause / Up Next /
+        /// stream-info cards, the swipe-down panel, the stream picker's list (AES-7). Artwork inside
+        /// them keeps `card`.
+        static let panel: CGFloat = 24
     }
 
     // MARK: - Standard element sizes

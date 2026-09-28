@@ -1704,7 +1704,7 @@ struct MPVPlayerScreen: View {
             if showPauseInfo, state.isPaused, !state.isBuffering, !state.isEnded, !upNext.isCardVisible {
                 PauseInfoCard(context: context, state: state)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(60)
+                    .padding(PlayerChipStyle.edgePadding)
                     .transition(.opacity)
             }
 
@@ -1712,7 +1712,7 @@ struct MPVPlayerScreen: View {
             if state.showStreamInfo, let info = state.streamInfo {
                 StreamInfoOverlayView(info: info)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(60)
+                    .padding(PlayerChipStyle.edgePadding)
                     .transition(.opacity)
             }
 
@@ -1890,12 +1890,12 @@ private struct PlayerControlsOverlay: View {
         // Floating glass transport bar (HIG revamp): mirrors the native AVPlayerViewController
         // tvOS 26 chrome — an inset Liquid Glass panel over the video instead of the old
         // full-width black gradient.
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             Text(state.title)
                 .font(Theme.Font.screenTitle)
                 .lineLimit(1)
 
-            HStack(spacing: 20) {
+            HStack(spacing: Theme.Spacing.lg) {
                 Image(systemName: state.isPaused ? "pause.fill" : "play.fill")
                     .font(Theme.Font.screenTitle.weight(.regular))
 
@@ -1912,11 +1912,10 @@ private struct PlayerControlsOverlay: View {
             Label("Swipe down for info", systemImage: "chevron.down")
                 .font(Theme.Font.caption).foregroundStyle(.white.opacity(0.7))
         }
-        .foregroundStyle(.white)
-        .padding(28)
+        .foregroundStyle(Theme.Palette.textPrimary)
+        .padding(PlayerChipStyle.panelPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular.tint(.black.opacity(0.35)), in: RoundedRectangle(cornerRadius: 24))
-        .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
+        .playerPanelGlass()
         .padding(.horizontal, Theme.Spacing.screen)
         .padding(.bottom, Theme.Spacing.xl)
     }
@@ -1950,42 +1949,41 @@ private struct PauseInfoCard: View {
     @ObservedObject var state: MPVPlaybackState
 
     var body: some View {
-        HStack(alignment: .top, spacing: 24) {
+        HStack(alignment: .top, spacing: Theme.Spacing.lg) {
             if let poster = context.poster, !poster.isEmpty {
                 CachedAsyncImage(string: poster)
                     .frame(width: 140, height: 210)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
             }
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Text("Paused")
                     .font(Theme.Font.meta)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(Theme.Palette.textSecondary)
                 Text(context.title)
                     .font(Theme.Font.screenTitle)
                     .lineLimit(2)
                 if let season = context.season, let episode = context.episode {
                     Text("Season \(season) \u{00B7} Episode \(episode)")
                         .font(Theme.Font.body)
-                        .foregroundStyle(.white.opacity(0.85))
+                        .foregroundStyle(Theme.Palette.textSecondary)
                 }
                 if state.durationSec > 0 {
                     Text("\(remainingString) remaining")
                         .font(Theme.Font.body).monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.85))
+                        .foregroundStyle(Theme.Palette.textSecondary)
                 }
                 if let provider = context.providerName, !provider.isEmpty {
                     Text(provider)
                         .font(Theme.Font.caption)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(Theme.Palette.textSecondary)
                         .lineLimit(1)
                 }
             }
         }
-        .foregroundStyle(.white)
-        .padding(28)
+        .foregroundStyle(Theme.Palette.textPrimary)
+        .padding(PlayerChipStyle.panelPadding)
         .frame(maxWidth: 860, alignment: .leading)
-        .glassEffect(.regular.tint(.black.opacity(0.45)), in: RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+        .playerPanelGlass()
     }
 
     private var remainingString: String {
@@ -2000,26 +1998,25 @@ private struct StreamInfoOverlayView: View {
     let info: StreamInfoSnapshot
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             Text("Stream Info")
                 .font(Theme.Font.meta)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(Theme.Palette.textSecondary)
             ForEach(info.rows, id: \.0) { row in
-                HStack(alignment: .top, spacing: 12) {
+                HStack(alignment: .top, spacing: Theme.Spacing.sm) {
                     Text(row.0)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(Theme.Palette.textSecondary)
                         .frame(width: 190, alignment: .leading)
                     Text(row.1)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Theme.Palette.textPrimary)
                         .lineLimit(2)
                 }
                 .font(Theme.Font.caption.monospacedDigit())
             }
         }
-        .padding(24)
+        .padding(PlayerChipStyle.panelPadding)
         .frame(maxWidth: 560, alignment: .leading)
-        .glassEffect(.regular.tint(.black.opacity(0.45)), in: RoundedRectangle(cornerRadius: 14))
-        .shadow(color: .black.opacity(0.4), radius: 10, y: 4)
+        .playerPanelGlass()
     }
 }
 

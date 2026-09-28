@@ -31,10 +31,9 @@ struct UpNextCard: View {
             }
             hints
         }
-        .padding(Theme.Spacing.lg)
+        .padding(PlayerChipStyle.panelPadding)
         .frame(width: Self.cardWidth, alignment: .leading)
-        .glassEffect(.regular.tint(PlayerChipStyle.glassTint), in: RoundedRectangle(cornerRadius: Theme.Radius.hero))
-        .shadow(color: .black.opacity(0.4), radius: 14, y: 6)
+        .playerPanelGlass()
         .accessibilityElement(children: .combine)
     }
 
