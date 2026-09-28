@@ -1,5 +1,12 @@
 package com.nuvio.app.features.tracking
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -189,6 +196,45 @@ class TrackingScrobbleCoordinatorTest {
         assertEquals(0.0, percent(-3.0))
         assertEquals(0.0, percent(Double.NaN))
         assertEquals(64.2, percent(64.2))
+    }
+
+    // CW sync #1 (review): a stop sent while its start is still on the way reaches the tracker
+    // after the start. The players make both calls on the main thread, and each call runs there
+    // up to its first suspension, which UNDISPATCHED reproduces.
+    @Test
+    fun `a stop sent while its start is still on the way reaches the tracker after it`() = runBlocking {
+        val dispatch = OrderedScrobbleDispatch(context = Dispatchers.Default)
+        val delivered = Channel<String>(Channel.UNLIMITED)
+        val startInFlight = CompletableDeferred<Unit>()
+        val startReleased = CompletableDeferred<Unit>()
+
+        val start = launch(start = CoroutineStart.UNDISPATCHED) {
+            dispatch.send {
+                startInFlight.complete(Unit)
+                startReleased.await()
+                delivered.send("start")
+            }
+        }
+        startInFlight.await()
+        val stop = launch(start = CoroutineStart.UNDISPATCHED) {
+            dispatch.send { delivered.send("stop") }
+        }
+        delay(100)
+        assertNull(delivered.tryReceive().getOrNull(), "the stop overtook its start")
+
+        startReleased.complete(Unit)
+        joinAll(start, stop)
+        assertEquals(listOf("start", "stop"), listOf(delivered.receive(), delivered.receive()))
+    }
+
+    @Test
+    fun `a failed scrobble does not hold up the next one`() = runBlocking {
+        val dispatch = OrderedScrobbleDispatch(context = Dispatchers.Default)
+
+        val failure = runCatching { dispatch.send { throw IllegalStateException("offline") } }.exceptionOrNull()
+
+        assertEquals("offline", failure?.message)
+        assertEquals("stop", dispatch.send { "stop" })
     }
 
     private class FakeScrobbler(
