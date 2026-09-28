@@ -19,9 +19,17 @@ struct UpNextCard: View {
     let fallbackArtwork: String?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// The series backdrop from the shared meta cache: a 16:9 stand-in for a next episode without a
-    /// still, sharper in this frame than the 2:3 poster the players can pass as `fallbackArtwork`.
-    @State private var seriesBackdrop: String?
+    /// The series backdrop (`CachedTitleArt`): a 16:9 stand-in for a next episode without a still,
+    /// sharper in this frame than the 2:3 poster the players pass as `fallbackArtwork`. Read at init,
+    /// like `PlayerEndScreen`, so the card's first frame already draws it — no poster-to-backdrop
+    /// swap while the card fades in.
+    private let seriesBackdrop: String?
+
+    init(engine: NextEpisodeEngine, fallbackArtwork: String?) {
+        _engine = ObservedObject(wrappedValue: engine)
+        self.fallbackArtwork = fallbackArtwork
+        seriesBackdrop = CachedTitleArt.peek(type: engine.contentType, id: engine.parentMetaId)?.background
+    }
 
     private static let cardWidth: CGFloat = 920
     private static let artworkSize = CGSize(width: 288, height: 162)
@@ -46,9 +54,6 @@ struct UpNextCard: View {
         .frame(width: Self.cardWidth, alignment: .leading)
         .playerPanelGlass()
         .accessibilityElement(children: .combine)
-        .onAppear {
-            seriesBackdrop = CachedTitleArt.peek(type: engine.contentType, id: engine.parentMetaId)?.background
-        }
     }
 
     // MARK: - Artwork

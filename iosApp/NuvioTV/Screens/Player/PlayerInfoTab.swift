@@ -24,13 +24,18 @@ struct NativeInfoHeader: Equatable {
 
     init(context: PlaybackContext) {
         // AES-8: the series heads an episode's header when the meta cache knows it — the launch
-        // title ("S1E4 · Name") repeated the subtitle line below it.
-        title = PlaybackTitleParts(context: context).series ?? context.title
+        // title ("S1E4 · Name") repeated the subtitle line below it. The episode's own name then
+        // moves to the subtitle: from the episode list, else out of that launch title (a launch
+        // path without the list), so it is never lost. Without the series, the launch title stays
+        // the title and the subtitle is built as before.
+        let names = PlaybackTitleParts(context: context)
+        title = names.series ?? context.title
         var parts: [String] = []
         var usedStreamLabel = false
         if let s = context.season, let e = context.episode {
             parts.append(String(localized: "S\(s) · E\(e)"))
-            let episodeName = context.episodes.first { $0.season?.value == s && $0.episode?.value == e }?.title
+            let listedName = context.episodes.first { $0.season?.value == s && $0.episode?.value == e }?.title
+            let episodeName = names.series != nil ? names.episodeName : listedName
             if let episodeName, !episodeName.isEmpty {
                 parts.append(episodeName)
             } else if let st = context.streamTitle, !st.isEmpty {

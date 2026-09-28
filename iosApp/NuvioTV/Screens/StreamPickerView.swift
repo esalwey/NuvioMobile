@@ -169,18 +169,14 @@ struct StreamPickerView: View {
     private func fetchEpisodesIfNeeded() {
         guard needsEpisodeFetch else { return }
         MetaDetailsRepository.shared.fetch(type: type, id: parentMetaId, cacheResult: true) { details, _ in
-            let videos = details?.videos ?? []
-            // The header art comes from the same record (`loadHeaderArt` leaves it to this fetch).
-            let found = details != nil
-            let name: String? = details?.name
-            let logo: String? = details?.logo
-            let background: String? = details?.background
-            guard !videos.isEmpty || found else { return }
+            guard let details else { return }
+            let videos = details.videos
             // Suspend completions can land off-main; hop before mutating view state.
             DispatchQueue.main.async {
-                if found, headerArt == nil {
-                    headerArt = CachedTitleArt(name: name, logo: logo, background: background)
-                }
+                // The header art comes from the same record (`loadHeaderArt` leaves it to this
+                // fetch), kept for the player chrome too (`CachedTitleArt.remember`).
+                let art = CachedTitleArt.remember(details, type: type, id: parentMetaId)
+                if headerArt == nil { headerArt = art }
                 if !videos.isEmpty { fetchedEpisodes = videos }
             }
         }
@@ -192,10 +188,12 @@ struct StreamPickerView: View {
             && ["series", "tv", "show", "tvshow"].contains(type.lowercased())
     }
 
-    /// AES-3: the title's name, logo and backdrop for the header — from the shared meta cache when
-    /// the Details page already loaded it, else from one cache-first fetch (Home's Continue
-    /// Watching, a Top Shelf resume). A series without its episode list gets it from the fetch
-    /// `fetchEpisodesIfNeeded` makes anyway, never a second one.
+    /// AES-3: the title's name, logo, backdrop and facts for the header — from the shared meta
+    /// cache when the Details page already loaded it, else from one cache-first fetch (Home's
+    /// Continue Watching, a Top Shelf resume). A series without its episode list gets it from the
+    /// fetch `fetchEpisodesIfNeeded` makes anyway, never a second one. Either way the record is
+    /// kept for the player chrome (`CachedTitleArt`), which reads it after Details has cleared the
+    /// shared cache.
     private func loadHeaderArt() {
         if let cached = CachedTitleArt.peek(type: type, id: parentMetaId) {
             headerArt = cached
@@ -204,11 +202,8 @@ struct StreamPickerView: View {
         guard !needsEpisodeFetch else { return }
         MetaDetailsRepository.shared.fetch(type: type, id: parentMetaId, cacheResult: true) { details, _ in
             guard let details else { return }
-            let name: String? = details.name
-            let logo: String? = details.logo
-            let background: String? = details.background
             DispatchQueue.main.async {
-                headerArt = CachedTitleArt(name: name, logo: logo, background: background)
+                headerArt = CachedTitleArt.remember(details, type: type, id: parentMetaId)
             }
         }
     }

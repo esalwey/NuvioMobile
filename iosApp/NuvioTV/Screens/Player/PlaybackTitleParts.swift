@@ -1,31 +1,76 @@
 import Foundation
 import SharedCore
 
-/// A title's display artwork and name as the shared meta cache holds them — a synchronous
-/// `MetaDetailsRepository.peek`, never a network fetch. The Details page (and the stream picker's
-/// own load) already put the record there, so the picker header and the player chrome can show the
-/// SERIES name, logo and backdrop, which no `PlaybackContext` carries, without widening the context
-/// or its construction sites.
+/// A title's display bits — name, logo, backdrop and the movie facts line — read synchronously
+/// (`MetaDetailsRepository.peek`, never a network fetch), so the stream picker's header and the
+/// player chrome can show the SERIES name, logo and backdrop, which no `PlaybackContext` carries,
+/// without widening the context or its construction sites (`background` stays nil there: the
+/// progress recorder persists it).
+///
+/// Each record read here, or handed over by the picker's own fetches (`remember`), is also kept per
+/// title, and `peek` falls back to that copy once the repository has let go of it. On the main path
+/// it does exactly that under the player: presenting the picker's cover makes DetailView disappear,
+/// and `DetailViewModel.stop()` runs `MetaDetailsRepository.clear()` — after the picker has read the
+/// record, before the transport bar, the pause card, the Up Next card and the end screen look for it.
 struct CachedTitleArt: Equatable {
     var name: String?
     var logo: String?
     var background: String?
+    /// The picker's movie facts (year · runtime · IMDb rating), for launch paths that pass no
+    /// `PlaybackMeta` (Home's Continue Watching, a Top Shelf resume). Display only.
+    var year: String?
+    var runtime: String?
+    var rating: String?
 
-    init(name: String? = nil, logo: String? = nil, background: String? = nil) {
+    init(name: String? = nil, logo: String? = nil, background: String? = nil,
+         year: String? = nil, runtime: String? = nil, rating: String? = nil) {
         self.name = Self.nonEmpty(name)
         self.logo = Self.nonEmpty(logo)
         self.background = Self.nonEmpty(background)
+        self.year = Self.nonEmpty(year)
+        self.runtime = Self.nonEmpty(runtime)
+        self.rating = Self.nonEmpty(rating)
     }
 
-    /// nil when the record isn't cached yet (a cold Continue Watching or Top Shelf launch).
-    static func peek(type: String, id: String) -> CachedTitleArt? {
-        guard let details = MetaDetailsRepository.shared.peek(type: type, id: id) else { return nil }
+    /// From a catalog record: the facts are the fields `PlaybackMeta(details:)` reads.
+    init(details: MetaDetails) {
         // Kotlin `String?` reads widened explicitly, as everywhere in this target.
         let name: String? = details.name
         let logo: String? = details.logo
         let background: String? = details.background
-        return CachedTitleArt(name: name, logo: logo, background: background)
+        let year: String? = details.releaseInfo
+        let runtime: String? = details.runtime
+        let rating: String? = details.imdbRating
+        self.init(name: name, logo: logo, background: background, year: year, runtime: runtime, rating: rating)
     }
+
+    /// nil when this session never saw the record (a cold Continue Watching or Top Shelf launch,
+    /// before the picker's fetch lands).
+    static func peek(type: String, id: String) -> CachedTitleArt? {
+        if let details = MetaDetailsRepository.shared.peek(type: type, id: id) {
+            return remember(details, type: type, id: id)
+        }
+        return seen[seenKey(type: type, id: id)]
+    }
+
+    /// Keeps a fetched record's display bits for its title (see the type doc) and returns them. The
+    /// picker's fetches come through here because their result may never reach the repository: one
+    /// that started before Details' clear is dropped by the repository's generation check.
+    @discardableResult
+    static func remember(_ details: MetaDetails, type: String, id: String) -> CachedTitleArt {
+        let art = CachedTitleArt(details: details)
+        let key = seenKey(type: type, id: id)
+        if seen[key] == nil, seen.count >= seenLimit { seen.removeAll() }
+        seen[key] = art
+        return art
+    }
+
+    /// Last record seen per title — a few strings each, main-actor state like the rest of this
+    /// target; dropped wholesale past `seenLimit` titles rather than tracking recency.
+    private static var seen: [String: CachedTitleArt] = [:]
+    private static let seenLimit = 64
+
+    private static func seenKey(type: String, id: String) -> String { "\(type)|\(id)" }
 
     /// Blank addon values count as missing.
     static func nonEmpty(_ value: String?) -> String? {
