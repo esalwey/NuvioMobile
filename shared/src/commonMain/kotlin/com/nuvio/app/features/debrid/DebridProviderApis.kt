@@ -35,6 +35,30 @@ object DebridProviderApis {
         val normalized = DebridProviders.byId(providerId)?.id ?: return null
         return registered.firstOrNull { it.provider.id == normalized }
     }
+
+    // Swift-facing twins for the tvOS debrid pane (same treatment as TmdbMetadataService's
+    // `*Checked` functions). A suspend function exported to Swift without `@Throws` treats every
+    // non-cancellation exception as unhandled and ABORTS the process, and every provider call
+    // below throws on a transport failure (offline, DNS, TLS, timeout — httpRequestRaw does not
+    // catch them), or, for Premiumize device sign-in, on a missing client id. `@Throws(Throwable)`
+    // hands those to the Swift completion as an NSError instead. Kotlin callers keep using the
+    // [DebridProviderApi] methods directly.
+
+    /** True/false from the provider; throws (→ NSError in Swift) when it could not be asked. */
+    @Throws(Throwable::class)
+    suspend fun validateApiKeyChecked(providerId: String, apiKey: String): Boolean {
+        val normalized = apiKey.trim()
+        if (normalized.isBlank()) return false
+        return apiFor(providerId)?.validateApiKey(normalized) == true
+    }
+
+    @Throws(Throwable::class)
+    suspend fun startDeviceAuthorizationChecked(providerId: String, appName: String): DebridDeviceAuthorization? =
+        apiFor(providerId)?.startDeviceAuthorization(appName)
+
+    @Throws(Throwable::class)
+    suspend fun redeemDeviceAuthorizationChecked(providerId: String, deviceCode: String): DebridDeviceAuthorizationTokenResult =
+        apiFor(providerId)?.redeemDeviceAuthorization(deviceCode) ?: DebridDeviceAuthorizationTokenResult.Unsupported
 }
 
 @Serializable

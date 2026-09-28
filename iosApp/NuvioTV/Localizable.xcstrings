@@ -25107,6 +25107,16 @@
     "The hero plays a muted trailer preview after a moment of focus on a poster": {},
     "The hero plays its trailer by itself, without waiting for focus": {},
     "The hero shows artwork only": {},
+    "The profile changed before this sign-in finished, so the key wasn't saved. Connect again on this profile.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le profil a changé avant la fin de la connexion : la clé n’a pas été enregistrée. Reconnectez-vous sur ce profil."
+          }
+        }
+      }
+    },
     "The provider returned an unplayable link.": {
       "localizations": {
         "de": {
