@@ -511,7 +511,8 @@ final class DetailViewModel: ObservableObject {
 
     /// Mirrors mobile's Detail screen: shared `seriesPrimaryAction` over the full progress +
     /// watched state (resume beats next-up; first released episode — or the addon's
-    /// behaviorHints.defaultVideoId — for a fresh series).
+    /// behaviorHints.defaultVideoId — for a fresh series; upstream 2b8be69cd: a series watched to
+    /// its last released episode plays again from the first one instead of offering nothing).
     private func computeSeriesAction() -> SeriesPrimaryAction? {
         guard let meta, EpisodesSection.isSeriesLike(meta) else { return nil }
         return meta.seriesPrimaryAction(
@@ -519,7 +520,8 @@ final class DetailViewModel: ObservableObject {
             watchedItems: latestWatchedItems,
             todayIsoDate: CurrentDateProvider.shared.todayIsoDate(),
             preferFurthestEpisode: latestCwPrefs?.upNextFromFurthestEpisode ?? true,
-            showUnairedNextUp: latestCwPrefs?.showUnairedNextUp ?? false
+            showUnairedNextUp: latestCwPrefs?.showUnairedNextUp ?? false,
+            allowRewatch: true
         )
     }
 

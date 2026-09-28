@@ -13,6 +13,84 @@ class SeriesContinuityTest {
         WatchingReleasedEpisode(videoId = "ep3", seasonNumber = 1, episodeNumber = 3, title = "Episode 3", releasedDate = "2026-03-15"),
     )
 
+    // Ported from upstream 2b8be69cd (#1932): replay a watched series from its first episode.
+    @Test
+    fun decideSeriesPrimaryAction_restarts_completed_series_from_first_episode() {
+        val action = decideSeriesPrimaryAction(
+            content = show,
+            episodes = episodes,
+            progressRecords = listOf(
+                WatchingProgressRecord(
+                    content = show,
+                    videoId = "show:1:3",
+                    seasonNumber = 1,
+                    episodeNumber = 3,
+                    lastUpdatedEpochMs = 100L,
+                    isCompleted = true,
+                ),
+            ),
+            watchedRecords = emptyList(),
+            todayIsoDate = "2026-03-30",
+            defaultVideoId = "ep2",
+            allowRewatch = true,
+        )
+
+        assertNotNull(action)
+        assertEquals("show:1:1", action.videoId)
+        assertEquals("Play S1E1", action.label)
+        assertNull(action.resumePositionMs)
+    }
+
+    @Test
+    fun decideSeriesPrimaryAction_has_no_next_up_after_final_episode() {
+        val action = decideSeriesPrimaryAction(
+            content = show,
+            episodes = episodes,
+            progressRecords = emptyList(),
+            watchedRecords = listOf(
+                WatchingWatchedRecord(content = show, seasonNumber = 1, episodeNumber = 3, markedAtEpochMs = 100L),
+            ),
+            todayIsoDate = "2026-03-30",
+        )
+
+        assertNull(action)
+    }
+
+    @Test
+    fun decideSeriesPrimaryAction_does_not_rewatch_unavailable_episodes() {
+        val action = decideSeriesPrimaryAction(
+            content = show,
+            episodes = episodes.map { it.copy(available = false, releasedDate = null) },
+            progressRecords = emptyList(),
+            watchedRecords = listOf(
+                WatchingWatchedRecord(content = show, seasonNumber = 1, episodeNumber = 3, markedAtEpochMs = 100L),
+            ),
+            todayIsoDate = "2026-03-30",
+            allowRewatch = true,
+        )
+
+        assertNull(action)
+    }
+
+    @Test
+    fun decideSeriesPrimaryAction_keeps_up_next_when_rewatch_is_allowed() {
+        val action = decideSeriesPrimaryAction(
+            content = show,
+            episodes = episodes,
+            progressRecords = emptyList(),
+            watchedRecords = listOf(
+                WatchingWatchedRecord(content = show, seasonNumber = 1, episodeNumber = 1, markedAtEpochMs = 100L),
+            ),
+            todayIsoDate = "2026-03-30",
+            defaultVideoId = "ep3",
+            allowRewatch = true,
+        )
+
+        assertNotNull(action)
+        assertEquals("Next Up • S1E2", action.label)
+        assertEquals("show:1:2", action.videoId)
+    }
+
     @Test
     fun continueWatchingProgressEntries_defaults_to_the_pinned_legacy_limit() {
         assertEquals(20, DefaultContinueWatchingLimit)
