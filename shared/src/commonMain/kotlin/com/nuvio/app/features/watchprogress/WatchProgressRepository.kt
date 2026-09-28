@@ -76,6 +76,31 @@ internal const val WATCH_PROGRESS_SERVER_FUTURE_TOLERANCE_MS = 10 * 60_000L
 internal fun serverLastWatchedForLocalUse(lastWatched: Long, nowEpochMs: Long): Long =
     if (lastWatched > nowEpochMs + WATCH_PROGRESS_SERVER_FUTURE_TOLERANCE_MS) 0L else lastWatched
 
+/** Where a playback write goes, by profile (CW legacy #4). */
+internal enum class PlaybackWriteProfilePath {
+    /** The loaded profile, which is the active one: the in-memory path. */
+    LOADED,
+
+    /**
+     * The active profile, while another one is loaded here: that profile is loaded first, then
+     * the write takes the in-memory path, so Home (which reads the in-memory state) sees it.
+     */
+    RELOAD_ACTIVE,
+
+    /** A profile that is not the active one: written to its stored payload only. */
+    OTHER_PROFILE,
+}
+
+internal fun playbackWriteProfilePath(
+    targetProfileId: Int,
+    loadedProfileId: Int,
+    activeProfileId: Int,
+): PlaybackWriteProfilePath = when {
+    targetProfileId != activeProfileId -> PlaybackWriteProfilePath.OTHER_PROFILE
+    targetProfileId != loadedProfileId -> PlaybackWriteProfilePath.RELOAD_ACTIVE
+    else -> PlaybackWriteProfilePath.LOADED
+}
+
 /**
  * CW sync (REMAINING_FIX #2): the rows the one-time post-pull backlog push sends — local rows whose
  * key is still dirty, newest first, at most [limit]. Rows without a content or video id are left
@@ -436,8 +461,8 @@ object WatchProgressRepository {
     private val backlogPushedProfileIds = mutableSetOf<Int>()
     /**
      * CW legacy diagnosis (REMAINING_FIX #1): playback writes whose profile was not the one loaded
-     * here, or not the active one (the branch of [upsert] that only writes to disk). Shown as
-     * `xprof` by [continueWatchingDiagnosticLines].
+     * here, or not the active one — the active one is then loaded first (`reload …`, #4), another
+     * one is written to disk only (`disk …`). Shown as `xprof` by [continueWatchingDiagnosticLines].
      */
     private var crossProfileWriteCount = 0
     private var lastCrossProfileWrite = ""
@@ -1810,33 +1835,29 @@ object WatchProgressRepository {
             isCompleted = isCompleted,
         ).normalizedCompletion()
 
-        if (targetProfileId != currentProfileId || ProfileRepository.activeProfileId != targetProfileId) {
-            recordCrossProfileWrite(
-                "target=$targetProfileId current=$currentProfileId active=${ProfileRepository.activeProfileId}",
-            )
-            val resolvedEntry = resolveStoredProfileProgressIdentity(
-                profileId = targetProfileId,
-                entry = candidateEntry,
-            )
-            if (
-                syncRemote &&
-                !remoteWriteDeduplicator.shouldSend(
+        val activeProfileId = ProfileRepository.activeProfileId
+        val profilePath = playbackWriteProfilePath(
+            targetProfileId = targetProfileId,
+            loadedProfileId = currentProfileId,
+            activeProfileId = activeProfileId,
+        )
+        if (profilePath != PlaybackWriteProfilePath.LOADED) {
+            val detail = "target=$targetProfileId current=$currentProfileId active=$activeProfileId"
+            // CW legacy #4: a write for the active profile while another one is loaded here only
+            // reached the disk, and Home — which reads the loaded state — never saw it. The active
+            // profile is loaded instead, and the write goes on in memory below.
+            val reloaded = profilePath == PlaybackWriteProfilePath.RELOAD_ACTIVE &&
+                reloadActiveProfileForWrite(targetProfileId)
+            recordCrossProfileWrite(if (reloaded) "reload $detail" else "disk $detail")
+            if (!reloaded) {
+                writeStoredProfileProgress(
                     profileId = targetProfileId,
-                    entry = resolvedEntry,
-                    nowEpochMs = candidateEntry.lastUpdatedEpochMs,
+                    candidateEntry = candidateEntry,
+                    persist = persist,
+                    syncRemote = syncRemote,
                 )
-            ) {
                 return
             }
-            val entry = if (persist) {
-                upsertStoredProfileProgress(profileId = targetProfileId, entry = resolvedEntry)
-            } else {
-                resolvedEntry
-            }
-            if (syncRemote) {
-                pushScrobbleToServer(entry = entry, profileId = targetProfileId)
-            }
-            return
         }
 
         val entry = localEntriesSnapshot().resolveIdentityForUpsert(candidateEntry)
@@ -1879,9 +1900,54 @@ object WatchProgressRepository {
     }
 
     /**
-     * CW legacy diagnosis (REMAINING_FIX #1): counts a playback write that did not go through the
-     * loaded profile's in-memory state. Playback saves every 5 s, so the warning is only logged
-     * when the profiles involved change.
+     * CW legacy #4: loads the active profile [profileId] for a playback write made while another
+     * profile is loaded here — the profile selection normally does it first (nothing known skips
+     * it, the diagnostics count it as `xprof`). Never throws into the Swift caller: false when the
+     * load fails, and the write then only goes to disk, as before.
+     */
+    private fun reloadActiveProfileForWrite(profileId: Int): Boolean = try {
+        loadFromDisk(profileId)
+        currentProfileId == profileId
+    } catch (error: Throwable) {
+        log.e(error) { "Failed to load profile $profileId for a playback write; it only goes to disk" }
+        false
+    }
+
+    /** A playback write for a profile that is not the loaded one: its stored payload only. */
+    private fun writeStoredProfileProgress(
+        profileId: Int,
+        candidateEntry: WatchProgressEntry,
+        persist: Boolean,
+        syncRemote: Boolean,
+    ) {
+        val resolvedEntry = resolveStoredProfileProgressIdentity(
+            profileId = profileId,
+            entry = candidateEntry,
+        )
+        if (
+            syncRemote &&
+            !remoteWriteDeduplicator.shouldSend(
+                profileId = profileId,
+                entry = resolvedEntry,
+                nowEpochMs = candidateEntry.lastUpdatedEpochMs,
+            )
+        ) {
+            return
+        }
+        val entry = if (persist) {
+            upsertStoredProfileProgress(profileId = profileId, entry = resolvedEntry)
+        } else {
+            resolvedEntry
+        }
+        if (syncRemote) {
+            pushScrobbleToServer(entry = entry, profileId = profileId)
+        }
+    }
+
+    /**
+     * CW legacy diagnosis (REMAINING_FIX #1): counts a playback write made for another profile than
+     * the loaded or the active one ([PlaybackWriteProfilePath]). Playback saves every 5 s, so the
+     * warning is only logged when the profiles involved change.
      */
     private fun recordCrossProfileWrite(detail: String) {
         crossProfileWriteCount += 1
