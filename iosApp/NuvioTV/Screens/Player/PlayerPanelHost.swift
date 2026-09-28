@@ -24,14 +24,30 @@ final class NativePlayerHostController: UIViewController, UIGestureRecognizerDel
     var onOpenPanel: (() -> Void)?
     /// Fired after a presented panel has been dismissed (any way: Menu, swipe up, programmatic).
     var onPanelClosed: (() -> Void)?
-    /// Menu press hook (upstream 4026ec92 parity): return true to consume it — the up-next chip
-    /// was dismissed — or false to let the press continue up to SwiftUI, whose `fullScreenCover`
-    /// pops the player exactly as today.
+    /// Menu press hook: return true to consume it — the Up Next card cancelled autoplay and is
+    /// leaving for the details page — or false to let the press continue up to SwiftUI, whose
+    /// `fullScreenCover` pops the player exactly as today.
     var onMenuPress: (() -> Bool)?
+    /// D-pad Down press hook, asked before the panel opens: return true when the Up Next card
+    /// consumed it (play the next episode now / choose a source).
+    var onDownPress: (() -> Bool)?
+    /// Select press hook for the Up Next card's "OK cancels" (mpv parity — the system player would
+    /// otherwise just toggle pause whenever the "Cancel" action isn't the focused one). The press is
+    /// observed, never consumed: it may be activating a focused contextual action ("Play Now"), so
+    /// `onSelectPress` hands back a token (nil = the card isn't up) and `onSelectSettled` gets it a
+    /// beat later, after that action had its turn — the engine then acts only if none ran.
+    var onSelectPress: (() -> Int?)?
+    var onSelectSettled: ((Int) -> Void)?
     private var swallowMenuRelease = false
     private(set) var panelHost: PlayerPanelPresenting?
     private var downPress: UITapGestureRecognizer!
     private var downSwipe: UISwipeGestureRecognizer!
+    private var selectPress: UITapGestureRecognizer!
+    /// Passive observer of ordinary remote use (never cancels or delays a press): proof someone is
+    /// watching, which resets the "Still watching?" run (NE-5 — the native path had no reset point).
+    private var interactionPress: UITapGestureRecognizer!
+    /// How long a Select waits for a focused contextual action to handle the same press.
+    private static let selectSettleDelay: TimeInterval = 0.2
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -43,7 +59,7 @@ final class NativePlayerHostController: UIViewController, UIGestureRecognizerDel
         view.addSubview(playerVC.view)
         playerVC.didMove(toParent: self)
 
-        downPress = UITapGestureRecognizer(target: self, action: #selector(handleOpenGesture))
+        downPress = UITapGestureRecognizer(target: self, action: #selector(handleDownPress))
         downPress.allowedPressTypes = [NSNumber(value: UIPress.PressType.downArrow.rawValue)]
         downPress.delegate = self
         downSwipe = UISwipeGestureRecognizer(target: self, action: #selector(handleOpenGesture))
@@ -51,6 +67,53 @@ final class NativePlayerHostController: UIViewController, UIGestureRecognizerDel
         downSwipe.delegate = self
         view.addGestureRecognizer(downPress)
         view.addGestureRecognizer(downSwipe)
+
+        // Select: observed like the interaction presses below (never cancels or delays the press
+        // for the system player), plus the Up Next card's "OK cancels".
+        selectPress = UITapGestureRecognizer(target: self, action: #selector(handleSelectPress))
+        selectPress.allowedPressTypes = [NSNumber(value: UIPress.PressType.select.rawValue)]
+        selectPress.cancelsTouchesInView = false
+        selectPress.delaysTouchesEnded = false
+        selectPress.delegate = self
+        view.addGestureRecognizer(selectPress)
+
+        // Menu stays out of this set: it is owned by `pressesBegan` below and the cover's exit.
+        interactionPress = UITapGestureRecognizer(target: self, action: #selector(handleInteraction))
+        interactionPress.allowedPressTypes = [
+            UIPress.PressType.playPause, .leftArrow, .rightArrow, .upArrow,
+        ].map { NSNumber(value: $0.rawValue) }
+        interactionPress.cancelsTouchesInView = false
+        interactionPress.delaysTouchesEnded = false
+        interactionPress.delegate = self
+        view.addGestureRecognizer(interactionPress)
+    }
+
+    @objc private func handleInteraction() {
+        NextEpisodeEngine.consecutiveAutoPlays = 0
+    }
+
+    /// Our panel or one of the system player's own popovers is up: those own the remote.
+    private var isShowingOverlay: Bool {
+        panelHost != nil || presentedViewController != nil || playerVC.presentedViewController != nil
+    }
+
+    @objc private func handleSelectPress() {
+        NextEpisodeEngine.consecutiveAutoPlays = 0
+        guard !isShowingOverlay, let token = onSelectPress?() else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.selectSettleDelay) { [weak self] in
+            // Re-checked: the same press may have opened one of the system player's menus.
+            guard let self, !self.isShowingOverlay else { return }
+            self.onSelectSettled?(token)
+        }
+    }
+
+    /// Down press: the Up Next card first (play now), else the top panel — same order as mpv.
+    @objc private func handleDownPress() {
+        NextEpisodeEngine.consecutiveAutoPlays = 0
+        guard panelHost == nil, presentedViewController == nil,
+              playerVC.presentedViewController == nil else { return }
+        if onDownPress?() == true { return }
+        onOpenPanel?()
     }
 
     /// Recognize alongside AVPlayerViewController's own recognizers — never block the system player.

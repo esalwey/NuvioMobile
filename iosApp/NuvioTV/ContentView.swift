@@ -67,6 +67,9 @@ struct ContentView: View {
     /// the auth + profile gates when the app is cold-launched from the Top Shelf.
     @State private var deepLink: DeepLink?
     @State private var pendingDeepLinkURL: URL?
+    /// The player asked for the title's details page during a Top Shelf resume (Up Next cancel,
+    /// "Back to Details", the end of a movie or finale): shown once the resume cover has closed.
+    @State private var deepLinkDetailAfterResume: MetaPreview?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -201,7 +204,12 @@ struct ContentView: View {
                 pendingDeepLinkURL = url
             }
         }
-        .fullScreenCover(item: $deepLink) { link in
+        .fullScreenCover(item: $deepLink, onDismiss: {
+            // "Back to Details" from a Top Shelf resume lands on the title's page.
+            guard let preview = deepLinkDetailAfterResume else { return }
+            deepLinkDetailAfterResume = nil
+            deepLink = .title(preview: preview)
+        }) { link in
             switch link {
             case .resume(let type, let videoId, let title, let parentMetaId, let season, let episode):
                 StreamPickerView(
@@ -210,7 +218,25 @@ struct ContentView: View {
                     title: title,
                     parentMetaId: parentMetaId,
                     season: season,
-                    episode: episode
+                    episode: episode,
+                    onLeaveToDetails: {
+                        deepLinkDetailAfterResume = MetaPreview(
+                            id: parentMetaId,
+                            type: type,
+                            name: title,
+                            poster: nil,
+                            banner: nil,
+                            logo: nil,
+                            posterShape: PosterShape.poster,
+                            description: nil,
+                            releaseInfo: nil,
+                            rawReleaseDate: nil,
+                            popularity: nil,
+                            voteCount: nil,
+                            imdbRating: nil,
+                            genres: []
+                        )
+                    }
                 )
             case .title(let preview):
                 DeepLinkTitleView(preview: preview)

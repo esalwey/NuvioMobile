@@ -86,6 +86,43 @@ struct PlaybackSettingsPane: View {
                 .frame(maxWidth: 1100, alignment: .leading)
         }
 
+        // Up Next (NE-6/SET-1). Every row is this Apple TV's own (the phone's synced auto-play
+        // switch defaults off, and its threshold slider can't hold 15/45 s); until "Before the End"
+        // is picked here, the timing set on the phone applies — see `UpNextPreferences`.
+        SettingsSection(String(localized: "Next Episode")) {
+            SettingsToggleRow(
+                title: String(localized: "Autoplay Next Episode"),
+                subtitle: String(localized: "When an episode ends, the next one starts on its own after a countdown. Press OK or Menu during the countdown to cancel and go back to the details page."),
+                isOn: Binding(get: { model.upNextAutoplay }, set: { model.setUpNextAutoplay($0) })
+            )
+            if model.upNextAutoplay {
+                SettingsToggleRow(
+                    title: String(localized: "Start at the Credits When Known"),
+                    subtitle: String(localized: "Show Up Next as soon as the credits begin, for episodes whose credits timing is known (needs Skip Intro). A scene after the credits plays first."),
+                    isOn: Binding(get: { model.upNextUseCredits }, set: { model.setUpNextUseCredits($0) })
+                )
+                SettingsPickerRow(
+                    title: String(localized: "Before the End"),
+                    subtitle: String(localized: "Otherwise, Up Next appears this long before the end of the episode. Until you pick a value, the timing set on your phone applies."),
+                    selection: Binding(get: { model.upNextSecondsBeforeEnd }, set: { model.setUpNextSecondsBeforeEnd($0) }),
+                    options: model.upNextSecondsBeforeEndOptions,
+                    label: { model.upNextSecondsBeforeEndLabel($0) }
+                )
+                SettingsPickerRow(
+                    title: String(localized: "Countdown"),
+                    subtitle: String(localized: "How long Up Next counts down before playing. Pausing the video pauses the countdown."),
+                    selection: Binding(get: { model.upNextCountdown }, set: { model.setUpNextCountdown($0) }),
+                    options: UpNextPreferences.countdownOptions,
+                    label: { String(localized: "\($0) s") }
+                )
+                SettingsToggleRow(
+                    title: String(localized: "Ask \u{201C}Still Watching?\u{201D}"),
+                    subtitle: String(localized: "After 3 episodes in a row without touching the remote, wait for a press before the next one."),
+                    isOn: Binding(get: { model.upNextAskStillWatching }, set: { model.setUpNextAskStillWatching($0) })
+                )
+            }
+        }
+
         SettingsSection(String(localized: "Subtitles")) {
             if let style = model.subtitleStyle {
                 SubtitleAppearanceControls(

@@ -26,26 +26,53 @@ import SharedCore
 /// landed — and stayed — at the bottom of the list.)
 struct StreamPickerView: View {
     let type: String
-    let videoId: String
-    let title: String
 
     let parentMetaId: String
-    let season: Int?
-    let episode: Int?
     /// All episodes of the parent series (from `MetaDetails.videos`); enables next-episode
     /// autoplay in the player. Empty for movies or launch paths without the series meta.
     let episodes: [MetaVideo]
-    /// Info-tab header inputs (optional; launch paths without meta at hand pass nil and the header
-    /// omits them). `poster` is the catalog/series poster (also persisted as the parent artwork by
-    /// the progress recorder); `episodeStill` is the 16:9 episode image shown in preference to it.
+    /// Info-tab header input (optional). The catalog/series poster (also persisted as the parent
+    /// artwork by the progress recorder).
     let poster: String?
-    let episodeStill: String?
-    let synopsis: String?
     /// Title-level facts for the player's Info tab chips (nil when the caller has no meta).
     let meta: PlaybackMeta?
 
+    /// The episode this picker lists streams for. It starts as the one the picker was opened for;
+    /// "Choose a Source" on the player's end screen moves it to the NEXT episode (`retarget(to:)`)
+    /// instead of stacking another picker on top.
+    private struct Target: Equatable {
+        var videoId: String
+        var title: String
+        var season: Int?
+        var episode: Int?
+        /// 16:9 episode image for the Info-tab header, shown in preference to `poster`.
+        var episodeStill: String?
+        var synopsis: String?
+    }
+    @State private var target: Target
+    private var videoId: String { target.videoId }
+    private var title: String { target.title }
+    private var season: Int? { target.season }
+    private var episode: Int? { target.episode }
+    private var episodeStill: String? { target.episodeStill }
+    private var synopsis: String? { target.synopsis }
+
+    /// Presenters that are not the title's details page (Home's Continue Watching, a Top Shelf deep
+    /// link) open it once this picker has closed after the player asked for the details page —
+    /// the Up Next cancel, "Back to Details", the end of a movie or finale. nil = the presenter IS
+    /// the details page (Detail, its episode list).
+    let onLeaveToDetails: (() -> Void)?
+
     @StateObject private var model: StreamsViewModel
     @State private var selected: PlaybackContext?
+    /// Autoplay (or a panel jump) took playback past the episode this picker lists: closing the
+    /// player then leaves for the details page too — never back onto this stale list, where one
+    /// Select would replay the old episode (NE-4/NEXT-1).
+    @State private var autoAdvanced = false
+    /// The player asked for the details page and this picker is closing with it. Normally the one
+    /// `dismiss()` takes the picker and everything it presents down in one transition; should only
+    /// the player cover close, its `onDismiss` then closes the picker (never leaving it on screen).
+    @State private var exitToDetailsPending = false
     /// Episodes fetched on demand when a series launch path didn't supply them (Home
     /// continue-watching, Detail's primary Play). Filled from `MetaDetailsRepository.fetch`
     /// (cache-first, side-effect free) so next-episode autoplay works from every path.
@@ -87,19 +114,19 @@ struct StreamPickerView: View {
         poster: String? = nil,
         episodeStill: String? = nil,
         synopsis: String? = nil,
-        meta: PlaybackMeta? = nil
+        meta: PlaybackMeta? = nil,
+        onLeaveToDetails: (() -> Void)? = nil
     ) {
         self.meta = meta
         self.poster = poster
-        self.episodeStill = episodeStill
-        self.synopsis = synopsis
+        self.onLeaveToDetails = onLeaveToDetails
         self.type = type
-        self.videoId = videoId
-        self.title = title
         self.parentMetaId = parentMetaId ?? videoId
-        self.season = season
-        self.episode = episode
         self.episodes = episodes
+        _target = State(initialValue: Target(
+            videoId: videoId, title: title, season: season, episode: episode,
+            episodeStill: episodeStill, synopsis: synopsis
+        ))
         _model = StateObject(wrappedValue: StreamsViewModel(
             type: type, videoId: videoId, parentMetaId: parentMetaId, season: season, episode: episode
         ))
@@ -298,15 +325,70 @@ struct StreamPickerView: View {
                 SubtitleRepository.shared.fetchAddonSubtitles(type: type, videoId: videoId)
             }
             .onDisappear { model.stop() }
-            .fullScreenCover(item: $selected) { ctx in
+            .fullScreenCover(item: $selected, onDismiss: {
+                // A real close of the player — an autoplay swap already holds the next context.
+                // After an autoplay chain, go back to the details page, not to this picker; and
+                // an exit to the details page never stops on it either (see below).
+                guard selected == nil, autoAdvanced || exitToDetailsPending else { return }
+                exitToDetailsPending = false
+                dismiss()
+            }) { ctx in
                 // `.id(ctx.id)` forces a full player rebuild when autoplay swaps in the next
                 // episode's context (a same-position cover would otherwise keep the old libmpv
                 // controller and just ignore the new context).
-                PlayerScreen(context: ctx, onPlayNext: { next in selected = next })
-                    .ignoresSafeArea()
-                    .id(ctx.id)
+                PlayerScreen(
+                    context: ctx,
+                    onPlayNext: { next in
+                        if next.videoId != target.videoId { autoAdvanced = true }
+                        selected = next
+                    },
+                    // Cancel from the Up Next card / end screen, "Back to Details", the end of a
+                    // movie or finale: dismissing the picker takes the player cover (and anything
+                    // on it) down in the same transition. Should only the player close, the cover's
+                    // `onDismiss` above closes the picker — the details page, never this list.
+                    onExitToDetails: {
+                        guard !exitToDetailsPending else { return }
+                        exitToDetailsPending = true
+                        onLeaveToDetails?()
+                        dismiss()
+                    },
+                    onPickNextSource: { video in chooseSource(for: video) }
+                )
+                .ignoresSafeArea()
+                .id(ctx.id)
             }
         }
+    }
+
+    // MARK: - Next episode's stream list ("Choose a Source" on the player's end screen)
+
+    /// No stream could be auto-selected for the next episode: this picker becomes the next
+    /// episode's list and the player closes onto it. Back from here then returns to details.
+    private func chooseSource(for video: MetaVideo) {
+        retarget(to: video)
+        selected = nil
+    }
+
+    private func retarget(to video: MetaVideo) {
+        let still: String? = video.thumbnail
+        let overview: String? = video.overview
+        let next = Target(
+            videoId: NextEpisodeEngine.episodeVideoId(metaId: parentMetaId, episode: video),
+            title: NextEpisodeEngine.episodeTitle(video),
+            season: video.season?.value,
+            episode: video.episode?.value,
+            episodeStill: (still ?? "").isEmpty ? nil : still,
+            synopsis: (overview ?? "").isEmpty ? nil : overview
+        )
+        target = next
+        // The list now IS the playing episode's, so a later close stays here.
+        autoAdvanced = false
+        resolvingKey = nil
+        expandedGroups = []
+        didAutoExpand = false
+        focusedRow = nil
+        model.retarget(videoId: next.videoId, season: next.season, episode: next.episode)
+        SubtitleRepository.shared.fetchAddonSubtitles(type: type, videoId: next.videoId)
     }
 
     // MARK: - Group headers

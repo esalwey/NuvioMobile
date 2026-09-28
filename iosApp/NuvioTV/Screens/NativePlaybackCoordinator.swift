@@ -47,13 +47,32 @@ final class NativePlaybackCoordinator: ObservableObject {
     @Published private(set) var preparingLabel = String(localized: "Preparing Dolby Vision\u{2026}")
     private(set) var player: AVPlayer?
 
-    /// Fired ~every few seconds with (position, duration) while playing — the screen forwards it to
-    /// the next-episode engine.
+    /// Fired ~every few seconds with (position, duration) while playing — the screen refreshes the
+    /// Info panel from it.
     var onTick: ((Double, Double) -> Void)?
+    /// Fired every 0.5 s with (position, duration) while playing — drives the Up Next trigger and
+    /// the skip prompt, which the 3 s `onTick` cadence made land up to 3 s late (NE-2).
+    var onPositionTick: ((Double, Double) -> Void)?
+    /// The item played to its end (`AVPlayerItemDidPlayToEndTime`, NEXT-5/PLY-9). Cleared by
+    /// `replay()` or when playback restarts from the end.
+    @Published private(set) var isEnded = false
+    /// That end was the episode's real end (`UpNextTrigger.isNaturalEnd`), not playback stopping
+    /// short of the duration — only then is the episode recorded as completed. Set before `isEnded`.
+    private(set) var endedNaturally = true
+    /// Where playback stood when it ended (a restart from there is detected against it).
+    private var endPositionSec: Double = 0
+    /// "Play Again" rebuilt the session: start from 0 even if a saved position would resume it
+    /// (an end short of the duration is not recorded as completed).
+    private var resumeFromStart = false
 
     /// Last observed position/duration, used when falling back to mpv.
     private(set) var lastPositionSec: Double = 0
     private var lastDurationSec: Double = 0
+    /// The episode counts as finished (end of file, or an Up Next hand-off during the credits):
+    /// the teardown flush records it completed, whatever the last observed position.
+    private var completed = false
+    private var endObserver: NSObjectProtocol?
+    private var positionTask: Task<Void, Never>?
 
     private let context: PlaybackContext
     private let recorder: PlaybackProgressRecorder
@@ -376,15 +395,21 @@ final class NativePlaybackCoordinator: ObservableObject {
     func stop() {
         pollTask?.cancel(); pollTask = nil
         observeTask?.cancel(); observeTask = nil
+        positionTask?.cancel(); positionTask = nil
         subtitleDelayApplyTask?.cancel(); subtitleDelayApplyTask = nil
         subtitleRefetchRestoreTask?.cancel(); subtitleRefetchRestoreTask = nil
         if let o = mediaSelectionObserver { NotificationCenter.default.removeObserver(o); mediaSelectionObserver = nil }
+        if let o = endObserver { NotificationCenter.default.removeObserver(o); endObserver = nil }
         timeControlObserver?.invalidate(); timeControlObserver = nil
         addonSubsWatcher?.cancel(); addonSubsWatcher = nil
+        // A finished episode is flushed as completed (position = duration), so a late tick near the
+        // end — or the system player restarting the file under the end screen — can't downgrade it.
+        let finalPositionSec = completed && lastDurationSec > 0 ? lastDurationSec : lastPositionSec
         if lastDurationSec > 0 {
-            recorder.record(positionSec: lastPositionSec, durationSec: lastDurationSec, isPaused: true, speed: 1, flush: true)
+            recorder.record(positionSec: finalPositionSec, durationSec: lastDurationSec, isPaused: true, speed: 1,
+                            flush: true, isEnded: completed)
         }
-        recorder.stopTrakt(positionSec: lastPositionSec, durationSec: lastDurationSec)
+        recorder.stopTrakt(positionSec: finalPositionSec, durationSec: lastDurationSec)
         player?.pause()
         server?.stop(); server = nil
         remux?.stop()
@@ -402,6 +427,10 @@ final class NativePlaybackCoordinator: ObservableObject {
         remux = nil
         player = nil
         playerItem = nil
+        // The screen re-installs these on appear; dropping them here also breaks the
+        // screen ↔ coordinator reference cycle the tick closures form.
+        onTick = nil
+        onPositionTick = nil
     }
 
     // MARK: - Progressive startup
@@ -606,9 +635,113 @@ final class NativePlaybackCoordinator: ObservableObject {
         observePlayback(player: player, item: item)
     }
 
+    // MARK: - End of file + fine-grained position (Up Next)
+
+    /// Observe the item's end (NEXT-5/PLY-9): the native path used to rest on the last frame with no
+    /// end-of-playback handling at all. Re-armed per item (the signaling retry swaps items).
+    private func observeEnd(item: AVPlayerItem) {
+        if let old = endObserver { NotificationCenter.default.removeObserver(old) }
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.handlePlayedToEnd(item: item) }
+        }
+    }
+
+    private func handlePlayedToEnd(item: AVPlayerItem) {
+        guard playerItem === item, phase == .playing, !isEnded else { return }
+        let duration = CMTimeGetSeconds(item.duration)
+        let current = player.map { CMTimeGetSeconds($0.currentTime()) } ?? duration
+        let position = current.isFinite ? current : duration
+        // Only an end at the duration is the episode's real end; one well short of it (a source that
+        // stopped early) keeps its position and is never recorded — or scrobbled — as watched.
+        let natural = UpNextTrigger.isNaturalEnd(positionSec: position, durationSec: duration)
+        if duration.isFinite, duration > 0 { lastDurationSec = duration }
+        print("[NativePlayer] played to end (\(String(format: "%.1f", position))/\(String(format: "%.1f", lastDurationSec))s)"
+              + (natural ? "" : " — short of the duration, not recorded as watched"))
+        if natural {
+            if lastDurationSec > 0 { lastPositionSec = lastDurationSec }
+            completed = true
+            if lastDurationSec > 0 {
+                recorder.record(positionSec: lastDurationSec, durationSec: lastDurationSec, isPaused: true, speed: 1,
+                                flush: true, isEnded: true)
+            }
+        } else {
+            if position.isFinite, position > 0 { lastPositionSec = position }
+            if lastDurationSec > 0 {
+                recorder.record(positionSec: lastPositionSec, durationSec: lastDurationSec, isPaused: true, speed: 1,
+                                flush: true)
+            }
+        }
+        endPositionSec = natural ? lastDurationSec : lastPositionSec
+        endedNaturally = natural
+        isEnded = true
+    }
+
+    /// 0.5 s position ticks for the Up Next trigger/countdown and the skip prompt. Deliberately does
+    /// NOT touch `lastPositionSec`: the observe loop's seek detection compares against it at its own
+    /// 3 s cadence.
+    private func startPositionTicks(player: AVPlayer, item: AVPlayerItem) {
+        positionTask?.cancel()
+        positionTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self, !Task.isCancelled else { return }
+                guard self.player === player, self.playerItem === item else { return }
+                guard item.status == .readyToPlay else { continue }
+                let position = CMTimeGetSeconds(player.currentTime())
+                let duration = CMTimeGetSeconds(item.duration)
+                guard position.isFinite, duration.isFinite, duration > 0 else { continue }
+                // The system player restarted the file from its end (Play on the last frame):
+                // that's a replay, not a finished episode any more.
+                if self.isEnded, position < self.endPositionSec - 5 {
+                    self.completed = false
+                    self.endedNaturally = true
+                    self.isEnded = false
+                }
+                self.onPositionTick?(position, duration)
+            }
+        }
+    }
+
+    /// An Up Next hand-off is about to replace this player: record the episode as completed.
+    func markCompleted() {
+        completed = true
+    }
+
+    /// "Play Again" from the end screen. Presenting that full-screen cover makes the player screen
+    /// disappear, which stops this coordinator (progress flushed, Trakt closed, remux + server +
+    /// player released) — so the replay is normally a fresh session, which the screen's `onAppear`
+    /// starts once the cover is gone (resume skips the completed entry: it starts from 0, and opens
+    /// a new Trakt scrobble). A pipeline that is still alive just rewinds.
+    func replay() {
+        completed = false
+        endedNaturally = true
+        endPositionSec = 0
+        if let player {
+            isEnded = false
+            player.seek(to: .zero)
+            player.play()
+            return
+        }
+        phase = .preparing
+        lastPositionSec = 0
+        lastDurationSec = 0
+        traktStarted = false
+        hasStartedPlaying = false
+        resumeFromStart = true
+        if isPaused { isPaused = false }
+        legibleGroup = nil
+        audibleGroup = nil
+        recorder.reopenTrakt()
+        isEnded = false
+    }
+
     // MARK: - AVPlayer observation (resume + progress + Trakt)
 
     private func observePlayback(player: AVPlayer, item: AVPlayerItem) {
+        observeEnd(item: item)
+        startPositionTicks(player: player, item: item)
         observeTask = Task { @MainActor [weak self] in
             var readied = false
             var waitingTicks = 0
@@ -621,7 +754,8 @@ final class NativePlaybackCoordinator: ObservableObject {
                     readied = true
                     print("[NativePlayer] item readyToPlay")
                     let duration = CMTimeGetSeconds(item.duration)
-                    let resume = self.recorder.resumePositionSec()
+                    let resume = self.resumeFromStart ? nil : self.recorder.resumePositionSec()
+                    self.resumeFromStart = false
                     if let resume {
                         await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600))
                         self.lastPositionSec = resume
@@ -1185,6 +1319,7 @@ final class NativePlaybackCoordinator: ObservableObject {
     private func fallbackMidPlay(_ reason: String) {
         guard phase == .playing else { return }
         observeTask?.cancel()
+        positionTask?.cancel()
         print("[NativePlayer] mid-play fallback to mpv at \(String(format: "%.1f", lastPositionSec))s — \(reason)")
         phase = .failed(reason)
     }

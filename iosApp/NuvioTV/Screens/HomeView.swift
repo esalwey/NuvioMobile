@@ -16,6 +16,9 @@ struct HomeView: View {
     /// retains/releases it (see `HomeViewModel.acquire()` for the ordering that forces refcounting).
     @ObservedObject var model: HomeViewModel
     @State private var resume: ResumeTarget?
+    /// The player asked for the title's details page (Up Next cancel, "Back to Details", the end of a
+    /// movie or finale) during a Continue Watching resume: pushed once the resume cover has closed.
+    @State private var detailAfterResume: MetaPreview?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The Poster Style Home renders with. Read in RELEASE as well as debug builds as of Wave 10:
     /// `pinnedHeroCompression` sizes the pinned hero from `height`, so this is now production
@@ -1046,7 +1049,12 @@ struct HomeView: View {
             .navigationDestination(for: FolderRoute.self) { route in
                 FolderDetailView(route: route)
             }
-            .fullScreenCover(item: $resume) { target in
+            .fullScreenCover(item: $resume, onDismiss: {
+                // "Back to Details" from a Continue Watching resume lands on the title's page.
+                guard let preview = detailAfterResume else { return }
+                detailAfterResume = nil
+                homePath.append(TitleRoute(preview: preview))
+            }) { target in
                 StreamPickerView(
                     type: target.entry.parentMetaType,
                     videoId: target.entry.videoId,
@@ -1058,7 +1066,8 @@ struct HomeView: View {
                     // present (blank values count as missing).
                     poster: target.entry.poster,
                     episodeStill: { let still: String? = target.entry.episodeThumbnail; return (still ?? "").isEmpty ? nil : still }(),
-                    synopsis: { let d: String? = target.entry.pauseDescription; return (d ?? "").isEmpty ? nil : d }()
+                    synopsis: { let d: String? = target.entry.pauseDescription; return (d ?? "").isEmpty ? nil : d }(),
+                    onLeaveToDetails: { detailAfterResume = previewFromEntry(target.entry) }
                 )
             }
         }

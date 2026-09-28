@@ -72,6 +72,16 @@
       }
     },
     "%@ f=%lld t=%lld y=%lld i=%lld r=%lld": {},
+    "%@ of the episode": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ de l’épisode"
+          }
+        }
+      }
+    },
     "%@ rejected the saved sign-in. Press to disconnect, then connect again.": {
       "localizations": {
         "de": {
@@ -920,6 +930,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "%lld tệp phát được"
+          }
+        }
+      }
+    },
+    "%lld s": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld s"
           }
         }
       }
@@ -2867,6 +2887,16 @@
         }
       }
     },
+    "After 3 episodes in a row without touching the remote, wait for a press before the next one.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Après 3 épisodes d’affilée sans toucher la télécommande, attendre une pression avant le suivant."
+          }
+        }
+      }
+    },
     "Alcohol & Drugs": {
       "localizations": {
         "de": {
@@ -3310,6 +3340,16 @@
       }
     },
     "Artwork shows while the hero is highlighted and hides once you move down into the rows": {},
+    "Ask “Still Watching?”": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Demander « Toujours là ? »"
+          }
+        }
+      }
+    },
     "Audio": {
       "localizations": {
         "de": {
@@ -3510,6 +3550,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tự động phát trailer banner"
+          }
+        }
+      }
+    },
+    "Autoplay Next Episode": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Épisode suivant automatique"
           }
         }
       }
@@ -3736,7 +3786,7 @@
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Retour aux détails"
+            "value": "Retour à la fiche"
           }
         },
         "it": {
@@ -4123,6 +4173,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Cân đối"
+          }
+        }
+      }
+    },
+    "Before the End": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avant la fin"
           }
         }
       }
@@ -4940,6 +5000,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Chọn mã PIN 4 số"
+          }
+        }
+      }
+    },
+    "Choose a Source": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choisir une source"
           }
         }
       }
@@ -6644,6 +6714,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Không thể lưu cấu hình máy chủ."
+          }
+        }
+      }
+    },
+    "Countdown": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compte à rebours"
           }
         }
       }
@@ -9164,6 +9244,16 @@
         }
       }
     },
+    "Finding a source…": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recherche d’une source…"
+          }
+        }
+      }
+    },
     "Finding next episode…": {
       "localizations": {
         "de": {
@@ -10626,6 +10716,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Cách đồng bộ hoạt động"
+          }
+        }
+      }
+    },
+    "How long Up Next counts down before playing. Pausing the video pauses the countdown.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Durée du compte à rebours avant la lecture. Mettre la vidéo en pause suspend le compte à rebours."
           }
         }
       }
@@ -12434,6 +12534,16 @@
         }
       }
     },
+    "Menu: back to details": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Menu : retour à la fiche"
+          }
+        }
+      }
+    },
     "Metadata (TMDB)": {
       "localizations": {
         "de": {
@@ -13213,6 +13323,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Mới nhất trước; các dòng khởi động ở cuối."
+          }
+        }
+      }
+    },
+    "Next Episode": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Épisode suivant"
           }
         }
       }
@@ -14340,6 +14460,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "NuvioTV (Tích hợp)"
+          }
+        }
+      }
+    },
+    "OK / Menu: cancel": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OK / Menu : annuler"
+          }
+        }
+      }
+    },
+    "OK / ▼: continue": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OK / ▼ : continuer"
           }
         }
       }
@@ -16558,6 +16698,16 @@
         }
       }
     },
+    "Otherwise, Up Next appears this long before the end of the episode. Until you pick a value, the timing set on your phone applies.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sinon, l’épisode suivant s’affiche ce délai avant la fin de l’épisode. Tant qu’aucune valeur n’est choisie ici, le réglage de votre téléphone s’applique."
+          }
+        }
+      }
+    },
     "Outline": {
       "localizations": {
         "de": {
@@ -16932,6 +17082,16 @@
         }
       }
     },
+    "Play Now": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lire maintenant"
+          }
+        }
+      }
+    },
     "Play in NuvioTV Player": {
       "localizations": {
         "de": {
@@ -17099,6 +17259,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Đang phát"
+          }
+        }
+      }
+    },
+    "Playing in %lld s": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lecture dans %lld s"
           }
         }
       }
@@ -21021,6 +21191,16 @@
         }
       }
     },
+    "Show Up Next as soon as the credits begin, for episodes whose credits timing is known (needs Skip Intro). A scene after the credits plays first.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Affiche l’épisode suivant dès le début du générique quand son minutage est connu (nécessite Passer l’intro). Une scène après le générique est d’abord jouée."
+          }
+        }
+      }
+    },
     "Show a Skip button during intros and outros": {
       "localizations": {
         "de": {
@@ -22482,6 +22662,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Bắt đầu thiết lập từ xa"
+          }
+        }
+      }
+    },
+    "Start at the Credits When Known": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Au générique si disponible"
           }
         }
       }
@@ -27362,6 +27552,16 @@
         }
       }
     },
+    "When an episode ends, the next one starts on its own after a countdown. Press OK or Menu during the countdown to cancel and go back to the details page.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "À la fin d’un épisode, le suivant démarre tout seul après un compte à rebours. Appuyez sur OK ou Menu pendant le compte à rebours pour annuler et revenir à la fiche."
+          }
+        }
+      }
+    },
     "When playback starts, auto-select the audio and subtitle tracks in your preferred language (when a matching track exists).": {
       "localizations": {
         "de": {
@@ -28656,6 +28856,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Hàng dành sẵn dải của chế độ thu phóng; phần mô tả khi tắt hero mất một dòng ở cỡ Lớn"
+          }
+        }
+      }
+    },
+    "▼: choose a source": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "▼ : choisir une source"
+          }
+        }
+      }
+    },
+    "▼: play now": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "▼ : lire maintenant"
           }
         }
       }

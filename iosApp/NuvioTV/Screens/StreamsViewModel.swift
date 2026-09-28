@@ -62,10 +62,10 @@ final class StreamsViewModel: ObservableObject {
     /// Last raw state, kept so a debrid-settings flip re-filters without a reload.
     private var lastState: StreamsUiState?
     private let type: String
-    private let videoId: String
+    private var videoId: String
     private let parentMetaId: String?
-    private let season: KotlinInt?
-    private let episode: KotlinInt?
+    private var season: KotlinInt?
+    private var episode: KotlinInt?
 
     init(type: String, videoId: String, parentMetaId: String? = nil, season: Int? = nil, episode: Int? = nil) {
         self.type = type
@@ -160,6 +160,36 @@ final class StreamsViewModel: ObservableObject {
         let name = DebridProviders.shared.displayName(id: providerId)
         credentialWarning = String(
             localized: "Your \(name) session has expired. Reconnect in Settings \u{2192} Account & Services \u{2192} Debrid."
+        )
+    }
+
+    /// Point the picker at another episode of the same series (the player's end screen "Choose a
+    /// Source" for the next episode) and load its streams. The shared repository is a singleton, so
+    /// this re-targets the one model in place rather than rebuilding the picker (a rebuilt model's
+    /// `stop()` would clear the new load).
+    func retarget(videoId: String, season: Int?, episode: Int?) {
+        self.videoId = videoId
+        self.season = season.map { KotlinInt(int: Int32($0)) }
+        self.episode = episode.map { KotlinInt(int: Int32($0)) }
+        lastState = nil
+        groups = []
+        firstRowKey = nil
+        emptyReason = nil
+        emptyReasonHint = nil
+        isLoading = true
+        // Not started yet: `start()` loads the new target.
+        guard watcher != nil else { return }
+        StreamsRepository.shared.clear()
+        StreamProbe.log("retarget type=\(type) id=\(videoId)"
+            + (self.season.map { " s=\($0)" } ?? "")
+            + (self.episode.map { " e=\($0)" } ?? ""))
+        StreamsRepository.shared.load(
+            type: type,
+            videoId: videoId,
+            parentMetaId: parentMetaId,
+            season: self.season,
+            episode: self.episode,
+            manualSelection: true
         )
     }
 

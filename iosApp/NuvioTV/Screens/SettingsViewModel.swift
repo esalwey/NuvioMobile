@@ -113,12 +113,16 @@ final class SettingsViewModel: ObservableObject {
         }
 
         PlayerSettingsRepository.shared.ensureLoaded()
+        upNextThreshold = UpNextPreferences.threshold(
+            settings: PlayerSettingsRepository.shared.uiState.value_ as? PlayerSettingsUiState)
         playerWatcher = FlowWatcherKt.watch(PlayerSettingsRepository.shared.uiState) { [weak self] emitted in
             guard let self, let state = emitted as? PlayerSettingsUiState else { return }
             self.skipIntroEnabled = state.skipIntroEnabled
             self.subtitleStyle = state.subtitleStyle
             self.preferredAudioLanguage = state.preferredAudioLanguage
             self.preferredSubtitleLanguage = state.preferredSubtitleLanguage
+            // The shared (synced) Up Next threshold — may change through profile sync.
+            self.upNextThreshold = UpNextPreferences.threshold(settings: state)
         }
 
         TmdbSettingsRepository.shared.ensureLoaded()
@@ -277,6 +281,81 @@ final class SettingsViewModel: ObservableObject {
     func setDvP7FelMpv(_ value: Bool) {
         dvP7FelMpv = value
         UserDefaults.standard.set(value, forKey: PlayerTuning.dvP7FelMpvKey)
+    }
+
+    // MARK: - Up Next (Settings → Playback → Next Episode)
+    //
+    // Every Up Next row is device-local (`UpNextPreferences`, tvOS defaults, never pushed to the
+    // phone). Until "Before the End" is picked here, the profile's synced next-episode threshold
+    // (set on the phone) applies — see `UpNextPreferences` for the policy.
+
+    /// Automatic next episode (tvOS default ON).
+    @Published var upNextAutoplay: Bool = UpNextPreferences.autoplayEnabled
+    /// Show Up Next when the credits start, when their timing is known (default ON).
+    @Published var upNextUseCredits: Bool = UpNextPreferences.useCredits
+    /// Countdown length in seconds (5/10/15/20, default 10).
+    @Published var upNextCountdown: Int = UpNextPreferences.countdownSec
+    /// "Still watching?" gate (default OFF).
+    @Published var upNextAskStillWatching: Bool = UpNextPreferences.askStillWatching
+    /// Effective threshold: this TV's pick, else the profile's synced one, else 30 s.
+    @Published private(set) var upNextThreshold: UpNextThreshold =
+        .secondsBeforeEnd(Double(UpNextPreferences.defaultSecondsBeforeEnd))
+
+    /// Picker value for "Before the End": 15/30/45/60, or `upNextCustomThresholdTag` for a value
+    /// synced from the phone that isn't one of those (kept visible so it isn't silently replaced).
+    static let upNextCustomThresholdTag = -1
+
+    var upNextSecondsBeforeEnd: Int {
+        if case .secondsBeforeEnd(let seconds) = upNextThreshold {
+            let rounded = Int(seconds.rounded())
+            if UpNextPreferences.secondsBeforeEndOptions.contains(rounded) { return rounded }
+        }
+        return Self.upNextCustomThresholdTag
+    }
+
+    var upNextSecondsBeforeEndOptions: [Int] {
+        let options = UpNextPreferences.secondsBeforeEndOptions
+        return upNextSecondsBeforeEnd == Self.upNextCustomThresholdTag
+            ? options + [Self.upNextCustomThresholdTag] : options
+    }
+
+    func upNextSecondsBeforeEndLabel(_ value: Int) -> String {
+        guard value == Self.upNextCustomThresholdTag else { return String(localized: "\(value) s") }
+        switch upNextThreshold {
+        case .percent(let percent):
+            let share = "\(Int(percent.rounded()))%"
+            return String(localized: "\(share) of the episode")
+        case .secondsBeforeEnd(let seconds):
+            let total = Int(seconds.rounded())
+            return total >= 60 && total % 60 == 0 ? String(localized: "\(total / 60) min") : String(localized: "\(total) s")
+        }
+    }
+
+    func setUpNextAutoplay(_ value: Bool) {
+        upNextAutoplay = value
+        UpNextPreferences.setAutoplayEnabled(value)
+    }
+
+    func setUpNextUseCredits(_ value: Bool) {
+        upNextUseCredits = value
+        UpNextPreferences.setUseCredits(value)
+    }
+
+    func setUpNextCountdown(_ seconds: Int) {
+        upNextCountdown = seconds
+        UpNextPreferences.setCountdownSec(seconds)
+    }
+
+    func setUpNextAskStillWatching(_ value: Bool) {
+        upNextAskStillWatching = value
+        UpNextPreferences.setAskStillWatching(value)
+    }
+
+    /// Stores this TV's "N seconds before the end" (the custom tag is display-only).
+    func setUpNextSecondsBeforeEnd(_ seconds: Int) {
+        guard seconds != Self.upNextCustomThresholdTag else { return }
+        UpNextPreferences.setSecondsBeforeEnd(seconds)
+        upNextThreshold = .secondsBeforeEnd(Double(seconds))
     }
 
     // MARK: - TMDB

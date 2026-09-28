@@ -53,8 +53,13 @@ final class MPVPlaybackState: ObservableObject {
     /// Diagnostic only in Phase 1 — playback still runs through libmpv regardless.
     @Published var routingNote: String = ""
 
-    /// True once playback hit end-of-file (keep-open holds the last frame; drives the post-play cover).
+    /// True once playback hit end-of-file (keep-open holds the last frame). Feeds
+    /// `NextEpisodeEngine.playbackDidEnd()`: Up Next hand-off, end screen, or back to details.
     @Published var isEnded: Bool = false
+    /// The last end of file was the episode's real end (`UpNextTrigger.isNaturalEnd`), not a stream
+    /// that dropped or expired mid-way — only that one records the episode as completed. Set before
+    /// `isEnded` flips.
+    var endedNaturally = true
 
     /// Wired by the controller so the SwiftUI track picker can drive libmpv.
     var selectAudio: ((Int) -> Void)?
@@ -65,13 +70,25 @@ final class MPVPlaybackState: ObservableObject {
     var replay: (() -> Void)?
     var reclaimFocus: (() -> Void)?
 
-    /// Wired by `NextEpisodeEngine`: down-press plays the ready next episode (returns true when
-    /// consumed, so the skip pill doesn't also fire); backward seek cancels the countdown.
-    var upNextPlayNow: (() -> Bool)?
+    /// Wired by `MPVPlayerScreen` to the `NextEpisodeEngine`; each returns true when the Up Next
+    /// card consumed the press. Select → cancel and leave for details (continue, on the "Still
+    /// watching?" prompt); Down → play the next episode now (so the skip pill doesn't also fire);
+    /// Menu → cancel and leave for details. A backward seek drops the card for the session.
+    var upNextSelect: (() -> Bool)?
+    var upNextDown: (() -> Bool)?
+    var upNextMenu: (() -> Bool)?
     var upNextCancel: (() -> Void)?
-    /// Menu while the up-next chip is visible dismisses the chip instead of exiting the player;
-    /// returns true when it consumed the press. The next Menu exits as before (upstream 4026ec92).
-    var upNextDismiss: (() -> Bool)?
+    /// "Skip Outro" on credits ending at this position: true when Up Next plays the next episode
+    /// instead (credits that run to the end of the file), so the controller doesn't seek.
+    var upNextSkipCredits: ((Double) -> Bool)?
+    /// Skip segments reached the controller (the engine times the Up Next card on the outro).
+    var onSkipSegmentsLoaded: (([SkipSegment]) -> Void)?
+    /// Set right before an Up Next hand-off replaces this player: the teardown flush records the
+    /// finished episode as completed (and Trakt at 100 %), so Continue Watching moves on.
+    var completedByHandOff = false
+    /// The engine is prefetching the NEXT episode's addon subtitles into the shared repository —
+    /// stop side-loading that list into this file.
+    var freezeAddonSubtitles = false
 
     let title: String
     init(title: String) { self.title = title }
@@ -178,10 +195,15 @@ final class MPVTVPlayerViewController: UIViewController {
     private var swallowMenuRelease = false
     /// Open the swipe-down top panel (D-pad Down with nothing else to do, or a down swipe).
     var onOpenPanel: (() -> Void)?
+    /// Explicit start position handed over by a native → mpv fallback (NE-7/PLY-8). Wins over the
+    /// saved progress — which may already be marked completed near the end, and would restart the
+    /// episode from 0.
+    private let startPositionSec: Double?
 
-    init(context: PlaybackContext, state: MPVPlaybackState) {
+    init(context: PlaybackContext, state: MPVPlaybackState, startPositionSec: Double? = nil) {
         self.context = context
         self.state = state
+        self.startPositionSec = startPositionSec
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -242,9 +264,10 @@ final class MPVTVPlayerViewController: UIViewController {
             startPolling()
             flashControls()
 
-            // Side-load subtitles fetched from installed subtitle addons (OpenSubtitles etc.).
+            // Side-load subtitles fetched from installed subtitle addons (OpenSubtitles etc.). Not
+            // once Up Next prefetches the NEXT episode's list into the same shared repository.
             subtitleWatcher = FlowWatcherKt.watch(SubtitleRepository.shared.addonSubtitles) { [weak self] emitted in
-                guard let self, let subs = emitted as? [AddonSubtitle] else { return }
+                guard let self, !self.state.freezeAddonSubtitles, let subs = emitted as? [AddonSubtitle] else { return }
                 self.addAddonSubtitles(subs)
             }
             subtitleLoadingWatcher = FlowWatcherKt.watch(SubtitleRepository.shared.isLoading) { [weak self] emitted in
@@ -260,6 +283,16 @@ final class MPVTVPlayerViewController: UIViewController {
                 self.playerSettings = settings
                 if self.fileLoaded { self.applySubtitleStyle() }
             }
+        } else if mpv != nil, pollTimer == nil, !state.isEnded {
+            // PLY-2: back from a full-screen cover (the end screen) for "Play Again" (`replay()`
+            // clears `isEnded` before the cover goes). Its presentation ran viewDidDisappear, which
+            // stops the state timer and reverts the display mode; without this, the replay played on
+            // with a frozen UI, no progress saves and no EOF detection. Still at the end = the cover
+            // closed on the way out (Menu → back to details): no restart, and no display-mode switch
+            // right before leaving. (Trakt restarts in `replay()` — only a real replay opens a new
+            // session.)
+            startPolling()
+            if fileLoaded { applyDisplayCriteriaIfEnabled() }
         }
     }
 
@@ -825,10 +858,12 @@ final class MPVTVPlayerViewController: UIViewController {
         // A session can open before a placeholder's short duration is known; close
         // it at 0% so Trakt never marks the stub watched.
         let short = WatchingPoliciesKt.isShortPlaceholderDuration(durationMs: Int64(state.durationSec * 1000))
+        // A stream that stopped short of its duration is NOT watched — only a real end or a hand-off.
+        let finished = (state.isEnded && state.endedNaturally) || state.completedByHandOff
         TraktScrobbleRepository.shared.scrobbleStop(
             profileId: ActiveProfileProvider.shared.activeProfileId,
             item: item,
-            progressPercent: short ? 0 : currentProgressPercent()
+            progressPercent: short ? 0 : (finished ? 100 : currentProgressPercent())
         ) { _ in }
     }
 
@@ -918,7 +953,12 @@ final class MPVTVPlayerViewController: UIViewController {
         ) { [weak self] intervals, _ in
             guard let intervals else { return }
             let segments = intervals.map { SkipSegment(start: $0.startTime, end: $0.endTime, type: $0.type) }
-            DispatchQueue.main.async { self?.skipSegments = segments }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.skipSegments = segments
+                // The outro also times the Up Next card (credits-aware trigger).
+                self.state.onSkipSegmentsLoaded?(segments)
+            }
         }
     }
 
@@ -1060,6 +1100,12 @@ final class MPVTVPlayerViewController: UIViewController {
     // MARK: - Watch progress (resume + save)
 
     private func computeResumePosition() {
+        // A native → mpv fallback hands over where the native engine was: resume exactly there,
+        // even when the saved entry already counts as completed (NE-7/PLY-8).
+        if let startPositionSec, startPositionSec > 1 {
+            pendingResumeSec = startPositionSec
+            return
+        }
         guard let entry = WatchProgressRepository.shared.progressForVideo(
             videoId: context.videoId,
             parentMetaId: context.parentMetaId,
@@ -1101,7 +1147,10 @@ final class MPVTVPlayerViewController: UIViewController {
         let snapshot = PlayerPlaybackSnapshot(
             isLoading: false,
             isPlaying: !state.isPaused,
-            isEnded: false,
+            // The real end of the file, or an Up Next hand-off during the credits: recorded completed
+            // whatever the watched fraction, so Continue Watching moves on to the next episode. A
+            // stream that dropped mid-way keeps its position instead.
+            isEnded: (state.isEnded && state.endedNaturally) || state.completedByHandOff,
             durationMs: Int64(duration * 1000),
             positionMs: Int64(position * 1000),
             bufferedPositionMs: Int64(position * 1000),
@@ -1139,10 +1188,17 @@ final class MPVTVPlayerViewController: UIViewController {
         state.isBuffering = snap.cacheWait || (snap.coreIdle && !snap.paused)
 
         // Rising-edge detection: eof-reached STAYS true while keep-open holds the last frame, so
-        // only propagate transitions — otherwise a dismissed post-play cover re-presents each tick.
+        // only propagate transitions — otherwise a dismissed end screen re-presents each tick.
         if snap.eof != lastEofFlag {
             lastEofFlag = snap.eof
+            // eof-reached also rises when a debrid/HTTP stream drops or expires mid-way: only an end
+            // at the duration is the episode's real end (completed, Trakt 100 %, Up Next chaining).
+            state.endedNaturally = !snap.eof
+                || UpNextTrigger.isNaturalEnd(positionSec: snap.position, durationSec: snap.duration)
             state.isEnded = snap.eof
+            // Record right away (Up Next may hand off at once): completed after a real end, the
+            // position reached after a premature one.
+            if snap.eof { saveProgress(flush: true) }
         }
 
         if state.showStreamInfo || state.panelOpen {
@@ -1197,16 +1253,18 @@ final class MPVTVPlayerViewController: UIViewController {
     /// disappears cleanly at the end).
     private func updateSkipPrompt(position: Double) {
         let active = skipSegments.first { position >= $0.start && position < $0.end - PlayerChipStyle.lastSecondExclusion }
-        let prompt = active.map { SkipPrompt(label: skipLabel(for: $0.type), targetSec: $0.end) }
+        let prompt = active.map {
+            SkipPrompt(label: skipLabel(for: $0.type), targetSec: $0.end,
+                       isCredits: UpNextTrigger.outroTypes.contains($0.type.lowercased()))
+        }
         if prompt != state.skipPrompt { state.skipPrompt = prompt }
     }
 
     private func skipLabel(for type: String) -> String {
-        switch type.lowercased() {
-        case "outro", "ed", "credits": return String(localized: "Skip Outro")
-        case "recap": return String(localized: "Skip Recap")
-        default: return String(localized: "Skip Intro")
-        }
+        let type = type.lowercased()
+        // Every credits type Up Next knows (AniSkip "ed"/"mixed-ed", IntroDB "outro", …).
+        if UpNextTrigger.outroTypes.contains(type) { return String(localized: "Skip Outro") }
+        return type == "recap" ? String(localized: "Skip Recap") : String(localized: "Skip Intro")
     }
 
     // MARK: - Siri-remote transport
@@ -1215,22 +1273,34 @@ final class MPVTVPlayerViewController: UIViewController {
         var handled = false
         for press in presses {
             switch press.type {
-            case .playPause, .select:
+            case .playPause:
+                // Play/Pause always toggles; the Up Next countdown pauses with the video.
                 togglePause(); flashControls(); handled = true
+            case .select:
+                // While the Up Next card is up, OK cancels autoplay and leaves for the details page.
+                if state.upNextSelect?() == true {
+                    handled = true
+                } else {
+                    togglePause(); flashControls(); handled = true
+                }
             case .leftArrow:
                 beginSeek(-1); handled = true
             case .rightArrow:
                 beginSeek(1); handled = true
             case .downArrow:
-                if state.upNextPlayNow?() == true {
+                if state.upNextDown?() == true {
                     handled = true
                 } else if let prompt = state.skipPrompt {
-                    // Clamp against duration: a skip-outro target past EOF wedges mpv.
-                    // durationSec is still 0 before the first duration event — seek unclamped then.
-                    let target = state.durationSec > 0
-                        ? min(prompt.targetSec, state.durationSec - 0.5)
-                        : prompt.targetSec
-                    seekAbsolute(target)
+                    // Skip Outro on credits that run to the end of the file = the next episode now
+                    // (Up Next), not a seek onto the last frame.
+                    if !(prompt.isCredits && state.upNextSkipCredits?(prompt.targetSec) == true) {
+                        // Clamp against duration: a skip-outro target past EOF wedges mpv.
+                        // durationSec is still 0 before the first duration event — seek unclamped then.
+                        let target = state.durationSec > 0
+                            ? min(prompt.targetSec, state.durationSec - 0.5)
+                            : prompt.targetSec
+                        seekAbsolute(target)
+                    }
                     state.skipPrompt = nil
                     flashControls()
                     handled = true
@@ -1242,9 +1312,9 @@ final class MPVTVPlayerViewController: UIViewController {
                     handled = true
                 }
             case .menu:
-                // Back out of the transient up-next chip first; the next Menu exits (same
-                // convention as the top panel: overlay first, player second).
-                if state.upNextDismiss?() == true {
+                // While the Up Next card is up, Menu cancels autoplay and leaves for the details
+                // page (the engine exits); otherwise it exits the player as always.
+                if state.upNextMenu?() == true {
                     swallowMenuRelease = true
                 } else {
                     onExit?()
@@ -1309,12 +1379,21 @@ final class MPVTVPlayerViewController: UIViewController {
         refreshState()
     }
 
-    /// Post-play "Play Again": back to the start and resume playing.
+    /// End screen "Play Again": back to the start and resume playing.
     private func replay() {
         guard mpv != nil else { return }
         seekAbsolute(0)
         setFlag("pause", false)
         state.isEnded = false
+        state.endedNaturally = true
+        state.completedByHandOff = false
+        state.positionSec = 0            // the next poll tick reports the real position
+        // The end screen's presentation closed the Trakt session (viewDidDisappear): a replay is a
+        // new viewing, so it scrobbles again from the start.
+        traktSessionClosed = false
+        traktScrobbleRequested = false
+        traktScrobbleItem = nil
+        startTraktScrobble()
         flashControls()
         becomeFirstResponder()
     }
@@ -1515,12 +1594,14 @@ private struct MPVPlayerRepresentable: UIViewControllerRepresentable {
     let context: PlaybackContext
     let state: MPVPlaybackState
     let panelModel: PlayerTopPanelModel
+    /// Native → mpv fallback hand-over position (NE-7); nil = resume from saved progress.
+    let startPositionSec: Double?
     /// Builds the engine-specific fourth tab at open time (its views observe live state).
     let makeExtraTab: () -> PlayerPanelExtraTab
     let onExit: () -> Void
 
     func makeUIViewController(context ctx: Context) -> MPVTVPlayerViewController {
-        let controller = MPVTVPlayerViewController(context: context, state: state)
+        let controller = MPVTVPlayerViewController(context: context, state: state, startPositionSec: startPositionSec)
         controller.onExit = onExit
         let state = state, model = panelModel, makeExtraTab = makeExtraTab
         controller.onOpenPanel = { [weak controller] in
@@ -1543,44 +1624,52 @@ private struct MPVPlayerRepresentable: UIViewControllerRepresentable {
 }
 
 /// SwiftUI host for the libmpv player + transport overlay; presented full-screen over the stream
-/// picker. When `onPlayNext` is provided and the context carries the series episode list, a
-/// next-episode autoplay card appears near the end of playback (`NextEpisodeEngine`).
+/// picker. The `NextEpisodeEngine` (owned by `PlayerScreen`, shared with the native screen) drives
+/// the Up Next card near the end of a series episode and the end screen after it.
 ///
 /// NOTE for presenters: when swapping contexts for autoplay, apply `.id(context.id)` so SwiftUI
 /// rebuilds this screen (and the libmpv controller) for the new episode.
 struct MPVPlayerScreen: View {
     let context: PlaybackContext
-    var onPlayNext: ((PlaybackContext) -> Void)? = nil
+    /// Up Next orchestration, owned by `PlayerScreen` (survives a native → mpv fallback).
+    @ObservedObject var upNext: NextEpisodeEngine
+    /// The presenter can swap playback contexts (episode jump / source switching in the panel).
+    let canSwitchStreams: Bool
+    /// Native → mpv fallback hand-over position (NE-7/PLY-8).
+    let startPositionSec: Double?
     /// Phase 1 routing diagnostic (from `PlayerEngineRouter`) surfaced in Stream Info; playback is
     /// unaffected — this screen always renders via libmpv.
     var routingNote: String? = nil
+    /// Leave the player for the details page (the presenter closes its stream picker too).
+    /// nil → just dismiss the player.
+    var onExitToDetails: (() -> Void)? = nil
+    /// Open the stream picker for the next episode. nil → leave the player.
+    var onPickNextSource: ((MetaVideo) -> Void)? = nil
 
     @StateObject private var state: MPVPlaybackState
-    @StateObject private var upNext: NextEpisodeEngine
     @Environment(\.dismiss) private var dismiss
     @State private var showPauseInfo = false
     @State private var pauseInfoTask: Task<Void, Never>?
     @StateObject private var panelModel: PlayerTopPanelModel
     @State private var panelAdapter: MPVPlayerPanelAdapter?
+    /// The end screen's cover was closed with Menu: leave for the details page once it's gone.
+    @State private var endScreenClosedByMenu = false
 
-    /// Up-next chip label (mirrors the native screen's `UpNextAction` titles); nil = no chip.
-    private var upNextChipAction: String? {
-        switch upNext.phase {
-        case .counting: return UpNextAction.playNext.title
-        case .stillWatching: return UpNextAction.continueWatching.title
-        default: return nil
-        }
-    }
-
-    init(context: PlaybackContext, onPlayNext: ((PlaybackContext) -> Void)? = nil, routingNote: String? = nil) {
+    init(context: PlaybackContext,
+         upNext: NextEpisodeEngine,
+         canSwitchStreams: Bool,
+         startPositionSec: Double? = nil,
+         routingNote: String? = nil,
+         onExitToDetails: (() -> Void)? = nil,
+         onPickNextSource: ((MetaVideo) -> Void)? = nil) {
         self.context = context
-        self.onPlayNext = onPlayNext
+        _upNext = ObservedObject(wrappedValue: upNext)
+        self.canSwitchStreams = canSwitchStreams
+        self.startPositionSec = startPositionSec
         self.routingNote = routingNote
+        self.onExitToDetails = onExitToDetails
+        self.onPickNextSource = onPickNextSource
         _state = StateObject(wrappedValue: MPVPlaybackState(title: context.title))
-        _upNext = StateObject(wrappedValue: NextEpisodeEngine(
-            context: context,
-            onPlayNext: onPlayNext ?? { _ in }
-        ))
         _panelModel = StateObject(wrappedValue: PlayerTopPanelModel(
             info: PlayerPanelInfo(header: NativeInfoHeader(context: context))))
     }
@@ -1589,9 +1678,10 @@ struct MPVPlayerScreen: View {
         ZStack(alignment: .bottom) {
             MPVPlayerRepresentable(
                 context: context, state: state, panelModel: panelModel,
-                makeExtraTab: { [state, upNext, onPlayNext, panelModel] in
+                startPositionSec: startPositionSec,
+                makeExtraTab: { [state, upNext, canSwitchStreams, panelModel] in
                     PlayerPanelExtraTab {
-                        MPVPlaybackTab(state: state, engine: upNext, canSwitchStreams: onPlayNext != nil,
+                        MPVPlaybackTab(state: state, engine: upNext, canSwitchStreams: canSwitchStreams,
                                        onClose: { panelModel.onClose?() })
                     }
                 },
@@ -1609,8 +1699,9 @@ struct MPVPlayerScreen: View {
                 .opacity(state.controlsVisible ? 1 : 0)
                 .animation(.easeInOut(duration: 0.25), value: state.controlsVisible)
 
-            // Metadata card after a sustained pause (Android TV PauseOverlay parity).
-            if showPauseInfo, state.isPaused, !state.isBuffering {
+            // Metadata card after a sustained pause (Android TV PauseOverlay parity) — not on the
+            // last frame, and not under the Up Next card.
+            if showPauseInfo, state.isPaused, !state.isBuffering, !state.isEnded, !upNext.isCardVisible {
                 PauseInfoCard(context: context, state: state)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(60)
@@ -1627,17 +1718,14 @@ struct MPVPlayerScreen: View {
 
             // Transient prompts, bottom-trailing — same chip family as the native screen's
             // contextual actions (PlayerChipStyle). libmpv owns the remote, so these are drawn
-            // non-focusable and fire on D-pad Down (see `pressesBegan`); up-next wins over a skip.
-            if let caption = upNext.phase.chipCaption(nextTitle: upNext.nextEpisodeTitle) {
-                VStack(alignment: .trailing, spacing: Theme.Spacing.sm) {
-                    PlayerChipCaption(text: caption.text, symbol: caption.symbol, showsProgress: caption.progress)
-                    if let action = upNextChipAction {
-                        PlayerActionChip(label: action, symbol: PlayerChipStyle.nextSymbol, showsPressHint: true)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                .padding(PlayerChipStyle.edgePadding)
-                .transition(.opacity)
+            // non-focusable and act on the remote (see `pressesBegan`); Up Next wins over a skip.
+            if upNext.isCardVisible {
+                UpNextCard(engine: upNext, fallbackArtwork: context.background ?? context.poster)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(.trailing, PlayerChipStyle.edgePadding)
+                    // Clear the transport bar while it's showing.
+                    .padding(.bottom, PlayerChipStyle.edgePadding + (state.controlsVisible ? Self.transportClearance : 0))
+                    .transition(.opacity)
             } else if let prompt = state.skipPrompt {
                 PlayerActionChip(label: prompt.label, symbol: PlayerChipStyle.skipSymbol, showsPressHint: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -1647,20 +1735,18 @@ struct MPVPlayerScreen: View {
         }
         .animation(PlayerChipStyle.animation, value: state.skipPrompt)
         .animation(PlayerChipStyle.animation, value: upNext.phase)
+        .animation(PlayerChipStyle.animation, value: state.controlsVisible)
         .animation(.easeInOut(duration: 0.25), value: showPauseInfo)
         .animation(.easeInOut(duration: 0.25), value: state.showStreamInfo)
-        .fullScreenCover(
-            isPresented: Binding(
-                get: { state.isEnded && upNext.phase == .hidden },
-                set: { if !$0 { state.isEnded = false } }
-            ),
-            onDismiss: { state.reclaimFocus?() }
-        ) {
-            PostPlayView(
+        .fullScreenCover(isPresented: endScreenPresented, onDismiss: { endScreenDidDismiss() }) {
+            PlayerEndScreen(
+                engine: upNext,
                 title: context.title,
-                poster: context.poster,
-                onReplay: { state.replay?() },
-                onExit: { dismiss() }
+                artwork: context.episodeStill ?? context.background ?? context.poster,
+                onNextEpisode: { upNext.playNextFromEndScreen() },
+                onChooseSource: { upNext.pickSource() },
+                onReplay: { replay() },
+                onExit: { upNext.cancelAndExit() }
             )
         }
         .onAppear {
@@ -1668,11 +1754,7 @@ struct MPVPlayerScreen: View {
             if panelAdapter == nil {
                 panelAdapter = MPVPlayerPanelAdapter(state: state, model: panelModel, context: context)
             }
-            // Start the orchestration whenever a presenter can swap contexts — autoplay needs
-            // episodes, but source switching works for movies too (the engine no-ops the rest).
-            if onPlayNext != nil {
-                upNext.start(state: state)
-            }
+            wireUpNext()
             // libmpv renders into a bare Metal layer, so tvOS doesn't know video is playing and
             // its idle timer fires the screensaver mid-movie (device report). Hold the idle timer
             // while playback is active — mirroring AVPlayerViewController, which does this
@@ -1681,13 +1763,25 @@ struct MPVPlayerScreen: View {
         }
         .onChange(of: routingNote) { _, note in state.routingNote = note ?? "" }
         .onDisappear {
-            upNext.stop()
             UIApplication.shared.isIdleTimerDisabled = false
         }
         .onChange(of: state.positionSec) { _, position in
             upNext.onProgress(positionSec: position, durationSec: state.durationSec)
         }
+        .onChange(of: state.isEnded) { _, ended in
+            if ended {
+                // Hand-off, card, end screen — or nothing to continue with: back to details.
+                if upNext.playbackDidEnd(natural: state.endedNaturally) == .exit { exitToDetails() }
+            } else {
+                // Off the last frame again (a seek back, or Play Again — which re-arms fully).
+                upNext.playbackResumedFromEnd()
+            }
+        }
+        // The Up Next countdown waits while the top panel is open.
+        .onChange(of: state.panelOpen) { _, open in upNext.setPanelOpen(open) }
         .onChange(of: state.isPaused) { _, paused in
+            // The Up Next countdown pauses with the video.
+            upNext.setPaused(paused)
             // Paused → let the idle timer run again (a long-paused frame should be allowed to
             // hand off to the screensaver, same as the native player); playing → hold it.
             UIApplication.shared.isIdleTimerDisabled = !paused
@@ -1702,6 +1796,89 @@ struct MPVPlayerScreen: View {
                 showPauseInfo = false
             }
         }
+    }
+
+    /// Height the transport bar (`PlayerControlsOverlay`) occupies above the bottom inset.
+    private static let transportClearance: CGFloat = 210
+
+    /// Hooks between this screen, its libmpv controller (via `state`) and the shared engine.
+    /// Re-installed on every appearance — after a native → mpv fallback they replace the native
+    /// screen's.
+    private func wireUpNext() {
+        upNext.playerAttached()
+        upNext.setPaused(state.isPaused)
+        upNext.onExitRequested = exitAction
+        upNext.onPickSourceRequested = pickSourceAction
+        upNext.onWillHandOff = { [weak state] in state?.completedByHandOff = true }
+        upNext.onPrefetchingNextSubtitles = { [weak state] in state?.freezeAddonSubtitles = true }
+        state.upNextSelect = { [weak upNext] in upNext?.handleSelect() ?? false }
+        state.upNextDown = { [weak upNext] in upNext?.handleDown() ?? false }
+        state.upNextMenu = { [weak upNext] in upNext?.handleMenu() ?? false }
+        state.upNextCancel = { [weak upNext] in upNext?.dismissForSession() }
+        state.upNextSkipCredits = { [weak upNext] creditsEnd in
+            upNext?.skipCreditsToNext(creditsEndSec: creditsEnd) ?? false
+        }
+        state.onSkipSegmentsLoaded = { [weak upNext] segments in upNext?.setSkipSegments(segments) }
+        upNext.setPanelOpen(state.panelOpen)
+    }
+
+    private var endScreenPresented: Binding<Bool> {
+        Binding(
+            get: { upNext.endScreen != nil },
+            set: { presented in
+                // Only a user dismissal (Menu) lands here while the engine still wants the screen.
+                guard !presented, upNext.endScreen != nil else { return }
+                endScreenClosedByMenu = true
+                upNext.endScreenDismissedByUser()
+            }
+        )
+    }
+
+    /// Runs once the end-screen cover is gone, so leaving for details never races its dismissal.
+    private func endScreenDidDismiss() {
+        if endScreenClosedByMenu {
+            endScreenClosedByMenu = false
+            upNext.cancelAndExit()
+        } else {
+            state.reclaimFocus?()      // libmpv's controller must be first responder again
+        }
+    }
+
+    private func replay() {
+        upNext.resetForReplay()
+        state.replay?()
+    }
+
+    /// Leave the player for the details page (the presenter's route, else just this player).
+    /// Built from values, not from this view: the engine stores it, and capturing the view — which
+    /// holds the engine — would retain the engine in a cycle.
+    private var exitAction: () -> Void {
+        let onExitToDetails = self.onExitToDetails
+        let dismiss = self.dismiss
+        return {
+            if let onExitToDetails {
+                onExitToDetails()
+            } else {
+                dismiss()
+            }
+        }
+    }
+
+    /// Open the next episode's stream picker (the presenter's route, else leave the player).
+    private var pickSourceAction: (MetaVideo) -> Void {
+        let onPickNextSource = self.onPickNextSource
+        let exit = exitAction
+        return { video in
+            if let onPickNextSource {
+                onPickNextSource(video)
+            } else {
+                exit()
+            }
+        }
+    }
+
+    private func exitToDetails() {
+        exitAction()
     }
 }
 
@@ -1762,61 +1939,6 @@ private struct ProgressBar: View {
                 Capsule().fill(.white)
                     .frame(width: max(0, geo.size.width * fraction))
             }
-        }
-    }
-}
-
-/// Post-play screen shown when playback reaches the end without an autoplay hand-off
-/// (Android TV `PostPlayOverlay` parity, simplified): replay or exit.
-private struct PostPlayView: View {
-    let title: String
-    let poster: String?
-    let onReplay: () -> Void
-    let onExit: () -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            HStack(alignment: .center, spacing: 48) {
-                if let poster, !poster.isEmpty {
-                    CachedAsyncImage(string: poster)
-                        .frame(width: 260, height: 390)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                }
-                VStack(alignment: .leading, spacing: 24) {
-                    Text("That's the end of")
-                        .font(Theme.Font.screenTitle.weight(.regular))
-                        .foregroundStyle(.white.opacity(0.7))
-                    Text(title)
-                        .font(Theme.Font.hero)
-                        .foregroundStyle(.white)
-                        .lineLimit(3)
-                        .frame(maxWidth: 800, alignment: .leading)
-
-                    Button {
-                        dismiss()
-                        onReplay()
-                    } label: {
-                        Label("Play Again", systemImage: "arrow.counterclockwise")
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 8)
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button {
-                        // Dismissing the player screen tears the cover down with it —
-                        // don't also dismiss the cover (competing transitions).
-                        onExit()
-                    } label: {
-                        Label("Back to Details", systemImage: "chevron.backward")
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 8)
-                    }
-                    .buttonStyle(.bordered)
-                }
-            }
-            .padding(80)
         }
     }
 }

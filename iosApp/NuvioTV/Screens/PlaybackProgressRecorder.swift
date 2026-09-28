@@ -49,13 +49,16 @@ final class PlaybackProgressRecorder {
         lastSourceUrl: context.url.absoluteString
     )
 
-    /// Record playback progress. `flush` forces an immediate write (use on teardown).
-    func record(positionSec: Double, durationSec: Double, isPaused: Bool, speed: Double, flush: Bool) {
+    /// Record playback progress. `flush` forces an immediate write (use on teardown). `isEnded`
+    /// records the entry as completed regardless of the watched fraction — the end of the file,
+    /// or an Up Next hand-off during the credits — so Continue Watching moves on to the next one.
+    func record(positionSec: Double, durationSec: Double, isPaused: Bool, speed: Double, flush: Bool,
+                isEnded: Bool = false) {
         guard durationSec > 0, positionSec > 1 else { return }
         let snapshot = PlayerPlaybackSnapshot(
             isLoading: false,
             isPlaying: !isPaused,
-            isEnded: false,
+            isEnded: isEnded,
             durationMs: Int64(durationSec * 1000),
             positionMs: Int64(positionSec * 1000),
             bufferedPositionMs: Int64(positionSec * 1000),
@@ -102,6 +105,14 @@ final class PlaybackProgressRecorder {
                 ) { _ in }
             }
         }
+    }
+
+    /// A new viewing on this recorder ("Play Again" after the session was stopped): the next
+    /// `startTrakt` opens a fresh scrobble instead of being ignored as a repeat.
+    func reopenTrakt() {
+        traktItem = nil
+        traktRequested = false
+        traktClosed = false
     }
 
     func stopTrakt(positionSec: Double, durationSec: Double) {

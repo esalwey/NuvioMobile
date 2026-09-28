@@ -1,3 +1,4 @@
+import SharedCore
 import SwiftUI
 
 /// Engine dispatcher for all video playback in NuvioTV. Call sites present `PlayerScreen`; it probes
@@ -9,13 +10,37 @@ import SwiftUI
 /// flag off, playback goes straight to mpv with no probe delay — non-beta behavior is unchanged. With
 /// it on, a brief probe decides per file, and any native-path failure falls back to mpv for the same
 /// context. See docs/tvos-hybrid-player-plan.md.
+///
+/// Owns the `NextEpisodeEngine` for this episode so both engines share it: a native → mpv fallback
+/// keeps the Up Next state (trigger, prefetched stream) and resumes mpv at the native position
+/// instead of restarting the episode (NE-7/PLY-8).
 struct PlayerScreen: View {
     let context: PlaybackContext
-    var onPlayNext: ((PlaybackContext) -> Void)? = nil
+    /// Swap in another context (next episode, another source). nil = no autoplay/switching.
+    var onPlayNext: ((PlaybackContext) -> Void)?
+    /// Leave the player for the details page — the presenter also closes its stream picker, so an
+    /// autoplay chain never lands on a previous episode's picker. nil = dismiss the player only.
+    var onExitToDetails: (() -> Void)?
+    /// Open the stream picker for the next episode (its stream couldn't be auto-selected).
+    var onPickNextSource: ((MetaVideo) -> Void)?
 
+    @StateObject private var upNext: NextEpisodeEngine
     @State private var decision: EngineDecision?
     /// Set when the native path fails; pins this context to mpv.
     @State private var forcedMPV = false
+    /// Where the native engine was when it handed over to mpv.
+    @State private var fallbackStartSec: Double?
+
+    init(context: PlaybackContext,
+         onPlayNext: ((PlaybackContext) -> Void)? = nil,
+         onExitToDetails: (() -> Void)? = nil,
+         onPickNextSource: ((MetaVideo) -> Void)? = nil) {
+        self.context = context
+        self.onPlayNext = onPlayNext
+        self.onExitToDetails = onExitToDetails
+        self.onPickNextSource = onPickNextSource
+        _upNext = StateObject(wrappedValue: NextEpisodeEngine(context: context, onPlayNext: onPlayNext ?? { _ in }))
+    }
 
     private var nativeDVEnabled: Bool { UserDefaults.standard.bool(forKey: PlayerTuning.nativeDVKey) }
 
@@ -31,12 +56,21 @@ struct PlayerScreen: View {
         Group {
             switch shown {
             case .native:
-                NativePlayerScreen(context: context, onPlayNext: onPlayNext,
-                                   onFallback: { _ in forcedMPV = true },
-                                   routingNote: decision?.displayNote)
+                NativePlayerScreen(context: context, upNext: upNext,
+                                   onFallback: { position in
+                                       fallbackStartSec = position
+                                       forcedMPV = true
+                                   },
+                                   routingNote: decision?.displayNote,
+                                   onExitToDetails: onExitToDetails,
+                                   onPickNextSource: onPickNextSource)
             case .mpv:
-                MPVPlayerScreen(context: context, onPlayNext: onPlayNext,
-                                routingNote: forcedMPV ? String(localized: "mpv \u{00B7} fallback") : decision?.displayNote)
+                MPVPlayerScreen(context: context, upNext: upNext,
+                                canSwitchStreams: onPlayNext != nil,
+                                startPositionSec: fallbackStartSec,
+                                routingNote: forcedMPV ? String(localized: "mpv \u{00B7} fallback") : decision?.displayNote,
+                                onExitToDetails: onExitToDetails,
+                                onPickNextSource: onPickNextSource)
             case .deciding:
                 ZStack {
                     Color.black.ignoresSafeArea()
@@ -45,6 +79,18 @@ struct PlayerScreen: View {
             }
         }
         .task(id: context.id) { await decideEngine() }
+        .onAppear {
+            // Orchestrate Up Next only when a presenter can swap contexts (series autoplay,
+            // source switching); the engine no-ops the rest for movies.
+            if onPlayNext != nil { upNext.start() }
+        }
+        .onDisappear {
+            // The end screen's full-screen cover also makes the player "disappear" — but the
+            // engine is still in use under it (the next episode's source may be resolving for its
+            // "Next Episode"): stop only on a real exit. The engine's own exits (details, a source
+            // pick, a hand-off) release its search and observers, and `deinit` covers the rest.
+            if upNext.endScreen == nil { upNext.stop() }
+        }
     }
 
     /// Probe off-main (hard-bounded) and pick the engine. No-op straight to mpv when the flag is off.

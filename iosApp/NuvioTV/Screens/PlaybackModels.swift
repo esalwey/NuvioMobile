@@ -23,6 +23,18 @@ enum PlayerTuning {
     /// them to 8.1 (the conversion discards FEL enhancement data; MEL converts losslessly and is
     /// unaffected by this preference).
     static let dvP7FelMpvKey = "player.dvP7FelPreferMpv"
+    /// Up Next (Settings → Playback → Next Episode) — device-local on purpose, see
+    /// `UpNextPreferences` for the sync policy. Absent keys read as the tvOS defaults.
+    /// Automatic next episode (default ON).
+    static let upNextAutoplayKey = "player.upNext.autoplay"
+    /// Show the card when the credits start, when their timing is known (default ON).
+    static let upNextUseCreditsKey = "player.upNext.useCredits"
+    /// Countdown length in seconds (5/10/15/20, default 10).
+    static let upNextCountdownKey = "player.upNext.countdownSec"
+    /// "Before the End" lead in seconds (15/30/45/60). Absent = the profile's synced threshold, else 30.
+    static let upNextSecondsBeforeEndKey = "player.upNext.secondsBeforeEnd"
+    /// "Still watching?" gate after unattended episodes (default OFF).
+    static let upNextStillWatchingKey = "player.upNext.askStillWatching"
 }
 
 /// Everything the player needs to render a stream and record watch progress for it.
@@ -140,6 +152,8 @@ struct SkipSegment {
 struct SkipPrompt: Equatable {
     let label: String      // e.g. "Skip Intro"
     let targetSec: Double   // absolute seek target (segment end)
+    /// The segment is the credits (outro/ED): skipping them can mean "next episode" (Up Next).
+    var isCredits: Bool = false
 }
 
 /// Live stream diagnostics read from libmpv properties (shown by the Stream Info overlay).
