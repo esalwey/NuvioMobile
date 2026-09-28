@@ -115,6 +115,9 @@ final class MPVTVPlayerViewController: UIViewController {
     private var hideWork: DispatchWorkItem?
     private var lastSaveUptime: TimeInterval = 0
     private var pendingResumeSec: Double?
+    /// A saved row with a percentage and no timecode (Simkl episode or Trakt playback row, upstream
+    /// b7657dbe4): scaled by this file's own duration once mpv has loaded it.
+    private var pendingResumeFraction: Double?
     private var seekTimer: Timer?
     private var seekDirection: Double = 0
     private var seekHoldCount = 0
@@ -1113,7 +1116,11 @@ final class MPVTVPlayerViewController: UIViewController {
             episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) }
         ), !entry.isCompleted else { return }
         let seconds = Double(entry.lastPositionMs) / 1000.0
-        if seconds > 10 { pendingResumeSec = seconds }
+        if seconds > 10 {
+            pendingResumeSec = seconds
+        } else if entry.lastPositionMs <= 0, entry.durationMs <= 0, entry.progressFraction > 0 {
+            pendingResumeFraction = Double(entry.progressFraction)
+        }
     }
 
     private lazy var session = WatchProgressPlaybackSession(
@@ -1531,9 +1538,21 @@ final class MPVTVPlayerViewController: UIViewController {
     }
 
     private func applyPendingResume() {
-        guard let seconds = pendingResumeSec else { return }
-        pendingResumeSec = nil
-        command("seek", args: [String(format: "%.3f", seconds), "absolute"])
+        if let seconds = pendingResumeSec {
+            pendingResumeSec = nil
+            command("seek", args: [String(format: "%.3f", seconds), "absolute"])
+            return
+        }
+        guard let fraction = pendingResumeFraction else { return }
+        pendingResumeFraction = nil
+        let duration = getDouble("duration")
+        if duration > 0 {
+            let seconds = duration * fraction
+            if seconds > 10 { command("seek", args: [String(format: "%.3f", seconds), "absolute"]) }
+        } else {
+            // Duration not known at file-loaded yet: mpv scales the percentage itself.
+            command("seek", args: [String(format: "%.3f", fraction * 100), "absolute-percent"])
+        }
     }
 
     // MARK: - libmpv C-interop helpers

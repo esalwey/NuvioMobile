@@ -754,7 +754,7 @@ final class NativePlaybackCoordinator: ObservableObject {
                     readied = true
                     print("[NativePlayer] item readyToPlay")
                     let duration = CMTimeGetSeconds(item.duration)
-                    let resume = self.resumeFromStart ? nil : self.recorder.resumePositionSec()
+                    let resume = self.resumeFromStart ? nil : self.recorder.resumePositionSec(durationSec: duration)
                     self.resumeFromStart = false
                     if let resume {
                         await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600))

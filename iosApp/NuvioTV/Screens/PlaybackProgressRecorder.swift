@@ -14,14 +14,19 @@ final class PlaybackProgressRecorder {
     // MARK: - Resume
 
     /// Saved resume position in seconds — only if >10s in and not completed (mirrors MPV's gate).
-    func resumePositionSec() -> Double? {
+    /// `durationSec` is the opened file's duration: a row with a percentage and no timecode (Simkl
+    /// episode or Trakt playback row, upstream b7657dbe4) resumes at that share of it.
+    func resumePositionSec(durationSec: Double = 0) -> Double? {
         guard let entry = WatchProgressRepository.shared.progressForVideo(
             videoId: context.videoId,
             parentMetaId: context.parentMetaId,
             seasonNumber: context.season.map { KotlinInt(int: Int32($0)) },
             episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) }
         ), !entry.isCompleted else { return nil }
-        let seconds = Double(entry.lastPositionMs) / 1000.0
+        var seconds = Double(entry.lastPositionMs) / 1000.0
+        if seconds <= 0, entry.durationMs <= 0, durationSec.isFinite, durationSec > 0 {
+            seconds = Double(entry.progressFraction) * durationSec
+        }
         return seconds > 10 ? seconds : nil
     }
 

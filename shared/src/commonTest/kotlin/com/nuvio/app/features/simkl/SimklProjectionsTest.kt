@@ -424,8 +424,11 @@ class SimklProjectionsTest {
         assertEquals(1, entry.seasonNumber)
         assertEquals(3, entry.episodeNumber)
         assertEquals(42.2f, entry.progressPercent)
-        assertEquals(3_000_000L, entry.durationMs)
-        assertEquals(1_266_000L, entry.lastPositionMs)
+        // Upstream a298f2d72: no duration is invented from the show runtime, so the resume goes
+        // through the percentage: the player scales it by the duration of the episode it opened.
+        assertEquals(0L, entry.durationMs)
+        assertEquals(0L, entry.lastPositionMs)
+        assertEquals(0.422f, entry.progressFraction, 0.0005f)
         assertEquals("simkl-playback:12345", entry.progressKey)
         assertEquals(WatchProgressSourceSimklPlayback, entry.source)
         assertEquals("simkl", entry.trackingProviderId)
@@ -434,6 +437,44 @@ class SimklProjectionsTest {
         assertTrue(entry.poster.orEmpty().contains("simkl.in/posters/12/poster_m.webp"))
         assertFalse(entry.isCompleted)
         assertEquals(1_714_515_180_250L, entry.lastUpdatedEpochMs)
+    }
+
+    @Test
+    fun `movie playback keeps the runtime scaled position`() {
+        val session = SimklPlaybackSession(
+            id = 777,
+            progress = 25.0,
+            pausedAt = "2024-04-30T22:13:00Z",
+            movie = media(id = 472214, imdb = "tt1375666", runtime = 100),
+        )
+
+        val entry = SimklSyncSnapshot(playback = listOf(session)).toSimklProgressEntries().single()
+
+        assertEquals("movie", entry.contentType)
+        assertEquals(6_000_000L, entry.durationMs)
+        assertEquals(1_500_000L, entry.lastPositionMs)
+        assertEquals(0.25f, entry.progressFraction, 0.0005f)
+        // The player-side resume helper the tvOS engines use for rows without a position.
+        assertEquals(1_500_000L, entry.resolveResumePosition(actualDurationMs = 6_000_000L))
+    }
+
+    @Test
+    fun `episode playback resumes from the percentage of the opened file`() {
+        val session = SimklPlaybackSession(
+            id = 778,
+            progress = 83.0,
+            pausedAt = "2024-04-30T22:13:00Z",
+            type = "episode",
+            episode = SimklPlaybackEpisode(season = 2, number = 5),
+            show = media(id = 39687, imdb = "tt4574334", runtime = 52),
+        )
+
+        val entry = SimklSyncSnapshot(playback = listOf(session)).toSimklProgressEntries().single()
+
+        assertEquals(0L, entry.durationMs)
+        // 83 % of a 47-minute episode (2 340 600 ms), not of the show's 52-minute runtime.
+        val resumedMs = entry.resolveResumePosition(actualDurationMs = 2_820_000L)
+        assertTrue(resumedMs in 2_340_000L..2_341_000L, "resumed at $resumedMs")
     }
 
     @Test
