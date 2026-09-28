@@ -442,12 +442,14 @@ private struct SimklSyncInfoRow: View {
 /// one ID (the trade-off folded into the picker row's subtitle since a tvOS `Menu` item can't
 /// carry upstream's per-option descriptions).
 private enum SimklAnimeIdOptions {
-    static let keys = ["imdb", "mal", "kitsu"]
+    static let keys = ["imdb", "mal", "kitsu", "tvdb"]
 
     private static let names: [String: String] = [
         "imdb": String(localized: "Prefer IMDB"),
         "mal": String(localized: "Prefer MyAnimeList"),
-        "kitsu": String(localized: "Prefer Kitsu")
+        "kitsu": String(localized: "Prefer Kitsu"),
+        // Upstream 8aad52d83: groups a franchise's seasons like IMDB, without its per-season splits.
+        "tvdb": String(localized: "Prefer TVDB")
     ]
 
     static func name(forKey key: String) -> String {

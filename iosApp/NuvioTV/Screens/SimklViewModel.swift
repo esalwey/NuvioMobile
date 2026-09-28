@@ -223,6 +223,7 @@ final class SimklViewModel: ObservableObject {
         switch key {
         case "mal": preference = .mal
         case "kitsu": preference = .kitsu
+        case "tvdb": preference = .tvdb
         default: preference = .imdb
         }
         TrackingSettingsRepository.shared.setSimklAnimeIdPreference(preference: preference)
@@ -234,6 +235,7 @@ final class SimklViewModel: ObservableObject {
     private static func animeIdKey(_ preference: SimklAnimeIdPreference) -> String {
         if preference == .mal { return "mal" }
         if preference == .kitsu { return "kitsu" }
+        if preference == .tvdb { return "tvdb" }
         return "imdb"
     }
 }

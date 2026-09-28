@@ -4,12 +4,15 @@ import com.nuvio.app.features.addons.httpGetText
 import com.nuvio.app.features.simkl.buildSimklApiUrl
 import com.nuvio.app.features.simkl.SimklConfig
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 
 internal object SimklIdResolver {
 
@@ -34,6 +37,7 @@ internal object SimklIdResolver {
     private val idsCache = HashMap<String, ResolvedIds?>()
     private val detailsCache = HashMap<Long, ResolvedIds>()
     private val episodeCache = HashMap<Long, List<EpisodeMapping>>()
+    private val animeSeasonCache = HashMap<Long, List<AnimeSeasonEntry>>()
 
     // Codex r3: upstream hand-rolled "client_id=…&app-name=…&app-version=1.0"; the fork's existing
     // buildSimklApiUrl URL-encodes every parameter and supplies the real app version instead.
@@ -74,14 +78,17 @@ internal object SimklIdResolver {
     /// multi-season scan (see [resolveIds]) fetches each candidate at most once per process.
     private suspend fun resolveDetails(result: JsonObject): ResolvedIds? {
         val simklId = result["ids"]?.jsonObject?.get("simkl")?.jsonPrimitive?.long ?: return null
-        detailsCache[simklId]?.let { return it }
-
         val type = result["type"]?.jsonPrimitive?.content ?: "anime"
         val mediaType = when (type) {
             "movie" -> "movies"
             "show" -> "tv"
             else -> "anime"
         }
+        return resolveDetailsById(simklId, mediaType)
+    }
+
+    private suspend fun resolveDetailsById(simklId: Long, mediaType: String): ResolvedIds? {
+        detailsCache[simklId]?.let { return it }
 
         val detailsText = httpGetText(buildSimklApiUrl("/$mediaType/$simklId", mapOf("extended" to "full")))
         val details = json.parseToJsonElement(detailsText).jsonObject
@@ -122,6 +129,52 @@ internal object SimklIdResolver {
         }
     }
 
+    /**
+     * Upstream aa748fa8b: the ids of the Simkl anime entry that owns TVDB [season] of the IMDB title
+     * [imdbId]. An IMDB search lands on the franchise's first entry, so AniSkip / Anime-Skip were
+     * asked about season 1 whatever season was playing; `extended=full_anime_seasons` maps every TVDB
+     * season to its own entry. Fork: the base lookup keeps the season-aware search scan of
+     * [resolveIds], and a failed sibling lookup falls back to that base.
+     */
+    suspend fun resolveIdsForImdbEpisode(imdbId: String, season: Int, episode: Int): ResolvedIds? {
+        val base = resolveIds("imdb", imdbId, season) ?: return null
+        if (base.type != "anime") return base
+        val baseSeason = base.tvdbSeason
+        if (baseSeason != null && baseSeason == season) return base
+
+        val seasonSimklId = resolveSeasonSimklId(base.simklId, base.type, season)
+        if (seasonSimklId != null && seasonSimklId != base.simklId) {
+            val siblingIds = runCatching { resolveDetailsById(seasonSimklId, base.type) }.getOrNull()
+            if (siblingIds != null) return siblingIds
+        }
+        return base
+    }
+
+    private suspend fun resolveSeasonSimklId(parentSimklId: Long, type: String, tvdbSeason: Int): Long? {
+        animeSeasonCache[parentSimklId]?.let { seasons ->
+            return seasons.firstOrNull { it.tvdbSeason == tvdbSeason }?.simklId
+        }
+        if (SimklConfig.CLIENT_ID.isBlank()) return null
+
+        return try {
+            val text = httpGetText(
+                buildSimklApiUrl("/$type/$parentSimklId", mapOf("extended" to "full_anime_seasons")),
+            )
+            val details = json.parseToJsonElement(text).jsonObject
+            val seasons = (details["mapped_tvdb_seasons"] as? JsonArray).orEmpty().mapNotNull { entry ->
+                val obj = entry as? JsonObject ?: return@mapNotNull null
+                val simklId = obj["simkl_id"]?.jsonPrimitive?.longOrNull?.takeIf { it > 0 } ?: return@mapNotNull null
+                val mappedSeason = obj["tvdb_season"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 }
+                    ?: return@mapNotNull null
+                AnimeSeasonEntry(simklId, mappedSeason)
+            }
+            animeSeasonCache[parentSimklId] = seasons
+            seasons.firstOrNull { it.tvdbSeason == tvdbSeason }?.simklId
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     suspend fun resolveEpisodeTvdb(source: String, id: String, episode: Int): Pair<Int, Int>? {
         val ids = resolveIds(source, id) ?: return null
         val entry = getEpisodeMapping(ids.simklId, ids.type).firstOrNull { it.animeEpisode == episode }
@@ -132,5 +185,8 @@ internal object SimklIdResolver {
         idsCache.clear()
         detailsCache.clear()
         episodeCache.clear()
+        animeSeasonCache.clear()
     }
 }
+
+private data class AnimeSeasonEntry(val simklId: Long, val tvdbSeason: Int)

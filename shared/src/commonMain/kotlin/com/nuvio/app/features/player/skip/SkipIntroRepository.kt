@@ -30,17 +30,29 @@ object SkipIntroRepository {
         val introDbDeferred = async {
             if (introDbConfigured) fetchFromIntroDb(imdbId, season, episode) else emptyList()
         }
-        // Season-aware (Codex r2): an IMDb series spanning several anime seasons resolves to the
-        // Simkl entry for THIS season, so AniSkip/Anime-Skip get the right MAL/AniList ids.
-        val simklIdsDeferred = async { SimklIdResolver.resolveIds("imdb", imdbId, season) }
+        // Season-aware (Codex r2, upstream aa748fa8b): an IMDb series spanning several anime seasons
+        // resolves to the Simkl entry for THIS season, so AniSkip/Anime-Skip get the right MAL/AniList
+        // ids.
+        val simklIdsDeferred = async { SimklIdResolver.resolveIdsForImdbEpisode(imdbId, season, episode) }
         val simklIds = simklIdsDeferred.await()
         val malId = simklIds?.mal
         val anilistId = simklIds?.anilist
+        // Upstream aa748fa8b: AniSkip / Anime-Skip index an entry's own episodes, so the TVDB episode
+        // is remapped to the entry-local number. Fork: only fetched when an anime provider will be
+        // asked, so a regular show costs no extra Simkl request.
+        val animeEpisode = if (simklIds != null && (malId != null || anilistId != null)) {
+            SimklIdResolver.getEpisodeMapping(simklIds.simklId, simklIds.type)
+                .firstOrNull { it.tvdbSeason == season && it.tvdbEpisode == episode }
+                ?.animeEpisode
+                ?: episode
+        } else {
+            episode
+        }
         val aniSkipDeferred = async {
-            if (malId != null) fetchFromAniSkip(malId, episode) else emptyList()
+            if (malId != null) fetchFromAniSkip(malId, animeEpisode) else emptyList()
         }
         val animeSkipDeferred = async {
-            if (anilistId != null) fetchFromAnimeSkip(anilistId, episode, season = null) else emptyList()
+            if (anilistId != null) fetchFromAnimeSkip(anilistId, animeEpisode, season = null) else emptyList()
         }
 
         return@coroutineScope mergeByPriority(
