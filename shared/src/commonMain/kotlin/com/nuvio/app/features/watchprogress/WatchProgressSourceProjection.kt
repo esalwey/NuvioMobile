@@ -38,12 +38,14 @@ fun projectWatchProgressUiState(
     entries: List<WatchProgressEntry>,
     providerSnapshot: TrackingProgressSnapshot?,
     hasLoadedNuvioRemoteProgress: Boolean,
+    seriesIdentityVersion: Long = 0L,
 ): WatchProgressUiState = WatchProgressUiState(
     source = source,
     entries = entries,
     hiddenContentIds = providerSnapshot?.hiddenContentIds.orEmpty(),
     hasLoadedRemoteProgress =
         providerSnapshot?.hasLoadedRemoteProgress ?: hasLoadedNuvioRemoteProgress,
+    seriesIdentityVersion = seriesIdentityVersion,
 )
 
 /**

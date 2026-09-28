@@ -573,6 +573,11 @@ struct AboutSettingsPane: View {
                             : String(localized: "BUG-87: try if row titles fade or bounce with No Zoom on Focus"),
                         isOn: $noZoomReachHoldsLift
                     )
+
+                    // CW legacy diagnosis (REMAINING_FIX #1): sixth child of this Group, one view
+                    // holding its toggle, Refresh and pages — the outer `SettingsSection` and this
+                    // Group's parent stay at their ceiling, untouched. Live, no relaunch.
+                    ContinueWatchingDiagnosticsRows()
                 }
             }
         }

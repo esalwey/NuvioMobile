@@ -117,8 +117,15 @@ fun List<WatchProgressEntry>.resumeEntryForSeries(metaId: String): WatchProgress
     }
 }
 
+/**
+ * [canonicalSeriesId] maps a series id to the id its rows are grouped under (CW alias fix,
+ * REMAINING_FIX #2; `buildContinueWatchingRowEntries` passes [ContinueWatchingSeriesIdentity]).
+ * The default keeps the stored id, so the legacy row, metadata enrichment and mobile group as
+ * they always did.
+ */
 fun List<WatchProgressEntry>. continueWatchingEntries(
     limit: Int = ContinueWatchingLimit,
+    canonicalSeriesId: (String) -> String = { id -> id.trim() },
 ): List<WatchProgressEntry> {
     val selectionEntries = filter { entry ->
         entry.isEffectivelyCompleted || entry.shouldTreatAsInProgressForContinueWatching()
@@ -126,6 +133,7 @@ fun List<WatchProgressEntry>. continueWatchingEntries(
     val domainEntries = continueWatchingProgressEntries(
         progressRecords = selectionEntries.map(WatchProgressEntry::toDomainProgressRecord),
         limit = limit,
+        seriesKey = { record -> canonicalSeriesId(record.content.id) },
     )
     val identityKeys = domainEntries.map { record -> record.identityKey }.toSet()
     return selectionEntries

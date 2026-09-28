@@ -120,24 +120,39 @@ final class ContinueWatchingNextUpModel {
 
     /// "Remove from Continue Watching" on an Up Next card (mobile): dismissed until another episode
     /// of the series is finished — the shared progress write clears a series' dismiss keys.
-    func dismiss(_ entry: WatchProgressEntry) {
-        guard let key = dismissKeyByVideoId[entry.videoId] else { return }
-        ContinueWatchingPreferencesRepository.shared.addDismissedNextUpKey(key: key)
+    ///
+    /// CW alias fix (review): the seeds the series has under its other stored ids are dismissed
+    /// with it (`replacementDismissKeys`). The row shows one Up Next card per series, the newest
+    /// seed's; dismissing only that one let an older id's seed take its place on the next build.
+    func dismiss(_ entry: WatchProgressEntry, inProgress: [WatchProgressEntry]) {
+        var keys = replacementDismissKeys(for: entry, inProgress: inProgress)
+        if let key = dismissKeyByVideoId[entry.videoId] {
+            keys.insert(key)
+        }
+        dismiss(keys: keys)
     }
 
-    /// CW-3: the dismiss keys of the Up Next cards `contentId` could put back on the row once its
+    /// CW-3: the dismiss keys of the Up Next cards `card`'s series could put back on the row once its
     /// progress is removed — the series' latest finished episode, as the other in-progress cards
     /// leave it (its own no longer suppress it). `HomeViewModel.removeFromContinueWatching` takes
     /// them before the removal (with a provider that owns the completed history — Trakt, Simkl —
     /// the removed entries ARE the seeds, and its next refresh brings them back) and after it (the
     /// explicit episode marks that remain), then dismisses both with `dismiss(keys:)`.
-    func replacementDismissKeys(forContentId contentId: String, inProgress: [WatchProgressEntry]) -> Set<String> {
-        let others = inProgress.filter { $0.parentMetaId != contentId }
-        var keys: Set<String> = []
-        for seed in currentSeeds(inProgress: others, limit: Int32.max) where seed.contentId == contentId {
-            keys.insert(seed.dismissKey)
-        }
-        return keys
+    ///
+    /// CW alias fix (review): every seed of the series, under each of its stored ids — the card's
+    /// and the ids the row groups with it — not only the one the row keeps per series: the shared
+    /// `ContinueWatchingNextUp.seriesDismissKeys` lists them before that dedup. None for a movie
+    /// card. Never throws (an empty set when the shared call fails).
+    func replacementDismissKeys(for card: WatchProgressEntry, inProgress: [WatchProgressEntry]) -> Set<String> {
+        let live = (ContinueWatchingPreferencesRepository.shared.uiState.value_ as? ContinueWatchingPreferencesUiState) ?? prefs
+        let dismissed: Set<String> = live?.dismissedNextUpKeys ?? []
+        return ContinueWatchingNextUp.shared.seriesDismissKeys(
+            card: card,
+            watchedItems: watchedItems,
+            inProgressEntries: inProgress,
+            preferFurthestEpisode: live?.upNextFromFurthestEpisode ?? true,
+            dismissedNextUpKeys: dismissed
+        )
     }
 
     /// Dismisses these Up Next cards until another episode of their series is played.

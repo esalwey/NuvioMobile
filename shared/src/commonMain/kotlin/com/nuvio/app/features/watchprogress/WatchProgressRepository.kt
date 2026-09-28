@@ -21,6 +21,7 @@ import com.nuvio.app.features.tracking.WatchProgressSource
 import com.nuvio.app.features.tracking.effectiveWatchProgressSource
 import com.nuvio.app.features.tracking.providerId
 import com.nuvio.app.features.trakt.TraktSettingsRepository
+import com.nuvio.app.features.watched.WatchedRepository
 import com.nuvio.app.features.watching.application.WatchingActions
 import com.nuvio.app.features.watching.sync.ProgressDeltaEvent
 import com.nuvio.app.features.watching.sync.ProgressSyncRecord
@@ -56,6 +57,86 @@ private const val WATCH_PROGRESS_DELTA_OPERATION_UPSERT = "upsert"
 private const val WATCH_PROGRESS_DELTA_OPERATION_DELETE = "delete"
 private const val WATCH_PROGRESS_REMOTE_WRITE_DEDUP_WINDOW_MS = 5_000L
 internal const val WATCH_PROGRESS_BACKLOG_PUSH_LIMIT = 200
+/** Mirrors `ContinueWatchingNextUpModel.seedLimit` (Swift): the seeds a Home row build considers. */
+private const val CONTINUE_WATCHING_DIAGNOSTICS_SEED_LIMIT = 20
+private const val CONTINUE_WATCHING_SERIES_IDENTITY_WARM_UP_CONCURRENCY = 2
+
+/** How far ahead of this device's clock a server row may be dated (CW legacy #3). */
+internal const val WATCH_PROGRESS_SERVER_FUTURE_TOLERANCE_MS = 10 * 60_000L
+
+/**
+ * How many distinct server rows dated ahead of the clock make the log say this device's clock is
+ * probably the wrong one (CW legacy #3, review): then it is behind, and every row the other
+ * devices wrote in the last minutes counts as undated here.
+ */
+private const val WATCH_PROGRESS_FUTURE_ROWS_CLOCK_WARNING = 5
+
+/**
+ * [epochMs], or 0 (undated) when it is more than [WATCH_PROGRESS_SERVER_FUTURE_TOLERANCE_MS] ahead
+ * of [nowEpochMs]: a date a device with a wrong clock wrote. 0 and not [nowEpochMs]: a clamp to
+ * the clock would move forward on every read and outrank the rows written here since.
+ */
+internal fun undatedWhenAheadOfClock(epochMs: Long, nowEpochMs: Long): Long =
+    if (epochMs > nowEpochMs + WATCH_PROGRESS_SERVER_FUTURE_TOLERANCE_MS) 0L else epochMs
+
+/**
+ * CW legacy diagnosis (REMAINING_FIX #3): the date a server row gets locally. A `last_watched`
+ * more than [WATCH_PROGRESS_SERVER_FUTURE_TOLERANCE_MS] ahead of [nowEpochMs] (a device with a
+ * wrong clock wrote it) becomes 0, undated: otherwise it outranks every real row of its series,
+ * for good — the local rows written since are older than it, in the snapshot merge, in the delta
+ * decision and in the acknowledgement alike. Undated, it loses to any dated row, a dirty local
+ * row of the same key stays local and dirty (so the backlog push rewrites the account's copy),
+ * and it sorts last in Continue Watching.
+ */
+internal fun serverLastWatchedForLocalUse(lastWatched: Long, nowEpochMs: Long): Long =
+    undatedWhenAheadOfClock(epochMs = lastWatched, nowEpochMs = nowEpochMs)
+
+/**
+ * CW alias fix (review): the rows a server pull may put back locally — [entries] without the
+ * progress keys removed here whose server delete has not completed yet ([pendingDeleteKeys]).
+ * The delete waits for the pull lock, so a pull that read the account before a removal would
+ * otherwise merge the removed rows back (as synced rows, which nothing removes again until a later
+ * pull), and the card would come back on Home. A key written here again since ([dirtyProgressKeys])
+ * is a new local write, and stays.
+ */
+internal fun withoutPendingServerDeletes(
+    entries: Collection<WatchProgressEntry>,
+    pendingDeleteKeys: Set<String>,
+    dirtyProgressKeys: Set<String>,
+): List<WatchProgressEntry> =
+    if (pendingDeleteKeys.isEmpty()) {
+        entries.toList()
+    } else {
+        entries.filter { entry ->
+            val key = entry.resolvedProgressKey()
+            key !in pendingDeleteKeys || key in dirtyProgressKeys
+        }
+    }
+
+/** Where a playback write goes, by profile (CW legacy #4). */
+internal enum class PlaybackWriteProfilePath {
+    /** The loaded profile, which is the active one: the in-memory path. */
+    LOADED,
+
+    /**
+     * The active profile, while another one is loaded here: that profile is loaded first, then
+     * the write takes the in-memory path, so Home (which reads the in-memory state) sees it.
+     */
+    RELOAD_ACTIVE,
+
+    /** A profile that is not the active one: written to its stored payload only. */
+    OTHER_PROFILE,
+}
+
+internal fun playbackWriteProfilePath(
+    targetProfileId: Int,
+    loadedProfileId: Int,
+    activeProfileId: Int,
+): PlaybackWriteProfilePath = when {
+    targetProfileId != activeProfileId -> PlaybackWriteProfilePath.OTHER_PROFILE
+    targetProfileId != loadedProfileId -> PlaybackWriteProfilePath.RELOAD_ACTIVE
+    else -> PlaybackWriteProfilePath.LOADED
+}
 
 /**
  * CW sync (REMAINING_FIX #2): the rows the one-time post-pull backlog push sends — local rows whose
@@ -415,6 +496,32 @@ object WatchProgressRepository {
     /** Profiles whose dirty-row backlog was already pushed (or tried) by this process (#2). */
     private val backlogPushLock = SynchronizedObject()
     private val backlogPushedProfileIds = mutableSetOf<Int>()
+    /**
+     * CW legacy diagnosis (REMAINING_FIX #1): playback writes whose profile was not the one loaded
+     * here, or not the active one — the active one is then loaded first (`reload …`, #4), another
+     * one is written to disk only (`disk …`). Shown as `xprof` by [continueWatchingDiagnosticLines].
+     */
+    private var crossProfileWriteCount = 0
+    private var lastCrossProfileWrite = ""
+    /**
+     * CW alias fix (REMAINING_FIX #2): what the row's warm-up ([warmUpContinueWatchingSeriesIdentity])
+     * may still look up in this profile load, and the job its lookups run under — both reset, and
+     * the lookups cancelled, on every profile load and sign-out.
+     */
+    private val seriesIdentityWarmUp = SeriesIdentityWarmUpBudget()
+    private val seriesIdentityWarmUpJobLock = SynchronizedObject()
+    private var seriesIdentityWarmUpJob: Job = SupervisorJob()
+    private val seriesIdentityWarmUpPermits = Semaphore(CONTINUE_WATCHING_SERIES_IDENTITY_WARM_UP_CONCURRENCY)
+    /**
+     * CW alias fix (review): progress keys removed here whose server delete has not completed yet,
+     * by profile ([withoutPendingServerDeletes]). Guarded by [entriesLock], like the entries: a
+     * removal marks its keys in the same step as it removes them, and a pull filters and replaces
+     * in one step too.
+     */
+    private val pendingServerDeletes = mutableSetOf<Pair<Int, String>>()
+    /** CW legacy #3: the server rows undated for being ahead of the clock, logged once each. */
+    private val futureServerRowLock = SynchronizedObject()
+    private val futureServerRowKeys = mutableSetOf<String>()
 
     init {
         ensureTrackingProvidersRegistered()
@@ -448,6 +555,15 @@ object WatchProgressRepository {
         syncScope.launch {
             AddonRepository.uiState.collectLatest { state ->
                 retryMetadataResolutionWhenAddonMetaProvidersReady(state)
+            }
+        }
+
+        // CW alias fix (REMAINING_FIX #2): a learned alias regroups the Continue Watching row
+        // without touching a single entry, so the state is published again (it carries the
+        // version, see WatchProgressUiState.seriesIdentityVersion).
+        syncScope.launch {
+            ContinueWatchingSeriesIdentity.version.collect {
+                if (hasLoaded) publish()
             }
         }
 
@@ -501,11 +617,19 @@ object WatchProgressRepository {
         profileGeneration += 1L
         updateActiveSource(WatchProgressSource.NUVIO_SYNC)
         providerMetadataOverlay.clear()
+        // Sign-out: the learned series ids and the Up Next outcomes go with the account.
+        ContinueWatchingSeriesIdentity.clear()
+        ContinueWatchingNextUp.clearResolutionOutcomes()
+        resetSeriesIdentityWarmUp()
         clearLocalEntries()
+        synchronized(entriesLock) { pendingServerDeletes.clear() }
         lastSuccessfulPushEpochMs = 0L
         deltaCursorEventId = 0L
         deltaInitialized = false
         remoteWriteDeduplicator.clear()
+        crossProfileWriteCount = 0
+        lastCrossProfileWrite = ""
+        synchronized(futureServerRowLock) { futureServerRowKeys.clear() }
         // Another account's profiles reuse the same ids: they get their own backlog push.
         synchronized(backlogPushLock) { backlogPushedProfileIds.clear() }
         TrackingProviderRegistry.progressProviders().forEach(TrackingProgressProvider::clearLocalState)
@@ -520,6 +644,10 @@ object WatchProgressRepository {
         hasLoaded = true
         hasLoadedNuvioRemoteProgress = false
         providerMetadataOverlay.clear()
+        // The learned series ids stay (CW alias fix, review): they describe metadata, not the
+        // profile, and Home's Up Next cache — which taught some of them — is not reset by every
+        // load. Only this load's warm-up starts over.
+        resetSeriesIdentityWarmUp()
         clearLocalEntries()
 
         val payload = WatchProgressStorage.loadPayload(profileId).orEmpty().trim()
@@ -541,6 +669,18 @@ object WatchProgressRepository {
         }
         publish()
         resolveRemoteMetadata()
+    }
+
+    /**
+     * CW alias fix: a profile load or a sign-out gives the row's warm-up a new budget and cancels
+     * the lookups still in flight — the ones that finish anyway are dropped ([SeriesIdentityWarmUpBudget.isCurrent]).
+     */
+    private fun resetSeriesIdentityWarmUp() {
+        seriesIdentityWarmUp.reset()
+        val previousJob = synchronized(seriesIdentityWarmUpJobLock) {
+            seriesIdentityWarmUpJob.also { seriesIdentityWarmUpJob = SupervisorJob() }
+        }
+        previousJob.cancel()
     }
 
     private fun activeOperationGeneration(profileId: Int): Long? {
@@ -944,7 +1084,7 @@ object WatchProgressRepository {
             }
             newestRemoteByKey
         }
-        replaceLocalEntries(updatedEntries)
+        replaceLocalEntriesFromServer(entries = updatedEntries.values, profileId = profileId)
         acknowledgeDirtyProgressFromSnapshot(
             serverEntries = serverEntries,
             localEntriesBeforeApply = reconciliation.entries,
@@ -1014,9 +1154,10 @@ object WatchProgressRepository {
             )
             when (decision.type) {
                 WatchProgressDeltaDecisionType.UPSERT -> {
-                    upsertLocalEntry(requireNotNull(decision.updatedEntry))
-                    changed = true
-                    appliedUpserts += 1
+                    if (upsertLocalEntryFromServer(requireNotNull(decision.updatedEntry))) {
+                        changed = true
+                        appliedUpserts += 1
+                    }
                 }
                 WatchProgressDeltaDecisionType.DELETE -> {
                     if (removeLocalEntry(progressKey) != null) {
@@ -1097,8 +1238,19 @@ object WatchProgressRepository {
         else -> WatchProgressDeltaDecision(WatchProgressDeltaDecisionType.IGNORE)
     }
 
-    private fun ProgressSyncRecord.toWatchProgressEntry(cached: WatchProgressEntry?): WatchProgressEntry =
-        WatchProgressEntry(
+    /**
+     * The one converter from a server row: the snapshot merge, the delta decision and the
+     * acknowledgement all go through it, so a row dated in the future is undated for all three
+     * ([serverLastWatchedForLocalUse], CW legacy #3).
+     */
+    private fun ProgressSyncRecord.toWatchProgressEntry(cached: WatchProgressEntry?): WatchProgressEntry {
+        val progressKey = resolvedProgressKey()
+        val nowEpochMs = WatchProgressClock.nowEpochMs()
+        val lastUpdatedEpochMs = serverLastWatchedForLocalUse(lastWatched = lastWatched, nowEpochMs = nowEpochMs)
+        if (lastUpdatedEpochMs != lastWatched) {
+            noteFutureServerRow(progressKey = progressKey, aheadMs = lastWatched - nowEpochMs)
+        }
+        return WatchProgressEntry(
             contentType = contentType,
             parentMetaId = contentId,
             parentMetaType = cached?.parentMetaType ?: contentType,
@@ -1113,7 +1265,7 @@ object WatchProgressRepository {
             episodeThumbnail = cached?.episodeThumbnail,
             lastPositionMs = position,
             durationMs = duration,
-            lastUpdatedEpochMs = lastWatched,
+            lastUpdatedEpochMs = lastUpdatedEpochMs,
             providerName = cached?.providerName,
             providerAddonId = cached?.providerAddonId,
             lastStreamTitle = cached?.lastStreamTitle,
@@ -1121,8 +1273,29 @@ object WatchProgressRepository {
             pauseDescription = cached?.pauseDescription,
             lastSourceUrl = cached?.lastSourceUrl,
             isCompleted = isWatchProgressComplete(position, duration, false),
-            progressKey = resolvedProgressKey(),
+            progressKey = progressKey,
         )
+    }
+
+    /** Logs a future-dated server row once per key, and counts it for the diagnostics (`fut=`). */
+    private fun noteFutureServerRow(progressKey: String, aheadMs: Long) {
+        val count = synchronized(futureServerRowLock) {
+            if (futureServerRowKeys.add(progressKey)) futureServerRowKeys.size else 0
+        }
+        if (count == 0) return
+        log.w {
+            "Server watch progress $progressKey is dated ${aheadMs / 60_000L} min ahead of this device; " +
+                "it counts as undated here"
+        }
+        if (count == WATCH_PROGRESS_FUTURE_ROWS_CLOCK_WARNING) {
+            log.w {
+                "$count server watch progress rows are dated ahead of this device: its clock is probably " +
+                    "behind, and the rows the other devices wrote lately count as undated here"
+            }
+        }
+    }
+
+    private fun futureServerRowCount(): Int = synchronized(futureServerRowLock) { futureServerRowKeys.size }
 
     private fun ProgressDeltaEvent.toProgressSyncRecord(): ProgressSyncRecord =
         ProgressSyncRecord(
@@ -1267,6 +1440,8 @@ object WatchProgressRepository {
                     if (meta == null) {
                         return@repeat
                     }
+                    // CW alias fix: the series meta names the IMDb id these rows are grouped under.
+                    ContinueWatchingSeriesIdentity.record(requestedId = result.key.metaId, meta = meta)
 
                     // Rows backed by local storage keep the shipped path: enrich in place and
                     // persist. Rows that exist only inside a provider projection are read-only, so
@@ -1413,6 +1588,7 @@ object WatchProgressRepository {
         val removedEntries = removeLocalEntriesForVideoIds(
             videoIds = videoIds,
             parentMetaId = parentMetaId,
+            pendingDeleteProfileId = currentProfileId.takeIf { activeSource.providerId == null },
         )
         if (removedEntries.isNotEmpty()) {
             publish()
@@ -1439,6 +1615,55 @@ object WatchProgressRepository {
                 true
             }
         }
+        removeProgressEntries(entriesToRemove)
+    }
+
+    /**
+     * CW alias fix (REMAINING_FIX #2): every stored id a Continue Watching card stands for — the
+     * card's own, then, for a series, its other ids ([ContinueWatchingSeriesIdentity]): the ids
+     * "Remove from Continue Watching" passes to [removeContinueWatchingProgress].
+     *
+     * Called from the Swift main thread, so it never throws (it falls back to the card's own id).
+     */
+    fun continueWatchingCardContentIds(card: WatchProgressEntry): List<String> = try {
+        ensureLoaded()
+        continueWatchingSeriesContentIds(
+            entries = currentEntries(),
+            card = card,
+            canonicalSeriesId = ContinueWatchingSeriesIdentity::canonical,
+            isConfirmedAlias = ContinueWatchingSeriesIdentity::isConfirmed,
+            onAliasLeftOut = { alias ->
+                log.i {
+                    "Remove from Continue Watching keeps $alias with ${card.parentMetaId}: only an add-on's " +
+                        "imdb_id groups them, and their titles differ"
+                }
+            },
+        )
+    } catch (error: Throwable) {
+        log.e(error) { "Failed to list the ids of the Continue Watching card ${card.parentMetaId}" }
+        listOf(card.parentMetaId.trim()).filter(String::isNotEmpty)
+    }
+
+    /**
+     * CW alias fix (REMAINING_FIX #2): removes every progress row of [contentIds] (all the ids of
+     * one series, [continueWatchingCardContentIds]) in one go — one publish, and with Nuvio Sync one
+     * delete on the account covering every alias row, the ones the post-pull backlog push may have
+     * sent there included. The same removal as [removeProgress] for a whole title otherwise.
+     *
+     * Called from the Swift main thread, so it never throws.
+     */
+    fun removeContinueWatchingProgress(contentIds: List<String>) {
+        try {
+            ensureLoaded()
+            val ids = contentIds.map(String::trim).filterTo(mutableSetOf(), String::isNotEmpty)
+            if (ids.isEmpty()) return
+            removeProgressEntries(currentEntries().filter { entry -> entry.parentMetaId.trim() in ids })
+        } catch (error: Throwable) {
+            log.e(error) { "Failed to remove Continue Watching progress for $contentIds" }
+        }
+    }
+
+    private fun removeProgressEntries(entriesToRemove: List<WatchProgressEntry>) {
         if (entriesToRemove.isEmpty()) return
 
         activeProgressProvider()?.let { provider ->
@@ -1452,9 +1677,10 @@ object WatchProgressRepository {
             return
         }
 
-        entriesToRemove.forEach { entry ->
-            removeLocalEntry(entry.resolvedProgressKey())
-        }
+        removeLocalEntriesForServerDelete(
+            progressKeys = entriesToRemove.map(WatchProgressEntry::resolvedProgressKey),
+            pendingDeleteProfileId = currentProfileId.takeIf { activeSource.providerId == null },
+        )
         publish()
         persist()
         pushDeleteToServer(entriesToRemove)
@@ -1500,11 +1726,141 @@ object WatchProgressRepository {
             daysCap = TraktSettingsRepository.uiState.value.continueWatchingDaysCap,
             nowEpochMs = WatchProgressClock.nowEpochMs(),
         )
-        return buildContinueWatchingRowEntries(
+        val row = buildContinueWatchingRowEntries(
             entries = currentEntries(),
             isDroppedShow = ::isDroppedShow,
             recencyCutoffEpochMs = cutoffEpochMs,
             limit = limit,
+        )
+        warmUpContinueWatchingSeriesIdentity(row)
+        return row
+    }
+
+    /**
+     * CW alias fix (REMAINING_FIX #2): looks up, in the background, the IMDb id of the row's series
+     * cards stored under a `tmdb:` id ([selectSeriesIdentityWarmUpKeys]), so the row can group them
+     * with their `tt` rows. Rows whose metadata is complete are never enriched, so nothing else
+     * would ever fetch their series. [MetaDetailsRepository]'s cache first; a learned id
+     * republishes the state (see the collector in `init`), and the next build shows one card.
+     *
+     * The row is rebuilt on every playback tick and publish, so what one profile load may look up
+     * is bounded by [SeriesIdentityWarmUpBudget] (review): at most
+     * [ContinueWatchingSeriesIdentityWarmUpLimit] series, most recent first, and a lookup that
+     * fetched nothing is tried again a few minutes later, a few times. The lookups run under
+     * [seriesIdentityWarmUpJob], which a profile load or a sign-out cancels.
+     *
+     * Like the metadata enrichment, it leaves out the rows a display-ready provider (Trakt) can
+     * represent: that is network the shipped build never issued. Runs on the Swift main thread's
+     * call to [continueWatchingRow], so it never throws.
+     */
+    private fun warmUpContinueWatchingSeriesIdentity(rowEntries: List<WatchProgressEntry>) {
+        try {
+            val displayReadyProvider = activeProgressProvider()
+                ?.takeIf(TrackingProgressProvider::providesCompleteMetadata)
+            val candidates = selectSeriesIdentityWarmUpKeys(
+                rowEntries = rowEntries.filter { entry ->
+                    displayReadyProvider?.canRepresentContentId(entry.parentMetaId) != true
+                },
+                isResolved = ContinueWatchingSeriesIdentity::isResolved,
+            )
+            if (candidates.isEmpty()) return
+            val claim = seriesIdentityWarmUp.claim(
+                candidates = candidates.map(WatchProgressMetadataKey::metaId),
+                nowEpochMs = WatchProgressClock.nowEpochMs(),
+            )
+            if (claim.ids.isEmpty()) return
+            val claimedIds = claim.ids.toSet()
+            val job = synchronized(seriesIdentityWarmUpJobLock) { seriesIdentityWarmUpJob }
+            candidates
+                .filter { key -> key.metaId.trim() in claimedIds }
+                .distinctBy { key -> key.metaId.trim() }
+                .forEach { key ->
+                    syncScope.launch(job) {
+                        seriesIdentityWarmUpPermits.withPermit {
+                            if (!seriesIdentityWarmUp.isCurrent(claim.generation)) return@withPermit
+                            val meta = try {
+                                MetaDetailsRepository.fetch(type = key.metaType, id = key.metaId)
+                            } catch (error: CancellationException) {
+                                throw error
+                            } catch (error: Throwable) {
+                                null
+                            }
+                            // A profile loaded meanwhile: this lookup belongs to the previous one.
+                            if (!seriesIdentityWarmUp.isCurrent(claim.generation)) return@withPermit
+                            if (meta != null) {
+                                ContinueWatchingSeriesIdentity.record(requestedId = key.metaId, meta = meta)
+                            }
+                            seriesIdentityWarmUp.finish(
+                                generation = claim.generation,
+                                id = key.metaId,
+                                fetched = meta != null,
+                                nowEpochMs = WatchProgressClock.nowEpochMs(),
+                            )
+                        }
+                    }
+                }
+        } catch (error: Throwable) {
+            log.w { "Continue Watching series id warm-up skipped: ${error.message}" }
+        }
+    }
+
+    /**
+     * CW legacy diagnosis (REMAINING_FIX #1): the Continue Watching report of Settings > About
+     * ([buildContinueWatchingDiagnosticLines]), taken now: the in-progress cards Home shows, the
+     * series of its Up Next cards and the rows behind them.
+     *
+     * Called from the Swift main thread, so it never throws: a failure becomes the report's only line.
+     */
+    fun continueWatchingDiagnosticLines(): List<String> = try {
+        ensureLoaded()
+        val nowEpochMs = WatchProgressClock.nowEpochMs()
+        val localEntries = localEntriesSnapshot()
+        val dirtyKeys = dirtyProgressKeysSnapshot()
+        val rowEntries = continueWatchingRow()
+        val seeds = try {
+            continueWatchingNextUpSeedsForDiagnostics(rowEntries)
+        } catch (error: Throwable) {
+            log.w { "Continue Watching diagnostics: no Up Next seeds (${error.message})" }
+            emptyList()
+        }
+        buildContinueWatchingDiagnosticLines(
+            // Two short header lines: one long line loses its middle on the TV (review).
+            header = buildList {
+                add(
+                    "cur=$currentProfileId act=${ProfileRepository.activeProfileId} src=$activeSource " +
+                        "remote=$hasLoadedNuvioRemoteProgress deltaInit=$deltaInitialized",
+                )
+                add(
+                    "n=${localEntries.size} dirty=${dirtyKeys.size} xprof=$crossProfileWriteCount " +
+                        "map=${ContinueWatchingSeriesIdentity.aliasCount()} wu=${seriesIdentityWarmUp.claimedCount()} " +
+                        "fut=${futureServerRowCount()}",
+                )
+                if (lastCrossProfileWrite.isNotEmpty()) add("xprof last $lastCrossProfileWrite")
+            },
+            entries = currentEntries(),
+            dirtyKeys = dirtyKeys,
+            rowEntries = rowEntries,
+            nowEpochMs = nowEpochMs,
+            nextUpSeeds = seeds,
+            nextUpOutcomes = ContinueWatchingNextUp.resolutionOutcomes(),
+            canonicalSeriesId = ContinueWatchingSeriesIdentity::canonical,
+        )
+    } catch (error: Throwable) {
+        log.e(error) { "Continue Watching diagnostics failed" }
+        listOf("Continue Watching diagnostics failed: ${error::class.simpleName}: ${error.message.orEmpty()}")
+    }
+
+    /** The Up Next seeds Home resolves its cards from, as `ContinueWatchingNextUpModel` asks for them. */
+    private fun continueWatchingNextUpSeedsForDiagnostics(
+        rowEntries: List<WatchProgressEntry>,
+    ): List<ContinueWatchingNextUpSeed> {
+        val preferences = ContinueWatchingPreferencesRepository.uiState.value
+        return ContinueWatchingNextUp.seeds(
+            watchedItems = WatchedRepository.uiState.value.items,
+            inProgressEntries = rowEntries,
+            preferFurthestEpisode = preferences.upNextFromFurthestEpisode,
+            dismissedNextUpKeys = preferences.dismissedNextUpKeys,
+            limit = CONTINUE_WATCHING_DIAGNOSTICS_SEED_LIMIT,
         )
     }
 
@@ -1532,6 +1888,7 @@ object WatchProgressRepository {
         snapshot: PlayerPlaybackSnapshot,
         persist: Boolean,
         syncRemote: Boolean,
+        allowProfileReload: Boolean = true,
     ) {
         val targetProfileId = session.profileId
         val positionMs = snapshot.positionMs.coerceAtLeast(0L)
@@ -1580,29 +1937,41 @@ object WatchProgressRepository {
             isCompleted = isCompleted,
         ).normalizedCompletion()
 
-        if (targetProfileId != currentProfileId || ProfileRepository.activeProfileId != targetProfileId) {
-            val resolvedEntry = resolveStoredProfileProgressIdentity(
-                profileId = targetProfileId,
-                entry = candidateEntry,
-            )
+        val activeProfileId = ProfileRepository.activeProfileId
+        val profilePath = playbackWriteProfilePath(
+            targetProfileId = targetProfileId,
+            loadedProfileId = currentProfileId,
+            activeProfileId = activeProfileId,
+        )
+        if (profilePath != PlaybackWriteProfilePath.LOADED) {
+            val detail = "target=$targetProfileId current=$currentProfileId active=$activeProfileId"
+            // CW legacy #4: a write for the active profile while another one is loaded here only
+            // reached the disk, and Home — which reads the loaded state — never saw it. The active
+            // profile is switched to instead, as its selection does (its source, tracking settings
+            // and providers too), and the write starts over on its in-memory path: the provider
+            // and parent id above belong to the profile that was loaded.
             if (
-                syncRemote &&
-                !remoteWriteDeduplicator.shouldSend(
-                    profileId = targetProfileId,
-                    entry = resolvedEntry,
-                    nowEpochMs = candidateEntry.lastUpdatedEpochMs,
-                )
+                profilePath == PlaybackWriteProfilePath.RELOAD_ACTIVE &&
+                allowProfileReload &&
+                reloadActiveProfileForWrite(targetProfileId)
             ) {
+                recordCrossProfileWrite("reload $detail")
+                upsert(
+                    session = session,
+                    snapshot = snapshot,
+                    persist = persist,
+                    syncRemote = syncRemote,
+                    allowProfileReload = false,
+                )
                 return
             }
-            val entry = if (persist) {
-                upsertStoredProfileProgress(profileId = targetProfileId, entry = resolvedEntry)
-            } else {
-                resolvedEntry
-            }
-            if (syncRemote) {
-                pushScrobbleToServer(entry = entry, profileId = targetProfileId)
-            }
+            recordCrossProfileWrite("disk $detail")
+            writeStoredProfileProgress(
+                profileId = targetProfileId,
+                candidateEntry = candidateEntry,
+                persist = persist,
+                syncRemote = syncRemote,
+            )
             return
         }
 
@@ -1643,6 +2012,69 @@ object WatchProgressRepository {
         ) {
             WatchingActions.onProgressEntryUpdated(entry, syncRemote = syncRemote)
         }
+    }
+
+    /**
+     * CW legacy #4: switches to the active profile [profileId] for a playback write made while
+     * another profile is loaded here — the profile selection normally does it first (nothing known
+     * skips it, the diagnostics count it as `xprof`). The whole switch, as [onProfileChanged] does
+     * it for the selection (review): the profile's source, tracking settings and providers along
+     * with its entries — a bare load would leave them on the other profile, and the selection's
+     * own [onProfileChanged] would then find the profile loaded and switch nothing. The account
+     * pull follows the profile selection as usual (`WatchProgressSourceCoordinator`).
+     *
+     * Never throws into the Swift caller: false when the switch fails, and the write then only
+     * goes to disk, as before.
+     */
+    private fun reloadActiveProfileForWrite(profileId: Int): Boolean = try {
+        onProfileChanged(profileId)
+        hasLoaded && currentProfileId == profileId
+    } catch (error: Throwable) {
+        log.e(error) { "Failed to load profile $profileId for a playback write; it only goes to disk" }
+        false
+    }
+
+    /** A playback write for a profile that is not the loaded one: its stored payload only. */
+    private fun writeStoredProfileProgress(
+        profileId: Int,
+        candidateEntry: WatchProgressEntry,
+        persist: Boolean,
+        syncRemote: Boolean,
+    ) {
+        val resolvedEntry = resolveStoredProfileProgressIdentity(
+            profileId = profileId,
+            entry = candidateEntry,
+        )
+        if (
+            syncRemote &&
+            !remoteWriteDeduplicator.shouldSend(
+                profileId = profileId,
+                entry = resolvedEntry,
+                nowEpochMs = candidateEntry.lastUpdatedEpochMs,
+            )
+        ) {
+            return
+        }
+        val entry = if (persist) {
+            upsertStoredProfileProgress(profileId = profileId, entry = resolvedEntry)
+        } else {
+            resolvedEntry
+        }
+        if (syncRemote) {
+            pushScrobbleToServer(entry = entry, profileId = profileId)
+        }
+    }
+
+    /**
+     * CW legacy diagnosis (REMAINING_FIX #1): counts a playback write made for another profile than
+     * the loaded or the active one ([PlaybackWriteProfilePath]). Playback saves every 5 s, so the
+     * warning is only logged when the profiles involved change.
+     */
+    private fun recordCrossProfileWrite(detail: String) {
+        crossProfileWriteCount += 1
+        if (detail == lastCrossProfileWrite) return
+        lastCrossProfileWrite = detail
+        log.w { "Watch progress write outside the loaded profile: $detail" }
     }
 
     private fun upsertStoredProfileProgress(
@@ -1802,16 +2234,52 @@ object WatchProgressRepository {
         }
     }
 
+    /**
+     * The delete waits for [nuvioPullMutex] (CW alias fix): the one-time backlog push picks and
+     * sends its rows under it, so a removal made while that push is in flight — which may carry
+     * the rows just removed, alias rows included — reaches the account after it, and the removed
+     * rows stay removed. A pull in flight is waited for the same way; until the delete is done,
+     * the removed keys are pending ([pendingServerDeletes]), and no pull puts their rows back.
+     *
+     * A key written here again meanwhile (the episode played again) is no longer removed: the
+     * delete leaves it out, so it cannot erase the new progress on the account.
+     */
     private fun pushDeleteToServer(entries: Collection<WatchProgressEntry>) {
-        if (activeSource.providerId != null) return
         val profileId = currentProfileId
+        val keys = entries.mapTo(mutableSetOf(), WatchProgressEntry::resolvedProgressKey)
+        if (activeSource.providerId != null) {
+            clearPendingServerDeletes(profileId, keys)
+            return
+        }
         accountScopeSnapshot().launch {
-            runCatching {
-                if (entries.isEmpty()) return@runCatching
-                syncAdapter.delete(profileId = profileId, entries = entries)
-            }.onFailure { e ->
-                log.e(e) { "Failed to push watch progress delete" }
+            try {
+                if (entries.isEmpty()) return@launch
+                nuvioPullMutex.withLock {
+                    val stillRemoved = if (profileId == currentProfileId) {
+                        entries.filter { entry -> localEntry(entry.resolvedProgressKey()) == null }
+                    } else {
+                        entries.toList()
+                    }
+                    if (stillRemoved.isNotEmpty()) {
+                        syncAdapter.delete(profileId = profileId, entries = stillRemoved)
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                log.e(error) { "Failed to push watch progress delete" }
+            } finally {
+                // Done either way: after a failure the account still holds the rows, and the next
+                // pull may show them again.
+                clearPendingServerDeletes(profileId, keys)
             }
+        }
+    }
+
+    private fun clearPendingServerDeletes(profileId: Int, progressKeys: Collection<String>) {
+        if (progressKeys.isEmpty()) return
+        synchronized(entriesLock) {
+            progressKeys.forEach { key -> pendingServerDeletes.remove(profileId to key) }
         }
     }
 
@@ -1825,6 +2293,7 @@ object WatchProgressRepository {
             entries = sortedEntries,
             providerSnapshot = providerSnapshot,
             hasLoadedNuvioRemoteProgress = hasLoadedNuvioRemoteProgress,
+            seriesIdentityVersion = ContinueWatchingSeriesIdentity.version.value,
         )
     }
 
@@ -2078,9 +2547,19 @@ object WatchProgressRepository {
         }
     }
 
-    private fun replaceLocalEntries(entries: Map<String, WatchProgressEntry>) {
+    /**
+     * A snapshot pull's result: [entries] replace the local ones, without the rows of keys whose
+     * removal here has not reached the account yet ([withoutPendingServerDeletes]), in one step with
+     * the replacement — a removal can never land between the check and the write.
+     */
+    private fun replaceLocalEntriesFromServer(entries: Collection<WatchProgressEntry>, profileId: Int) {
         synchronized(entriesLock) {
-            entriesByProgressKey = entries.values.newestByProgressKey().toMutableMap()
+            val pendingKeys = pendingServerDeleteKeysLocked(profileId)
+            entriesByProgressKey = withoutPendingServerDeletes(
+                entries = entries,
+                pendingDeleteKeys = pendingKeys,
+                dirtyProgressKeys = dirtyProgressKeys,
+            ).newestByProgressKey().toMutableMap()
         }
     }
 
@@ -2091,15 +2570,61 @@ object WatchProgressRepository {
         }
     }
 
+    /**
+     * A delta pull's upsert of [entry]: skipped (false) while its key's removal here has not reached
+     * the account and nothing was written under it since — the same rule as the snapshot's
+     * ([replaceLocalEntriesFromServer]).
+     */
+    private fun upsertLocalEntryFromServer(entry: WatchProgressEntry): Boolean =
+        synchronized(entriesLock) {
+            val resolvedEntry = entry.withResolvedProgressKey()
+            val key = resolvedEntry.resolvedProgressKey()
+            if (key !in entriesByProgressKey && key in pendingServerDeleteKeysLocked(currentProfileId)) {
+                return@synchronized false
+            }
+            entriesByProgressKey[key] = resolvedEntry
+            true
+        }
+
+    /** Call with [entriesLock] held. */
+    private fun pendingServerDeleteKeysLocked(profileId: Int): Set<String> =
+        if (pendingServerDeletes.isEmpty()) {
+            emptySet()
+        } else {
+            pendingServerDeletes.mapNotNullTo(mutableSetOf()) { (pendingProfileId, key) ->
+                key.takeIf { pendingProfileId == profileId }
+            }
+        }
+
     private fun removeLocalEntry(progressKey: String): WatchProgressEntry? =
         synchronized(entriesLock) {
             dirtyProgressKeys -= progressKey
             entriesByProgressKey.remove(progressKey)
         }
 
+    /**
+     * Removes [progressKeys] for a removal whose server delete follows ([pushDeleteToServer]): with
+     * [pendingDeleteProfileId] (Nuvio Sync is the source), the keys are pending until it is done,
+     * marked in the same step as they are removed.
+     */
+    private fun removeLocalEntriesForServerDelete(
+        progressKeys: Collection<String>,
+        pendingDeleteProfileId: Int?,
+    ): List<WatchProgressEntry> =
+        synchronized(entriesLock) {
+            if (pendingDeleteProfileId != null) {
+                progressKeys.forEach { key -> pendingServerDeletes += pendingDeleteProfileId to key }
+            }
+            progressKeys.mapNotNull { key ->
+                dirtyProgressKeys -= key
+                entriesByProgressKey.remove(key)
+            }
+        }
+
     private fun removeLocalEntriesForVideoIds(
         videoIds: Collection<String>,
         parentMetaId: String?,
+        pendingDeleteProfileId: Int? = null,
     ): List<WatchProgressEntry> =
         synchronized(entriesLock) {
             if (videoIds.isEmpty()) return@synchronized emptyList()
@@ -2111,6 +2636,9 @@ object WatchProgressRepository {
                 }
                 .keys
                 .toList()
+            if (pendingDeleteProfileId != null) {
+                keysToRemove.forEach { key -> pendingServerDeletes += pendingDeleteProfileId to key }
+            }
             dirtyProgressKeys.removeAll(keysToRemove.toSet())
             keysToRemove.mapNotNull(entriesByProgressKey::remove)
         }

@@ -41,16 +41,22 @@ fun resumeProgressForSeries(
     .maxWithOrNull(watchingProgressRecencyComparator)
     ?.takeUnless { record -> record.isCompleted }
 
+/**
+ * [seriesKey] groups the series records (CW alias fix, REMAINING_FIX #2): the tvOS row passes the
+ * canonical IMDb id, so one show stored under two ids makes one card. The default, the trimmed
+ * stored id, is the grouping every other caller had.
+ */
 fun continueWatchingProgressEntries(
     progressRecords: List<WatchingProgressRecord>,
     limit: Int = DefaultContinueWatchingLimit,
+    seriesKey: (WatchingProgressRecord) -> String = { record -> record.content.id.trim() },
 ): List<WatchingProgressRecord> {
     val (seriesEntries, nonSeriesEntries) = progressRecords.partition { record ->
         record.content.type.isSeriesLikeWatchingContentType() ||
             (record.seasonNumber != null && record.episodeNumber != null)
     }
     val latestPerSeries = seriesEntries
-        .groupBy { record -> record.content.id.trim() }
+        .groupBy(seriesKey)
         .values
         .mapNotNull { entries -> entries.maxWithOrNull(watchingProgressRecencyComparator) }
 
