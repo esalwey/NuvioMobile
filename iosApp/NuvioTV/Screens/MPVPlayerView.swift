@@ -142,6 +142,13 @@ final class MPVTVPlayerViewController: UIViewController {
     /// out before it returns, the late completion must not start a scrobble that nothing will ever
     /// stop (ME-004).
     private var traktSessionClosed = false
+    /// PLY-6: the file loaded, but its duration only reaches `state` on the next refresh tick — the
+    /// Trakt start waits for that tick, so the placeholder-clip guard and the start percentage both
+    /// see the real duration instead of 0.
+    private var traktStartPending = false
+    /// Where the FILE_LOADED resume seek lands. The Trakt start reports it while that seek is still
+    /// in flight (a resumed episode used to open its scrobble at 0 %).
+    private var resumeTargetSec: Double?
     private var skipSegments: [SkipSegment] = []
     /// Last raw eof-reached value (edge detection for the post-play cover).
     private var lastEofFlag = false
@@ -739,7 +746,8 @@ final class MPVTVPlayerViewController: UIViewController {
         applySubtitleStyle()
         applyDisplayCriteriaIfEnabled()
         fetchSkipSegments()
-        startTraktScrobble()
+        // Started by the first refresh tick that knows the duration (PLY-6).
+        traktStartPending = true
     }
 
     // MARK: - Match content frame rate (AVDisplayManager)
@@ -818,9 +826,10 @@ final class MPVTVPlayerViewController: UIViewController {
 
     // MARK: - Trakt scrobbling
     //
-    // Simplified vs. mobile: scrobble "start" once when the file loads, "stop" once with the final
-    // progress when the player goes away (Trakt marks the item watched at >= 80%). The shared repo
-    // resolves IMDB/TMDB ids itself and silently no-ops when Trakt isn't connected.
+    // Simplified vs. mobile: scrobble "start" once the file has loaded and its duration is known
+    // (PLY-6), "stop" once with the final progress when the player goes away (Trakt marks the item
+    // watched at >= 80%). The shared repo resolves IMDB/TMDB ids itself and silently no-ops when
+    // Trakt isn't connected.
 
     private func startTraktScrobble() {
         guard !traktScrobbleRequested else { return }
@@ -845,8 +854,9 @@ final class MPVTVPlayerViewController: UIViewController {
                 TraktScrobbleRepository.shared.scrobbleStart(
                     profileId: ActiveProfileProvider.shared.activeProfileId,
                     item: item,
-                    progressPercent: self.currentProgressPercent()
+                    progressPercent: self.traktStartPercent()
                 ) { _ in }
+                self.resumeTargetSec = nil
             }
         }
     }
@@ -871,6 +881,16 @@ final class MPVTVPlayerViewController: UIViewController {
         let duration = state.durationSec
         guard duration > 0 else { return 0 }
         return Float(min(100, max(0, state.positionSec / duration * 100)))
+    }
+
+    /// The scrobble start's percentage: the playhead — or where the resume seek lands, while that
+    /// seek is still in flight and the playhead still reads the start of the file.
+    private func traktStartPercent() -> Float {
+        let duration = state.durationSec
+        guard duration > 0 else { return 0 }
+        var position = state.positionSec
+        if let target = resumeTargetSec, position + 5 < target { position = target }
+        return Float(min(100, max(0, position / duration * 100)))
     }
 
     // MARK: - Subtitle appearance (mirrors the mobile libmpv mapping)
@@ -1187,6 +1207,12 @@ final class MPVTVPlayerViewController: UIViewController {
         state.isPaused = snap.paused
         state.isBuffering = snap.cacheWait || (snap.coreIdle && !snap.paused)
 
+        // PLY-6: the first tick that knows the duration opens the Trakt session.
+        if traktStartPending, snap.duration > 0 {
+            traktStartPending = false
+            startTraktScrobble()
+        }
+
         // Rising-edge detection: eof-reached STAYS true while keep-open holds the last frame, so
         // only propagate transitions — otherwise a dismissed end screen re-presents each tick.
         if snap.eof != lastEofFlag {
@@ -1393,6 +1419,8 @@ final class MPVTVPlayerViewController: UIViewController {
         traktSessionClosed = false
         traktScrobbleRequested = false
         traktScrobbleItem = nil
+        traktStartPending = false
+        resumeTargetSec = nil
         startTraktScrobble()
         flashControls()
         becomeFirstResponder()
@@ -1536,6 +1564,7 @@ final class MPVTVPlayerViewController: UIViewController {
         // PLY-5: through `eventQueue` like every other seek. This runs at FILE_LOADED, the core's
         // busiest moment — a synchronous `mpv_command` here parked the main thread on the core lock
         // (the BUG-2/BUG-3 rule above `PropSnapshot`).
+        resumeTargetSec = seconds
         seekAbsolute(seconds)
     }
 
