@@ -9902,6 +9902,16 @@
         }
       }
     },
+    "Go to Details": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Voir la fiche"
+          }
+        }
+      }
+    },
     "Go to Movie": {
       "localizations": {
         "de": {
@@ -26504,6 +26514,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Thay đổi chưa được lưu."
+          }
+        }
+      }
+    },
+    "Up Next": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "À suivre"
           }
         }
       }
