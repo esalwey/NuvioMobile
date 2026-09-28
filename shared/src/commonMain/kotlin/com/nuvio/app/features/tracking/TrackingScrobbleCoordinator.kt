@@ -1,6 +1,7 @@
 package com.nuvio.app.features.tracking
 
 import co.touchlab.kermit.Logger
+import com.nuvio.app.core.tracking.ensureTrackingProvidersRegistered
 import com.nuvio.app.features.profiles.ProfileRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -110,6 +111,9 @@ object TrackingScrobbleCoordinator {
     ) {
         try {
             if (profileId != ProfileRepository.activeProfileId) return
+            // Idempotent: Simkl's scrobbler registers itself on first access, which must not depend
+            // on some other repository having touched it first.
+            ensureTrackingProvidersRegistered()
             TrackingProviderRegistry.ensureLoaded()
             val scrobblers = otherTrackerScrobblers(TrackingProviderRegistry.connectedScrobblers())
             if (scrobblers.isEmpty()) return
