@@ -76,6 +76,17 @@ struct ContentView: View {
     @State private var deepLinkDetailAfterResume: MetaPreview?
     @Environment(\.scenePhase) private var scenePhase
 
+    /// Upstream 519510591 + 6761ebabb: the picker's way back into the profile the app is running
+    /// (nil at the launch gate). No PIN, no fan-out, no pull — the repositories still hold it.
+    private var returnToRunningProfile: (() -> Void)? {
+        guard switchingProfile else { return nil }
+        return {
+            switchingProfile = false
+            profiles.resumeSessionProfile()
+            entered = true
+        }
+    }
+
     var body: some View {
         Group {
             switch auth.gate {
@@ -114,11 +125,7 @@ struct ContentView: View {
                     ProfileSelectionView(
                         model: profiles,
                         onSelected: { switchingProfile = false; appTheme.reseedNow(); entered = true },
-                        onReturnToApp: switchingProfile ? {
-                            switchingProfile = false
-                            profiles.resumeSessionProfile()
-                            entered = true
-                        } : nil
+                        onReturnToApp: returnToRunningProfile
                     )
                 }
             }
