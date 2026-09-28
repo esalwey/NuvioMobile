@@ -1273,10 +1273,8 @@ struct DetailView: View {
                     .foregroundStyle(Theme.Palette.textSecondary)
             }
             if let overview, !overview.isEmpty {
-                Text(overview)
-                    .font(Theme.Font.body)
-                    .frame(maxWidth: 1100, alignment: .leading)
-                    .foregroundStyle(Theme.Palette.textPrimary)
+                // AES-10: four lines, with a More / Less pill only when it overflows.
+                DetailOverview(text: overview)
             }
             infoSection
         }
