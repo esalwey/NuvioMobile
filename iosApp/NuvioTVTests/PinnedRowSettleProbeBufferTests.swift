@@ -169,4 +169,18 @@ final class PinnedRowSettleProbeBufferTests: XCTestCase {
         XCTAssertEqual(fivePages.count, 1, "5 lines at 5 per page must produce exactly 1 page")
         XCTAssertEqual(fivePages.first, Array(five.reversed()), "the single page must hold every line, newest first")
     }
+
+    /// CW legacy #1: `PinnedRowSettleProbe.pages(_:linesPerPage:)` is `displayPages` without the
+    /// newest-first reordering — the Continue Watching diagnostics are one snapshot whose header
+    /// must stay first on page 1. Pure, like the test above.
+    func testPagesChunksInTheGivenOrder() {
+        let twelve = (1...12).map { "c\($0)" }
+
+        let pages = PinnedRowSettleProbe.pages(twelve)
+
+        XCTAssertEqual(pages, [Array(twelve[0..<5]), Array(twelve[5..<10]), Array(twelve[10..<12])])
+        XCTAssertEqual(PinnedRowSettleProbe.pages([]), [], "no lines must produce no pages")
+        XCTAssertEqual(PinnedRowSettleProbe.pages(twelve, linesPerPage: 0), [], "a zero page size must not trap")
+        XCTAssertEqual(PinnedRowSettleProbe.displayPages(twelve).flatMap { $0 }, PinnedRowSettleProbe.displayOrder(twelve))
+    }
 }
