@@ -2751,6 +2751,16 @@
         }
       }
     },
+    "Add-on": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Addon"
+          }
+        }
+      }
+    },
     "Add-ons": {
       "localizations": {
         "de": {
@@ -6314,6 +6324,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Không cài được: %@"
+          }
+        }
+      }
+    },
+    "Couldn't load the manifest: %@": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Impossible de charger le manifeste : %@"
           }
         }
       }
@@ -25121,6 +25141,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Hồ sơ này đã bị khóa."
+          }
+        }
+      }
+    },
+    "This profile uses the add-ons of %@. To install, remove or turn off an add-on, switch to %@.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ce profil utilise les addons de %@. Pour installer, supprimer ou désactiver un addon, passez sur %@."
+          }
+        }
+      }
+    },
+    "This profile uses the main profile’s add-ons. To install, remove or turn off an add-on, switch to the main profile.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ce profil utilise les addons du profil principal. Pour installer, supprimer ou désactiver un addon, passez sur le profil principal."
           }
         }
       }

@@ -425,6 +425,11 @@ object AddonRepository {
             addonListKnown = addonListKnown ?: AddonStorage.hasStoredInstalledAddonUrls(currentProfileId),
         )
 
+    /// ADD-2: whether the active profile is a secondary profile set to use the primary profile's
+    /// add-ons. Install, remove, move and enable/disable are no-ops then (install reports it, the
+    /// others return silently), so the Add-ons screen reads this to explain and lock its controls.
+    fun isManagedByPrimaryProfile(): Boolean = isUsingPrimaryAddonsFromSecondaryProfile()
+
     private fun pushToServer() {
         if (isUsingPrimaryAddonsFromSecondaryProfile()) return
         if (shouldBlockUnhydratedAddonPush(AuthRepository.state.value, pulledFromServer)) {
