@@ -7,6 +7,8 @@ data class MetaDetails(
     val id: String,
     val type: String,
     val name: String,
+    /** Upstream 90054b7b9: the addon's own `imdb_id`, the enrichment fallback for non-IMDB ids. */
+    val imdbId: String? = null,
     val poster: String? = null,
     val background: String? = null,
     val logo: String? = null,

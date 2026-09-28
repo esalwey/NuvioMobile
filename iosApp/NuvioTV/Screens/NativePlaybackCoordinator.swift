@@ -784,6 +784,9 @@ final class NativePlaybackCoordinator: ObservableObject {
             var waitingTicks = 0
             var notReadyTicks = 0
             var lastProducingSeg = 0
+            // A percentage-only row (Simkl episode, Trakt playback) needs the file's duration, which
+            // an HLS item may not know yet at readyToPlay: the first tick that knows it resumes it.
+            var resumeAwaitsDuration = false
             while !Task.isCancelled {
                 guard let self, self.player === player else { return }
 
@@ -791,7 +794,10 @@ final class NativePlaybackCoordinator: ObservableObject {
                     readied = true
                     print("[NativePlayer] item readyToPlay")
                     let duration = CMTimeGetSeconds(item.duration)
-                    let resume = self.resumeFromStart ? nil : (self.explicitStartSec ?? self.recorder.resumePositionSec())
+                    let resume = self.resumeFromStart
+                        ? nil
+                        : (self.explicitStartSec ?? self.recorder.resumePositionSec(durationSec: duration))
+                    resumeAwaitsDuration = resume == nil && !self.resumeFromStart && !(duration.isFinite && duration > 0)
                     self.resumeFromStart = false
                     self.explicitStartSec = nil
                     if let resume {
@@ -831,6 +837,20 @@ final class NativePlaybackCoordinator: ObservableObject {
                 }
 
                 if readied {
+                    if resumeAwaitsDuration {
+                        let knownDuration = CMTimeGetSeconds(item.duration)
+                        if knownDuration.isFinite, knownDuration > 0 {
+                            resumeAwaitsDuration = false
+                            // Before this tick records a position over the saved row; dropped when
+                            // playback already got past the 10 s resume floor.
+                            let current = CMTimeGetSeconds(player.currentTime())
+                            if current.isFinite, current < 10,
+                               let resume = self.recorder.resumePositionSec(durationSec: knownDuration) {
+                                await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600))
+                                self.lastPositionSec = resume
+                            }
+                        }
+                    }
                     let pos = CMTimeGetSeconds(player.currentTime())
                     let dur = CMTimeGetSeconds(item.duration)
                     // A position jump = a user seek. Reset the stall budget so back-to-back scrubs

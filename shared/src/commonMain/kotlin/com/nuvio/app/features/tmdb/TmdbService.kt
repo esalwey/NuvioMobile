@@ -15,23 +15,46 @@ object TmdbService {
     private val tmdbToImdbCache = linkedMapOf<String, String>()
     private val cacheMutex = Mutex()
 
-    suspend fun ensureTmdbId(videoId: String, mediaType: String): String? {
+    suspend fun ensureTmdbId(videoId: String, mediaType: String, fallbackImdbId: String? = null): String? {
         val apiKey = currentApiKey() ?: return null
 
-        val normalized = videoId
-            .removePrefix("tmdb:")
-            .removePrefix("movie:")
-            .removePrefix("series:")
-            .substringBefore(':')
-            .substringBefore('/')
-            .trim()
+        val normalized = normalizeLookupId(videoId)
 
         if (normalized.isBlank()) return null
         if (normalized.all(Char::isDigit)) return normalized
-        if (!normalized.startsWith("tt", ignoreCase = true)) return null
+        if (normalized.startsWith("tt", ignoreCase = true)) {
+            return imdbToTmdb(imdbId = normalized, mediaType = mediaType, apiKey = apiKey)
+        }
 
-        return imdbToTmdb(imdbId = normalized, mediaType = mediaType, apiKey = apiKey)
+        // Upstream 90054b7b9: kitsu/mal/custom ids resolve through the IMDB id the addon supplied.
+        val normalizedFallback = fallbackImdbId
+            ?.trim()
+            ?.substringBefore(':')
+            ?.takeIf { it.startsWith("tt", ignoreCase = true) }
+        if (normalizedFallback != null) {
+            return imdbToTmdb(imdbId = normalizedFallback, mediaType = mediaType, apiKey = apiKey)
+        }
+
+        return null
     }
+
+    /**
+     * True when [videoId] names a TMDB or IMDB title itself, which [ensureTmdbId] resolves without
+     * the addon's IMDB fallback.
+     */
+    internal fun isDirectLookupId(videoId: String): Boolean {
+        val normalized = normalizeLookupId(videoId)
+        return normalized.isNotBlank() &&
+            (normalized.all(Char::isDigit) || normalized.startsWith("tt", ignoreCase = true))
+    }
+
+    private fun normalizeLookupId(videoId: String): String = videoId
+        .removePrefix("tmdb:")
+        .removePrefix("movie:")
+        .removePrefix("series:")
+        .substringBefore(':')
+        .substringBefore('/')
+        .trim()
 
     suspend fun tmdbToImdb(tmdbId: Int, mediaType: String): String? {
         val apiKey = currentApiKey() ?: return null

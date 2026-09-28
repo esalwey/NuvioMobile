@@ -401,8 +401,11 @@ final class DetailViewModel: ObservableObject {
     /// "season:episode" for the episode list to badge. Movies and titles without a tt/tmdb id skip.
     private func fetchEpisodeRatingsIfNeeded(_ meta: MetaDetails) {
         guard !didRequestRatings, EpisodesSection.isSeriesLike(meta) else { return }
+        // Upstream 90054b7b9: the addon's own `imdb_id` rates kitsu/mal/custom-id titles.
+        let addonImdbId: String? = meta.imdbId
         let imdbId = ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: meta.id)
             ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: id)
+            ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: addonImdbId)
         let tmdbId = ParentalGuideRepositoryKt.extractParentalGuideTmdbId(value: meta.id)
             ?? ParentalGuideRepositoryKt.extractParentalGuideTmdbId(value: id)
         guard imdbId != nil || tmdbId != nil else { return }
@@ -430,8 +433,10 @@ final class DetailViewModel: ObservableObject {
     /// `buildParentalWarnings` (labels supplied here — tvOS is English-only).
     private func fetchParentalGuideIfNeeded(_ meta: MetaDetails) {
         guard !didRequestGuide else { return }
+        let addonImdbId: String? = meta.imdbId
         guard let imdbId = ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: meta.id)
-            ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: id) else { return }
+            ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: id)
+            ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: addonImdbId) else { return }
         didRequestGuide = true
 
         ParentalGuideRepository.shared.getParentalGuide(imdbId: imdbId) { [weak self] result, _ in
@@ -458,11 +463,14 @@ final class DetailViewModel: ObservableObject {
 
     // MARK: - Actions
 
-    /// DET-2: the series-aware toggle mobile's Detail runs (shared `WatchingActions.togglePosterWatched`):
-    /// a series marks — or clears — every released main-season episode along with the series
-    /// marker, so the episode badges and the Resume / Up Next action follow; a movie toggles its own
-    /// mark. Filed under the meta's identity (DET-1). A mark left under the preview's id before the
-    /// meta resolved is cleared as such.
+    /// DET-2: the series-aware toggle mobile's Detail runs. A loaded series goes through the shared
+    /// `WatchingActions.toggleSeriesWatched`: it marks — or clears — every released main-season
+    /// episode along with the series marker, so the episode badges and the Resume / Up Next action
+    /// follow, and (upstream ba7862154 keeps series-level marks away from Simkl, which would stamp
+    /// every episode of the show) the episode marks are what sync. A page still loading goes through
+    /// `togglePosterWatched`, which fetches the details itself. A movie toggles its own mark. Filed
+    /// under the meta's identity (DET-1). A mark left under the preview's id before the meta
+    /// resolved is cleared as such.
     func toggleWatched() {
         guard !watchedToggleInFlight else { return }
         if let previewIdentity = previewIdentityIfDistinct,
@@ -471,10 +479,18 @@ final class DetailViewModel: ObservableObject {
             WatchedRepository.shared.unmarkWatched(item: preview.toWatchedItem(markedAtEpochMs: 0))
             return
         }
-        // The series path fetches the episode list first: ignore presses until it has applied.
-        watchedToggleInFlight = true
-        WatchingActions.shared.togglePosterWatched(preview: watchedPreview) { [weak self] _ in
-            DispatchQueue.main.async { self?.watchedToggleInFlight = false }
+        if let meta, EpisodesSection.isSeriesLike(meta) {
+            // Details already loaded: no second fetch, the toggle applies at once.
+            WatchingActions.shared.toggleSeriesWatched(meta: meta)
+        } else if meta == nil {
+            // Details still loading: the poster action fetches them first — ignore presses until it
+            // has applied.
+            watchedToggleInFlight = true
+            WatchingActions.shared.togglePosterWatched(preview: preview) { [weak self] _ in
+                DispatchQueue.main.async { self?.watchedToggleInFlight = false }
+            }
+        } else {
+            WatchedRepository.shared.toggleWatched(item: watchedPreview.toWatchedItem(markedAtEpochMs: 0))
         }
     }
 
@@ -484,8 +500,8 @@ final class DetailViewModel: ObservableObject {
             || WatchedRepository.shared.isFullyWatchedSeries(id: id, type: type)
     }
 
-    /// The title as a catalog preview under the meta's identity (DET-1) — what the shared watched
-    /// actions take. The catalog preview itself until the meta resolves.
+    /// The title as a catalog preview under the meta's identity (DET-1) — what the movie toggle
+    /// files its mark under. The catalog preview itself until the meta resolves.
     private var watchedPreview: MetaPreview {
         guard let meta else { return preview }
         return MetaPreview(
@@ -524,7 +540,8 @@ final class DetailViewModel: ObservableObject {
     }
 
     private func refreshFlags() {
-        // DET-2: a series whose released episodes are all watched counts as watched too.
+        // DET-2: a series whose released episodes are all watched counts as watched too. Read under
+        // the meta's identity — the one `toggleSeriesWatched` reads and writes — and the preview's.
         isWatched = isTitleWatched(id: contentId, type: contentType)
             || previewIdentityIfDistinct.map { isTitleWatched(id: $0.id, type: $0.type) } == true
         isSaved = LibraryRepository.shared.isSaved(id: contentId, type: contentType)
@@ -637,25 +654,29 @@ final class DetailViewModel: ObservableObject {
     }
 
     /// "season:episode" keys for every episode that is explicitly marked watched or whose watch
-    /// progress is effectively complete. Pure in-memory lookups against the shared repositories.
+    /// progress is effectively complete. Pure in-memory lookups against the shared repositories,
+    /// under the loaded meta's id and, when it differs, the catalog preview's too.
     private func computeWatchedEpisodeKeys() -> Set<String> {
         guard let meta, EpisodesSection.isSeriesLike(meta) else { return [] }
-        // DET-1: the meta's identity — what playback records progress and completion marks under.
-        let id = meta.id
-        let type = meta.type
+        // DET-1: the meta's identity — what playback records progress and completion marks under —
+        // and, when it differs, the catalog preview's.
+        var owners: [(id: String, type: String)] = [(meta.id, meta.type)]
+        if let previewIdentity = previewIdentityIfDistinct { owners.append(previewIdentity) }
         var keys: Set<String> = []
         for episode in meta.videos {
             guard let s = episode.season?.value, let e = episode.episode?.value else { continue }
             let season = KotlinInt(int: Int32(s))
             let number = KotlinInt(int: Int32(e))
-            let marked = WatchedRepository.shared.isWatched(id: id, type: type, season: season, episode: number)
-            let completed = WatchProgressRepository.shared.progressForVideo(
-                videoId: "\(id):\(s):\(e)",
-                parentMetaId: id,
-                seasonNumber: season,
-                episodeNumber: number
-            )?.isEffectivelyCompleted == true
-            if marked || completed { keys.insert("\(s):\(e)") }
+            let watched = owners.contains { owner in
+                WatchedRepository.shared.isWatched(id: owner.id, type: owner.type, season: season, episode: number)
+                    || WatchProgressRepository.shared.progressForVideo(
+                        videoId: "\(owner.id):\(s):\(e)",
+                        parentMetaId: owner.id,
+                        seasonNumber: season,
+                        episodeNumber: number
+                    )?.isEffectivelyCompleted == true
+            }
+            if watched { keys.insert("\(s):\(e)") }
         }
         return keys
     }

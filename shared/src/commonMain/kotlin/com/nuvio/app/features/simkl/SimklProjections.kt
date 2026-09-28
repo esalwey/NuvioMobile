@@ -262,34 +262,50 @@ internal fun SimklMedia.canonicalContentId(): String? =
  * - [SimklAnimeIdPreference.IMDB]: standard fallback (IMDB wins, seasons get grouped)
  * - [SimklAnimeIdPreference.MAL]: prefer MAL ID so each season is separate
  * - [SimklAnimeIdPreference.KITSU]: prefer Kitsu ID so each season is separate
+ * - [SimklAnimeIdPreference.TVDB]: prefer the TVDB ID, which groups seasons like IMDB without its
+ *   per-season splits
+ *
+ * A preference only applies to entries that carry an anime id (MAL, Kitsu or AniDB).
  *
  * The function is also available without the preference parameter for call-sites that
  * don't have anime context (movies/shows always use the default chain).
  */
 internal fun SimklMedia.canonicalContentId(animeIdPreference: SimklAnimeIdPreference): String? {
+    // Upstream 8ac70e598: the preference only applies to entries that carry anime ids — a regular
+    // show with a TVDB id must keep its IMDB id under the TVDB preference.
+    val hasAnimeIds = !ids.idValue("mal").isNullOrBlank() ||
+        !ids.idValue("kitsu").isNullOrBlank() ||
+        !ids.idValue("anidb").isNullOrBlank()
+
     // Try the preferred anime ID first when preference is not IMDB
-    when (animeIdPreference) {
-        SimklAnimeIdPreference.MAL -> {
-            ids.idValue("mal")?.takeIf(String::isNotBlank)?.let { return "mal:$it" }
-            ids.idValue("kitsu")?.takeIf(String::isNotBlank)?.let { return "kitsu:$it" }
-            ids.idValue("anidb")?.takeIf(String::isNotBlank)?.let { return "anidb:$it" }
+    if (hasAnimeIds) {
+        when (animeIdPreference) {
+            SimklAnimeIdPreference.MAL -> {
+                ids.idValue("mal")?.takeIf(String::isNotBlank)?.let { return "mal:$it" }
+                ids.idValue("kitsu")?.takeIf(String::isNotBlank)?.let { return "kitsu:$it" }
+                ids.idValue("anidb")?.takeIf(String::isNotBlank)?.let { return "anidb:$it" }
+            }
+            SimklAnimeIdPreference.KITSU -> {
+                ids.idValue("kitsu")?.takeIf(String::isNotBlank)?.let { return "kitsu:$it" }
+                ids.idValue("mal")?.takeIf(String::isNotBlank)?.let { return "mal:$it" }
+                ids.idValue("anidb")?.takeIf(String::isNotBlank)?.let { return "anidb:$it" }
+            }
+            SimklAnimeIdPreference.TVDB -> {
+                ids.idValue("tvdb")?.takeIf(String::isNotBlank)?.let { return "tvdb:$it" }
+            }
+            SimklAnimeIdPreference.IMDB -> Unit // fall through to standard chain
         }
-        SimklAnimeIdPreference.KITSU -> {
-            ids.idValue("kitsu")?.takeIf(String::isNotBlank)?.let { return "kitsu:$it" }
-            ids.idValue("mal")?.takeIf(String::isNotBlank)?.let { return "mal:$it" }
-            ids.idValue("anidb")?.takeIf(String::isNotBlank)?.let { return "anidb:$it" }
-        }
-        SimklAnimeIdPreference.IMDB -> Unit // fall through to standard chain
     }
-    // Standard fallback chain
+    // Standard fallback chain (upstream 8aad52d83 moves Kitsu ahead of MAL; the Kitsu branch it left
+    // after AniList could never be reached and is dropped here)
     return when {
         !ids.idValue("imdb").isNullOrBlank() -> ids.idValue("imdb")
         !ids.idValue("tmdb").isNullOrBlank() -> "tmdb:${ids.idValue("tmdb")}"
         !ids.idValue("tvdb").isNullOrBlank() -> "tvdb:${ids.idValue("tvdb")}"
+        !ids.idValue("kitsu").isNullOrBlank() -> "kitsu:${ids.idValue("kitsu")}"
         !ids.idValue("mal").isNullOrBlank() -> "mal:${ids.idValue("mal")}"
         !ids.idValue("anidb").isNullOrBlank() -> "anidb:${ids.idValue("anidb")}"
         !ids.idValue("anilist").isNullOrBlank() -> "anilist:${ids.idValue("anilist")}"
-        !ids.idValue("kitsu").isNullOrBlank() -> "kitsu:${ids.idValue("kitsu")}"
         !ids.simklIdValue().isNullOrBlank() -> "simkl:${ids.simklIdValue()}"
         else -> null
     }
@@ -325,6 +341,16 @@ private fun SimklMedia.alternateContentIds(): Set<String> {
             ids.idValue("kitsu")?.takeIf(String::isNotBlank)?.let { add("kitsu:$it") }
             ids.idValue("mal")?.takeIf(String::isNotBlank)?.let { add("mal:$it") }
             ids.idValue("anidb")?.takeIf(String::isNotBlank)?.let { add("anidb:$it") }
+        }
+        SimklAnimeIdPreference.TVDB -> buildSet {
+            ids.idValue("tvdb")?.takeIf(String::isNotBlank)?.let { add("tvdb:$it") }
+            ids.idValue("imdb")?.takeIf(String::isNotBlank)?.let(::add)
+            ids.idValue("tmdb")?.takeIf(String::isNotBlank)?.let { add("tmdb:$it") }
+            ids.idValue("mal")?.takeIf(String::isNotBlank)?.let { add("mal:$it") }
+            ids.idValue("anidb")?.takeIf(String::isNotBlank)?.let { add("anidb:$it") }
+            ids.idValue("anilist")?.takeIf(String::isNotBlank)?.let { add("anilist:$it") }
+            ids.idValue("kitsu")?.takeIf(String::isNotBlank)?.let { add("kitsu:$it") }
+            ids.simklIdValue()?.takeIf(String::isNotBlank)?.let { add("simkl:$it") }
         }
     }
 }
@@ -424,7 +450,17 @@ internal fun SimklPlaybackSession.toWatchProgressEntry(
         )
     }
     val normalizedProgress = progress.coerceIn(0.0, 100.0)
-    val durationMs = media.runtime?.takeIf { it > 0 }?.toLong()?.times(60_000L) ?: 0L
+    // Upstream b7657dbe4: a series reports the runtime of the show, not of the episode, so scaling
+    // the percentage by it invents a timecode: an episode stopped at 83 % of 47 minutes resumed at
+    // 42 minutes, because 83 % of the show's 52 minutes is 43. Leaving the duration out, with the
+    // percentage in place, makes the player scale it by the duration of the file it really opened,
+    // which is what a Trakt row already does (tvOS: MPVPlayerView/PlaybackProgressRecorder resume
+    // from `progressFraction` when a row has no position). A movie runtime is the movie.
+    val durationMs = if (isMovie) {
+        media.runtime?.takeIf { it > 0 }?.toLong()?.times(60_000L) ?: 0L
+    } else {
+        0L
+    }
     val positionMs = if (durationMs > 0L) (durationMs * normalizedProgress / 100.0).toLong() else 0L
     val updatedAt = parseSimklUtcEpochMs(pausedAt)
         ?: parseSimklUtcEpochMs(watchedAt)

@@ -172,6 +172,7 @@ actual suspend fun httpRequestRaw(
     body: String,
     followRedirects: Boolean,
     maxResponseBodyBytes: Int,
+    bodyBytes: ByteArray?,
 ): RawHttpResponse =
     addonHttpClient
         .prepareRequest {
@@ -181,18 +182,21 @@ actual suspend fun httpRequestRaw(
                 header(key, value)
             }
             if (this.method == HttpMethod.Post || this.method == HttpMethod.Put || this.method == HttpMethod.Patch) {
-                setBody(body)
+                val requestBytes = bodyBytes
+                if (requestBytes != null) setBody(requestBytes) else setBody(body)
             }
         }
         .execute { response ->
+            val limited = readResponseBodyLimited(response.bodyAsChannel(), maxResponseBodyBytes)
             RawHttpResponse(
                 status = response.status.value,
                 statusText = response.status.description,
                 url = response.call.request.url.toString(),
-                body = readResponseBodyLimited(response.bodyAsChannel(), maxResponseBodyBytes),
+                body = limited.text,
                 headers = response.headers.entries().associate { (name, values) ->
                     name.lowercase() to values.joinToString(",")
                 },
+                bodyBytes = limited.bytes,
             )
         }
 
@@ -200,10 +204,16 @@ actual suspend fun httpRequestRaw(
 // truncation, so an untrusted endpoint (server discovery runs pre-trust) cannot make the client
 // buffer an unbounded body. prepareRequest/execute keeps Ktor from saving the full body; UTF-8
 // decode (every caller consumes JSON/text).
-private suspend fun readResponseBodyLimited(channel: ByteReadChannel, maxBytes: Int): String {
+private suspend fun readResponseBodyLimited(channel: ByteReadChannel, maxBytes: Int): LimitedResponseBody {
     val bytes = channel.readRemaining(maxBytes.coerceAtLeast(0).toLong()).readByteArray()
     val truncated = !channel.exhausted()
     if (truncated) channel.cancel(null)
     val decoded = bytes.decodeToString()
-    return if (truncated) "$decoded\n...[truncated]" else decoded
+    return LimitedResponseBody(
+        text = if (truncated) "$decoded\n...[truncated]" else decoded,
+        bytes = bytes,
+    )
 }
+
+/** Upstream 12621c654: the raw bytes are kept next to the decoded text for binary consumers. */
+private class LimitedResponseBody(val text: String, val bytes: ByteArray)

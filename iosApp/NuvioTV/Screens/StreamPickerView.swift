@@ -1068,8 +1068,15 @@ struct StreamPickerView: View {
             episodeNumber: episode.map { KotlinInt(int: Int32($0)) }
         )
         let resumeMs: Int64 = {
-            guard let progress, !progress.isCompleted, progress.lastPositionMs > 10_000 else { return 0 }
-            return progress.lastPositionMs
+            guard let progress, !progress.isCompleted else { return 0 }
+            if progress.lastPositionMs > 10_000 { return progress.lastPositionMs }
+            // A percentage-only row (Simkl episode, Trakt playback, upstream b7657dbe4): an external
+            // player needs a timecode, so the share is taken of the episode's own runtime, else of
+            // the title's (what the Simkl projection used before), behind the same 10 s floor.
+            guard progress.lastPositionMs <= 0, progress.durationMs <= 0, progress.progressFraction > 0,
+                  let runtimeSec = externalResumeRuntimeSec() else { return 0 }
+            let estimatedMs = Int64(Double(progress.progressFraction) * runtimeSec * 1000)
+            return estimatedMs > 10_000 ? estimatedMs : 0
         }()
         // Infuse reports where it stopped through x-callback-url (upstream 99ced26a4): register the
         // launch it will report back on.
@@ -1124,6 +1131,18 @@ struct StreamPickerView: View {
         } else {
             showToast(String(localized: "Couldn\u{2019}t open the external player."))
         }
+    }
+
+    /// Seconds the target episode runs for, from its own metadata runtime, else the title's runtime
+    /// text ("45 min"); nil when neither is known.
+    private func externalResumeRuntimeSec() -> Double? {
+        let list = episodes.isEmpty ? fetchedEpisodes : episodes
+        let current = list.first { video in
+            guard let s = video.season?.value, let e = video.episode?.value else { return false }
+            return s == season && e == episode
+        }
+        if let minutes = current?.runtime?.value, minutes > 0 { return Double(minutes) * 60 }
+        return NextEpisodeEngine.runtimeSec(parsing: meta?.runtime)
     }
 
     /// Mirrors the shared `DirectDebridPlayableResult.toastMessage()` wording (tvOS renders the

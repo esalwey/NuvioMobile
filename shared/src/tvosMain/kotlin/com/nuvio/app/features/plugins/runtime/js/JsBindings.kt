@@ -9,6 +9,7 @@ internal object JsBindings {
             if (typeof globalThis.window === 'undefined') globalThis.window = globalThis;
             if (typeof globalThis.self === 'undefined') globalThis.self = globalThis;
 
+            ${timerPolyfill()}
             ${fetchPolyfill()}
             ${abortControllerPolyfill()}
             ${base64Polyfill()}
@@ -22,6 +23,81 @@ internal object JsBindings {
             ${stringPolyfill()}
         """.trimIndent()
     }
+
+    // Upstream d03d97eb7 (supersedes 72b120b60's busy-wait): QuickJS has no event loop or native
+    // timers, so timers are backed by the `__plugin_sleep` coroutine delay (HostFunctions) and their
+    // callbacks run asynchronously without blocking a worker. Fork: each sleep carries its timer id,
+    // so clearing a timer ends its sleep at once (`__plugin_cancel_sleep`), and every sleep ends once
+    // the result is captured; a sleep that ended that way resolves false and its callback is skipped.
+    // quickjs-kt's evaluate() waits for every pending sleep, so neither may be left running.
+    private fun timerPolyfill() = """
+        var __plugin_timer_id = 0;
+        var __plugin_timers = Object.create(null);
+        function __plugin_delay_value(value, interval) {
+            var duration = Number(value);
+            if (!isFinite(duration) || duration < 0) duration = 0;
+            duration = Math.min(Math.floor(duration), 60000);
+            return interval && duration < 1 ? 1 : duration;
+        }
+        function __plugin_report_timer_error(error) {
+            try { console.error('[PluginRuntime] Timer callback failed:', error); } catch (e) {}
+        }
+        // Only where the host registered the sleep binding (not the settings-layout runtime).
+        var __plugin_has_sleep = typeof __plugin_sleep === 'function';
+        var __plugin_can_cancel_sleep = typeof __plugin_cancel_sleep === 'function';
+        function __plugin_clear_timer(id) {
+            if (!__plugin_timers[id]) return;
+            delete __plugin_timers[id];
+            if (__plugin_can_cancel_sleep) __plugin_cancel_sleep(id);
+        }
+        // Set by the getStreams call (PluginRuntime) as it hands the result over: from then on no
+        // timer fires or re-arms, whatever its sleep resolved to.
+        var __plugin_timers_stopped = false;
+        if (__plugin_has_sleep && typeof globalThis.setTimeout === 'undefined') {
+            globalThis.setTimeout = function(callback, delay) {
+                if (typeof callback !== 'function') throw new TypeError('Timer callback must be a function');
+                var id = ++__plugin_timer_id;
+                var args = Array.prototype.slice.call(arguments, 2);
+                __plugin_timers[id] = true;
+                __plugin_sleep(__plugin_delay_value(delay, false), id).then(function(elapsed) {
+                    if (elapsed === false || __plugin_timers_stopped || !__plugin_timers[id]) return;
+                    delete __plugin_timers[id];
+                    try { callback.apply(globalThis, args); } catch (error) { __plugin_report_timer_error(error); }
+                }, function(error) {
+                    delete __plugin_timers[id];
+                    __plugin_report_timer_error(error);
+                });
+                return id;
+            };
+        }
+        if (__plugin_has_sleep && typeof globalThis.clearTimeout === 'undefined') {
+            globalThis.clearTimeout = function(id) { __plugin_clear_timer(id); };
+        }
+        if (__plugin_has_sleep && typeof globalThis.setInterval === 'undefined') {
+            globalThis.setInterval = function(callback, delay) {
+                if (typeof callback !== 'function') throw new TypeError('Timer callback must be a function');
+                var id = ++__plugin_timer_id;
+                var duration = __plugin_delay_value(delay, true);
+                var args = Array.prototype.slice.call(arguments, 2);
+                __plugin_timers[id] = true;
+                function tick() {
+                    __plugin_sleep(duration, id).then(function(elapsed) {
+                        if (elapsed === false || __plugin_timers_stopped || !__plugin_timers[id]) return;
+                        try { callback.apply(globalThis, args); } catch (error) { __plugin_report_timer_error(error); }
+                        if (__plugin_timers[id]) tick();
+                    }, function(error) {
+                        delete __plugin_timers[id];
+                        __plugin_report_timer_error(error);
+                    });
+                }
+                tick();
+                return id;
+            };
+        }
+        if (__plugin_has_sleep && typeof globalThis.clearInterval === 'undefined') {
+            globalThis.clearInterval = function(id) { __plugin_clear_timer(id); };
+        }
+    """.trimIndent()
 
     private fun fetchPolyfill() = """
         function __normalize_fetch_headers(headers) {
@@ -41,14 +117,58 @@ internal object JsBindings {
             return out;
         }
 
+        // Upstream 12621c654: binary request and response bodies cross the native bridge as base64.
+        function __fetch_bytes_to_base64(bytes) {
+            var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+            var out = '';
+            for (var i = 0; i < bytes.length; i += 3) {
+                var a = bytes[i];
+                var hasB = i + 1 < bytes.length;
+                var hasC = i + 2 < bytes.length;
+                var b = hasB ? bytes[i + 1] : 0;
+                var c = hasC ? bytes[i + 2] : 0;
+                out += chars.charAt(a >> 2);
+                out += chars.charAt(((a & 3) << 4) | (b >> 4));
+                out += hasB ? chars.charAt(((b & 15) << 2) | (c >> 6)) : '=';
+                out += hasC ? chars.charAt(c & 63) : '=';
+            }
+            return out;
+        }
+
+        function __fetch_base64_to_bytes(value) {
+            var binary = atob(value || '');
+            var bytes = new Uint8Array(binary.length);
+            for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            return bytes;
+        }
+
+        function __normalize_fetch_body(body) {
+            if (body === undefined || body === null) return { kind: 'none', value: '' };
+            if (typeof body === 'string') return { kind: 'text', value: body };
+
+            var bytes = null;
+            if (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer) {
+                bytes = new Uint8Array(body);
+            } else if (typeof ArrayBuffer !== 'undefined' &&
+                       typeof ArrayBuffer.isView === 'function' && ArrayBuffer.isView(body)) {
+                bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+            }
+            if (bytes !== null) {
+                return { kind: 'base64', value: __fetch_bytes_to_base64(bytes) };
+            }
+            return { kind: 'text', value: String(body) };
+        }
+
         var fetch = async function(url, options) {
             options = options || {};
             var method = (options.method || 'GET').toUpperCase();
             var headers = __normalize_fetch_headers(options.headers);
-            var body = options.body || '';
+            var body = __normalize_fetch_body(options.body);
             var followRedirects = options.redirect !== 'manual';
-            var result = __native_fetch(url, method, JSON.stringify(headers), body, followRedirects);
+            var result = __native_fetch(url, method, JSON.stringify(headers), body.kind, body.value, followRedirects);
             var parsed = JSON.parse(result);
+            // Decoded on the first arrayBuffer() call only: most plugins read text() or json().
+            var responseBytes = null;
             return {
                 ok: parsed.ok,
                 status: parsed.status,
@@ -58,6 +178,12 @@ internal object JsBindings {
                     get: function(name) {
                         return parsed.headers[name.toLowerCase()] || null;
                     }
+                },
+                arrayBuffer: function() {
+                    if (responseBytes === null) responseBytes = __fetch_base64_to_bytes(parsed.bodyBase64);
+                    var copy = new Uint8Array(responseBytes.length);
+                    copy.set(responseBytes);
+                    return Promise.resolve(copy.buffer);
                 },
                 text: function() { return Promise.resolve(parsed.body); },
                 json: function() {

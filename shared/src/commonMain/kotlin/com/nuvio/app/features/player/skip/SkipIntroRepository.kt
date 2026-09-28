@@ -1,5 +1,6 @@
 package com.nuvio.app.features.player.skip
 
+import com.nuvio.app.features.details.MetaDetailsRepository
 import com.nuvio.app.features.player.PlayerSettingsRepository
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -29,17 +30,29 @@ object SkipIntroRepository {
         val introDbDeferred = async {
             if (introDbConfigured) fetchFromIntroDb(imdbId, season, episode) else emptyList()
         }
-        // Season-aware (Codex r2): an IMDb series spanning several anime seasons resolves to the
-        // Simkl entry for THIS season, so AniSkip/Anime-Skip get the right MAL/AniList ids.
-        val simklIdsDeferred = async { SimklIdResolver.resolveIds("imdb", imdbId, season) }
+        // Season-aware (Codex r2, upstream aa748fa8b): an IMDb series spanning several anime seasons
+        // resolves to the Simkl entry for THIS season, so AniSkip/Anime-Skip get the right MAL/AniList
+        // ids.
+        val simklIdsDeferred = async { SimklIdResolver.resolveIdsForImdbEpisode(imdbId, season, episode) }
         val simklIds = simklIdsDeferred.await()
         val malId = simklIds?.mal
         val anilistId = simklIds?.anilist
+        // Upstream aa748fa8b: AniSkip / Anime-Skip index an entry's own episodes, so the TVDB episode
+        // is remapped to the entry-local number. Fork: only fetched when an anime provider will be
+        // asked, so a regular show costs no extra Simkl request.
+        val animeEpisode = if (simklIds != null && (malId != null || anilistId != null)) {
+            SimklIdResolver.getEpisodeMapping(simklIds.simklId, simklIds.type)
+                .firstOrNull { it.tvdbSeason == season && it.tvdbEpisode == episode }
+                ?.animeEpisode
+                ?: episode
+        } else {
+            episode
+        }
         val aniSkipDeferred = async {
-            if (malId != null) fetchFromAniSkip(malId, episode) else emptyList()
+            if (malId != null) fetchFromAniSkip(malId, animeEpisode) else emptyList()
         }
         val animeSkipDeferred = async {
-            if (anilistId != null) fetchFromAnimeSkip(anilistId, episode, season = null) else emptyList()
+            if (anilistId != null) fetchFromAnimeSkip(anilistId, animeEpisode, season = null) else emptyList()
         }
 
         return@coroutineScope mergeByPriority(
@@ -56,20 +69,27 @@ object SkipIntroRepository {
         imdbId: String? = null,
         imdbSeason: Int? = null,
         imdbEpisode: Int? = null,
+        fallbackImdbId: String? = null,
     ): List<SkipInterval> = coroutineScope {
         val settings = PlayerSettingsRepository.uiState.value
         if (requireSkipIntroEnabled && !settings.skipIntroEnabled) return@coroutineScope emptyList()
 
         // Codex r1: the IMDB hint tuple changes which IntroDB coordinates are queried, so hinted and
         // unhinted lookups for the same episode must not share a cache slot (upstream shares it).
-        val cacheKey = animeCacheKey("mal", malId, episode, imdbId, imdbSeason, imdbEpisode)
+        val cacheKey = animeCacheKey("mal", malId, episode, imdbId, imdbSeason, imdbEpisode, fallbackImdbId)
         cache[cacheKey]?.let { return@coroutineScope it }
 
         val aniSkipDeferred = async { fetchFromAniSkip(malId, episode) }
 
         val simklIdsDeferred = async { SimklIdResolver.resolveIds("mal", malId) }
         val simklIds = simklIdsDeferred.await()
-        val resolvedImdbId = imdbId ?: simklIds?.imdb
+        // The addon's IMDB id only stands in when Simkl has none: Simkl's own id is the one its TVDB
+        // episode mapping below is expressed in. It needs that mapping all the same: when Simkl
+        // knows nothing of the entry, IntroDB is not asked. Upstream would query the franchise's
+        // IMDB id at the entry's own season and episode, but a Kitsu/MAL entry numbers its episodes
+        // from 1 in every season, so a later season would get the first season's segments, which
+        // also time the Up Next card.
+        val resolvedImdbId = imdbId ?: simklIds?.imdb ?: fallbackImdbId
 
         val anilistId = simklIds?.anilist
         val animeSkipDeferred = async {
@@ -107,19 +127,22 @@ object SkipIntroRepository {
         imdbId: String? = null,
         imdbSeason: Int? = null,
         imdbEpisode: Int? = null,
+        fallbackImdbId: String? = null,
     ): List<SkipInterval> = coroutineScope {
         val settings = PlayerSettingsRepository.uiState.value
         if (requireSkipIntroEnabled && !settings.skipIntroEnabled) return@coroutineScope emptyList()
 
         // Codex r1: the IMDB hint tuple changes which IntroDB coordinates are queried, so hinted and
         // unhinted lookups for the same episode must not share a cache slot (upstream shares it).
-        val cacheKey = animeCacheKey("kitsu", kitsuId, episode, imdbId, imdbSeason, imdbEpisode)
+        val cacheKey = animeCacheKey("kitsu", kitsuId, episode, imdbId, imdbSeason, imdbEpisode, fallbackImdbId)
         cache[cacheKey]?.let { return@coroutineScope it }
 
         val simklIdsDeferred = async { SimklIdResolver.resolveIds("kitsu", kitsuId) }
         val simklIds = simklIdsDeferred.await()
         val malIdStr = simklIds?.mal
-        val resolvedImdbId = imdbId ?: simklIds?.imdb
+        // The addon's IMDB id only stands in when Simkl has none, and only with Simkl's TVDB
+        // mapping (see getSkipIntervalsForMal).
+        val resolvedImdbId = imdbId ?: simklIds?.imdb ?: fallbackImdbId
 
         val aniSkipDeferred = async {
             if (malIdStr != null) fetchFromAniSkip(malIdStr, episode) else emptyList()
@@ -174,24 +197,31 @@ object SkipIntroRepository {
         season: Int,
         episode: Int,
         requireSkipIntroEnabled: Boolean = true,
-    ): List<SkipInterval> = when {
-        contentId == null -> emptyList()
-        contentId.startsWith("mal:") -> getSkipIntervalsForMal(
-            malId = contentId.removePrefix("mal:").substringBefore(':'),
-            episode = episode,
-            requireSkipIntroEnabled = requireSkipIntroEnabled,
-        )
-        contentId.startsWith("kitsu:") -> getSkipIntervalsForKitsu(
-            kitsuId = contentId.removePrefix("kitsu:").substringBefore(':'),
-            episode = episode,
-            requireSkipIntroEnabled = requireSkipIntroEnabled,
-        )
-        else -> getSkipIntervals(
-            imdbId = contentId,
-            season = season,
-            episode = episode,
-            requireSkipIntroEnabled = requireSkipIntroEnabled,
-        )
+    ): List<SkipInterval> {
+        if (contentId == null) return emptyList()
+        // Upstream 90054b7b9: the `imdb_id` the addon supplied for a kitsu/mal/custom-id title, read
+        // from the loaded details so the Swift-facing signature stays unchanged.
+        val addonImdbId = runCatching { MetaDetailsRepository.addonImdbId(contentId) }.getOrNull()
+        return when {
+            contentId.startsWith("mal:") -> getSkipIntervalsForMal(
+                malId = contentId.removePrefix("mal:").substringBefore(':'),
+                episode = episode,
+                requireSkipIntroEnabled = requireSkipIntroEnabled,
+                fallbackImdbId = addonImdbId,
+            )
+            contentId.startsWith("kitsu:") -> getSkipIntervalsForKitsu(
+                kitsuId = contentId.removePrefix("kitsu:").substringBefore(':'),
+                episode = episode,
+                requireSkipIntroEnabled = requireSkipIntroEnabled,
+                fallbackImdbId = addonImdbId,
+            )
+            else -> getSkipIntervals(
+                imdbId = contentId.takeIf { it.startsWith("tt", ignoreCase = true) } ?: addonImdbId ?: contentId,
+                season = season,
+                episode = episode,
+                requireSkipIntroEnabled = requireSkipIntroEnabled,
+            )
+        }
     }
 
     private fun animeCacheKey(
@@ -201,11 +231,13 @@ object SkipIntroRepository {
         imdbId: String?,
         imdbSeason: Int?,
         imdbEpisode: Int?,
+        fallbackImdbId: String? = null,
     ): String = buildString {
         append(source).append(':').append(id).append(':').append(episode)
         if (imdbId != null || imdbSeason != null || imdbEpisode != null) {
             append(":hint:").append(imdbId ?: "").append(':').append(imdbSeason ?: "").append(':').append(imdbEpisode ?: "")
         }
+        if (fallbackImdbId != null) append(":fallback:").append(fallbackImdbId)
     }
 
     /**

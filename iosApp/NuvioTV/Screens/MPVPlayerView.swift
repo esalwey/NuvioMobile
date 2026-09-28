@@ -123,6 +123,12 @@ final class MPVTVPlayerViewController: UIViewController {
     private var hideWork: DispatchWorkItem?
     private var lastSaveUptime: TimeInterval = 0
     private var pendingResumeSec: Double?
+    /// A saved row with a percentage and no timecode (Simkl episode or Trakt playback row, upstream
+    /// b7657dbe4): scaled by this file's own duration once mpv has loaded it.
+    private var pendingResumeFraction: Double?
+    /// The file is loaded but mpv did not know its duration yet: the first `duration` change
+    /// applies `pendingResumeFraction` (main thread only).
+    private var resumeFractionAwaitsDuration = false
     private var seekTimer: Timer?
     private var seekDirection: Double = 0
     private var seekHoldCount = 0
@@ -1412,7 +1418,11 @@ final class MPVTVPlayerViewController: UIViewController {
             episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) }
         ), !entry.isCompleted else { return }
         let seconds = Double(entry.lastPositionMs) / 1000.0
-        if seconds > 10 { pendingResumeSec = seconds }
+        if seconds > 10 {
+            pendingResumeSec = seconds
+        } else if entry.lastPositionMs <= 0, entry.durationMs <= 0, entry.progressFraction > 0 {
+            pendingResumeFraction = Double(entry.progressFraction)
+        }
     }
 
     // CW-1: the series name + the episode's own name/still, never the "S1E3 · Pilot" header label
@@ -2080,7 +2090,12 @@ final class MPVTVPlayerViewController: UIViewController {
         case .timePos:
             if let v = asDouble() { updateProps { $0.position = v } }
         case .duration:
-            if let v = asDouble() { updateProps { $0.duration = v } }
+            if let v = asDouble() {
+                updateProps { $0.duration = v }
+                if v > 0 {
+                    DispatchQueue.main.async { [weak self] in self?.applyPendingResumeFraction(duration: v) }
+                }
+            }
         case .pause:
             if let v = asFlag() { updateProps { $0.paused = v } }
         case .coreIdle:
@@ -2106,11 +2121,32 @@ final class MPVTVPlayerViewController: UIViewController {
 
     private func applyPendingResume() {
         loadStartPositionSec = pendingResumeSec ?? 0
-        guard let seconds = pendingResumeSec else { return }
-        pendingResumeSec = nil
-        // PLY-5: through `eventQueue` like every other seek. This runs at FILE_LOADED, the core's
-        // busiest moment — a synchronous `mpv_command` here parked the main thread on the core lock
-        // (the BUG-2/BUG-3 rule above `PropSnapshot`).
+        if let seconds = pendingResumeSec {
+            pendingResumeSec = nil
+            // PLY-5: through `eventQueue` like every other seek. This runs at FILE_LOADED, the core's
+            // busiest moment — a synchronous `mpv_command` here parked the main thread on the core
+            // lock (the BUG-2/BUG-3 rule above `PropSnapshot`).
+            resumeTargetSec = seconds
+            seekAbsolute(seconds)
+            return
+        }
+        guard pendingResumeFraction != nil else { return }
+        resumeFractionAwaitsDuration = true
+        applyPendingResumeFraction(duration: cachedProps().duration)
+    }
+
+    /// Main thread. Scales `pendingResumeFraction` by the file's duration once the file is loaded and
+    /// mpv knows it (at file-loaded, or on the first `duration` change after it), behind the same
+    /// 10 s floor as every other resume path. Dropped when playback already got past that floor.
+    /// Reads the event-fed property cache and seeks through `eventQueue` (PLY-5, BUG-2/BUG-3: never
+    /// a synchronous mpv call on the main thread).
+    private func applyPendingResumeFraction(duration: Double) {
+        guard resumeFractionAwaitsDuration, let fraction = pendingResumeFraction, duration > 0 else { return }
+        resumeFractionAwaitsDuration = false
+        pendingResumeFraction = nil
+        let seconds = duration * fraction
+        guard seconds > 10, cachedProps().position < 10 else { return }
+        loadStartPositionSec = seconds
         resumeTargetSec = seconds
         seekAbsolute(seconds)
     }

@@ -700,11 +700,12 @@ object TmdbMetadataService {
         if (!settings.enabled || !settings.hasApiKey) return meta
 
         val tmdbType = normalizeMetaType(meta.type)
-        val tmdbId = TmdbService.ensureTmdbId(meta.id, tmdbType)
-            ?: TmdbService.ensureTmdbId(fallbackItemId, tmdbType)
+        val tmdbId = TmdbService.ensureTmdbId(meta.id, tmdbType, fallbackImdbId = meta.imdbId)
+            ?: TmdbService.ensureTmdbId(fallbackItemId, tmdbType, fallbackImdbId = meta.imdbId)
             ?: return meta
+        val franchiseLevelMatch = isFranchiseLevelTmdbMatch(metaId = meta.id, fallbackItemId = fallbackItemId)
 
-        val needsEpisodes = (
+        val needsEpisodes = !franchiseLevelMatch && (
             settings.useEpisodes || settings.useReleaseDates || settings.useSeasonPosters
         ) && tmdbType == "tv"
         val (enrichment, episodeMap) = coroutineScope {
@@ -736,7 +737,20 @@ object TmdbMetadataService {
             enrichment = enrichment,
             episodeMap = episodeMap.orEmpty(),
             settings = settings,
+            franchiseLevelMatch = franchiseLevelMatch,
         )
+    }
+
+    /**
+     * A kitsu:/mal:/anilist:/anidb: entry that only reached TMDB through the addon's `imdb_id`
+     * (upstream 90054b7b9) is matched to the TMDB series of its whole franchise, while the entry is
+     * one season or cour of it with its own episode numbering (a Kitsu season starts again at
+     * episode 1). TMDB's episode titles, stills, air dates and season posters, and the franchise's
+     * name, overview, poster and dates, would overwrite the entry's own; see [applyEnrichment].
+     */
+    internal fun isFranchiseLevelTmdbMatch(metaId: String, fallbackItemId: String): Boolean {
+        val scheme = metaId.substringBefore(':', missingDelimiterValue = "").trim().lowercase()
+        return scheme in ANIME_DATABASE_ID_SCHEMES && !TmdbService.isDirectLookupId(fallbackItemId)
     }
 
     suspend fun fetchStandaloneMeta(
@@ -803,28 +817,50 @@ object TmdbMetadataService {
             trailers = enrichment.trailers,
         )
 
+    /**
+     * [franchiseLevelMatch] (see [isFranchiseLevelTmdbMatch]): what TMDB knows of the whole show
+     * (logo, cast, ratings, genres, trailers) still applies, but it only fills the gaps in what
+     * belongs to the entry (its name, overview, artwork, status and dates), and no episode is touched.
+     */
     fun applyEnrichment(
         meta: MetaDetails,
         enrichment: TmdbEnrichment?,
         episodeMap: Map<Pair<Int, Int>, TmdbEpisodeEnrichment>,
         settings: TmdbSettings,
+        franchiseLevelMatch: Boolean = false,
     ): MetaDetails {
         if (enrichment == null && episodeMap.isEmpty()) return meta
 
         var updated = meta
 
         if (enrichment != null && settings.useArtwork) {
-            updated = updated.copy(
-                background = enrichment.backdrop ?: updated.background,
-                poster = enrichment.poster ?: updated.poster,
-                logo = enrichment.logo ?: updated.logo,
-            )
+            updated = if (franchiseLevelMatch) {
+                updated.copy(
+                    background = updated.background ?: enrichment.backdrop,
+                    poster = updated.poster ?: enrichment.poster,
+                    logo = updated.logo ?: enrichment.logo,
+                )
+            } else {
+                updated.copy(
+                    background = enrichment.backdrop ?: updated.background,
+                    poster = enrichment.poster ?: updated.poster,
+                    logo = enrichment.logo ?: updated.logo,
+                )
+            }
         }
 
         if (enrichment != null && settings.useBasicInfo) {
             updated = updated.copy(
-                name = enrichment.localizedTitle ?: updated.name,
-                description = enrichment.description ?: updated.description,
+                name = if (franchiseLevelMatch) {
+                    updated.name.ifBlank { enrichment.localizedTitle ?: updated.name }
+                } else {
+                    enrichment.localizedTitle ?: updated.name
+                },
+                description = if (franchiseLevelMatch) {
+                    updated.description?.takeIf(String::isNotBlank) ?: enrichment.description
+                } else {
+                    enrichment.description ?: updated.description
+                },
                 imdbRating = updated.imdbRating?.takeIf { it.isNotBlank() }
                     ?: enrichment.rating?.formatRating(),
                 genres = enrichment.genres.ifEmpty { updated.genres },
@@ -833,7 +869,11 @@ object TmdbMetadataService {
 
         if (enrichment != null && settings.useDetails) {
             updated = updated.copy(
-                status = enrichment.status ?: updated.status,
+                status = if (franchiseLevelMatch) {
+                    updated.status ?: enrichment.status
+                } else {
+                    enrichment.status ?: updated.status
+                },
                 ageRating = enrichment.ageRating ?: updated.ageRating,
                 runtime = enrichment.runtimeMinutes?.formatRuntime() ?: updated.runtime,
                 country = enrichment.countries.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: updated.country,
@@ -842,10 +882,17 @@ object TmdbMetadataService {
         }
 
         if (enrichment != null && settings.useReleaseDates) {
-            updated = updated.copy(
-                releaseInfo = enrichment.releaseInfo ?: updated.releaseInfo,
-                lastAirDate = enrichment.lastAirDate ?: updated.lastAirDate,
-            )
+            updated = if (franchiseLevelMatch) {
+                updated.copy(
+                    releaseInfo = updated.releaseInfo ?: enrichment.releaseInfo,
+                    lastAirDate = updated.lastAirDate ?: enrichment.lastAirDate,
+                )
+            } else {
+                updated.copy(
+                    releaseInfo = enrichment.releaseInfo ?: updated.releaseInfo,
+                    lastAirDate = enrichment.lastAirDate ?: updated.lastAirDate,
+                )
+            }
         }
 
         if (enrichment != null && settings.useCredits) {
@@ -864,7 +911,7 @@ object TmdbMetadataService {
             updated = updated.copy(networks = enrichment.networks)
         }
 
-        if (episodeMap.isNotEmpty()) {
+        if (episodeMap.isNotEmpty() && !franchiseLevelMatch) {
             updated = updated.copy(
                 videos = meta.videos.map { video ->
                     val key = video.season?.let { season ->
@@ -1365,7 +1412,7 @@ object TmdbMetadataService {
         ) ?: return null to emptyList()
 
         val items = response.parts
-            .sortedBy { it.releaseDate ?: "9999" }
+            .sortedBy { it.releaseDate?.takeIf(String::isNotBlank) ?: "9999" }
             .mapNotNull { part ->
                 val title = part.title?.trim()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
                 MetaPreview(
@@ -1574,6 +1621,9 @@ internal fun trailerCategoryRank(
     hasOfficialVideo -> 1
     else -> 2
 }
+
+/** Anime databases whose ids name one season or cour of a show (see isFranchiseLevelTmdbMatch). */
+private val ANIME_DATABASE_ID_SCHEMES = setOf("kitsu", "mal", "anilist", "anidb")
 
 data class TmdbEnrichment(
     val localizedTitle: String?,

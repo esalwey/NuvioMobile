@@ -12,6 +12,8 @@ import com.nuvio.app.features.tracking.TrackingMembershipRemovalImpact
 import com.nuvio.app.features.tracking.TrackingMembershipResolution
 import com.nuvio.app.features.tracking.TrackingProviderId
 import com.nuvio.app.features.tracking.TrackingRefreshIntent
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -35,6 +37,9 @@ object SimklLibraryRepository {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _uiState = MutableStateFlow(SimklLibraryUiState())
     val uiState: StateFlow<SimklLibraryUiState> = _uiState.asStateFlow()
+    private val publicationLock = SynchronizedObject()
+    private val projectionCache = SimklSnapshotProjectionCache(SimklSyncSnapshot::toSimklLibraryProjection)
+    private var publishedSyncState: SimklSyncUiState? = null
 
     init {
         scope.launch {
@@ -148,15 +153,20 @@ object SimklLibraryRepository {
         return SimklSyncRepository.state.value.snapshot.membershipRemovalConfirmation(item.id)
     }
 
+    // Upstream 73005d996: one library projection per snapshot, published once per sync state.
     private fun publish(syncState: SimklSyncUiState) {
-        val projection = syncState.snapshot.toSimklLibraryProjection()
-        _uiState.value = SimklLibraryUiState(
-            items = projection.items,
-            sections = projection.sections,
-            isLoading = syncState.isLoading,
-            hasLoaded = syncState.hasLoaded,
-            errorMessage = syncState.errorMessage,
-        )
+        synchronized(publicationLock) {
+            if (syncState === publishedSyncState || syncState !== SimklSyncRepository.state.value) return
+            val projection = projectionCache.get(syncState)
+            _uiState.value = SimklLibraryUiState(
+                items = projection.items,
+                sections = projection.sections,
+                isLoading = syncState.isLoading,
+                hasLoaded = syncState.hasLoaded,
+                errorMessage = syncState.errorMessage,
+            )
+            publishedSyncState = syncState
+        }
     }
 
     private fun findItem(contentId: String, contentType: String?): LibraryItem? =
@@ -181,7 +191,8 @@ object SimklTrackingLibraryProvider : TrackingLibraryProvider {
     override fun snapshot(): TrackingLibrarySnapshot {
         val state = SimklLibraryRepository.uiState.value
         return TrackingLibrarySnapshot(
-            items = state.items.sortedByDescending(LibraryItem::savedAtEpochMs),
+            // Already newest-first: toSimklLibraryProjection sorts by savedAtEpochMs.
+            items = state.items,
             sections = state.sections,
             tabs = simklLibraryStatusDefinitions.map { definition ->
                 TrackingLibraryTab(
