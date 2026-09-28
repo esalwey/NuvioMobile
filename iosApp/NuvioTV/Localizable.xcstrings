@@ -3979,6 +3979,16 @@
         }
       }
     },
+    "Backspace": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retour arrière"
+          }
+        }
+      }
+    },
     "Badge chips render above the stream name.": {
       "localizations": {
         "de": {
@@ -5167,6 +5177,16 @@
         }
       }
     },
+    "Choose which catalogs Search looks through. Fewer sources means faster, more focused results. Applies to this profile, on this Apple TV only.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choisissez les catalogues consultés par la recherche. Moins de sources donne des résultats plus rapides et plus précis. S’applique à ce profil, sur cette Apple TV uniquement."
+          }
+        }
+      }
+    },
     "Choose which episode ratings are visible.": {
       "localizations": {
         "fr": {
@@ -5178,6 +5198,16 @@
       }
     },
     "Classic layout with the logo on the lower left": {},
+    "Clear All": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tout effacer"
+          }
+        }
+      }
+    },
     "Clear All Filters": {
       "localizations": {
         "de": {
@@ -22638,6 +22668,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nguồn"
+          }
+        }
+      }
+    },
+    "Space": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Espace"
           }
         }
       }

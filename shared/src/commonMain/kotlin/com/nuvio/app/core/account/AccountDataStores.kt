@@ -231,6 +231,16 @@ object AccountDataStores {
             ),
         ),
         AccountDataStore(
+            // tvOS Swift store (SearchViewModel.SearchSourceSettings): per profile since SRC-2; the
+            // Plain key is the older device-wide choice every profile starts from.
+            name = "SearchSourceSettings (tvOS)",
+            androidPreferences = null,
+            appleKeys = listOf(
+                AppleKeySpec.ProfileScoped("search_disabled_catalog_keys"),
+                AppleKeySpec.Plain("search_disabled_catalog_keys"),
+            ),
+        ),
+        AccountDataStore(
             name = "DiscoverSelectionStorage",
             androidPreferences = "nuvio_discover_selection",
             appleKeys = listOf(AppleKeySpec.ProfileScoped("discover_catalog_key")),

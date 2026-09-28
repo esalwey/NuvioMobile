@@ -15,11 +15,21 @@ final class SearchViewModel: ObservableObject {
     /// keys. Local to this Apple TV (not synced), like the appearance toggles — keys for
     /// since-uninstalled addons linger harmlessly (they never match) and re-arm if the
     /// addon comes back.
+    ///
+    /// SRC-2: per PROFILE — under `ProfileScopedKey`'s "<base>_<profileId>" shape, which
+    /// `AccountDataStores` ("SearchSourceSettings (tvOS)") wipes at sign-out. A profile that has
+    /// never saved its own choice starts from the device-wide value earlier builds stored.
     enum SearchSourceSettings {
-        private static let defaultsKey = "search_disabled_catalog_keys"
+        private static let legacyDefaultsKey = "search_disabled_catalog_keys"
+
+        private static var defaultsKey: String {
+            "\(legacyDefaultsKey)_\(ProfileRepository.shared.activeProfileId)"
+        }
 
         static var disabledKeys: Set<String> {
-            Set(UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
+            let defaults = UserDefaults.standard
+            if let keys = defaults.stringArray(forKey: defaultsKey) { return Set(keys) }
+            return Set(defaults.stringArray(forKey: legacyDefaultsKey) ?? [])
         }
 
         static func setDisabled(_ disabled: Bool, forKey key: String) {
@@ -187,8 +197,9 @@ final class SearchViewModel: ObservableObject {
             return
         }
 
+        // SRC-1: ~400 ms after the last key — the on-screen keyboard types one character per press.
         debounce = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled, let self else { return }
             self.activeQuery = trimmed
             self.lastSearchAddonSignature = self.addonManifestSignature
@@ -205,7 +216,8 @@ final class SearchViewModel: ObservableObject {
 
     // MARK: - Search history
 
-    /// Record a committed query (keyboard submit), so partial typing doesn't pollute history.
+    /// Record a committed query (keyboard submit, or a result opened), so partial typing doesn't
+    /// pollute history. The shared repository ignores it while Recent Searches is off.
     func recordSearch(_ query: String) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }

@@ -143,7 +143,8 @@ struct ContentSourcesSettingsPane: View {
     }
 
     /// FEAT-10: one toggle per search-capable catalog. Rows derive from the installed addons
-    /// (SettingsViewModel's addon watcher), the disabled set is local to this Apple TV.
+    /// (SettingsViewModel's addon watcher), the disabled set is this profile's, on this Apple TV
+    /// (SRC-2).
     @ViewBuilder
     private var searchSourcesSection: some View {
         // UX-8 (u/mrStevenx3, restated three times, finally "completely hide the Discover
@@ -170,7 +171,7 @@ struct ContentSourcesSettingsPane: View {
             )
         )
 
-        Text("Choose which catalogs Search looks through. Fewer sources means faster, more focused results. Applies to this Apple TV only.")
+        Text("Choose which catalogs Search looks through. Fewer sources means faster, more focused results. Applies to this profile, on this Apple TV only.")
             .font(Theme.Font.caption)
             .foregroundStyle(Theme.Palette.textSecondary)
             .frame(maxWidth: 1100, alignment: .leading)
