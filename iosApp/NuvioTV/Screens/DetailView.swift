@@ -521,7 +521,11 @@ struct DetailView: View {
                         EpisodesSection(
                             meta: meta,
                             episodeRatings: model.episodeRatings,
-                            watchedEpisodeKeys: model.watchedEpisodeKeys
+                            watchedEpisodeKeys: model.watchedEpisodeKeys,
+                            episodeProgress: model.episodeProgress,
+                            preferredSeason: model.seriesAction?.seasonNumber?.value,
+                            preferredEpisode: model.seriesAction?.episodeNumber?.value,
+                            onToggleWatched: { model.toggleEpisodeWatched($0) }
                         )
                         // A discrete focus region: vertical D-pad moves must land here instead of
                         // geometrically skipping from the info/network chips down to the cast row.

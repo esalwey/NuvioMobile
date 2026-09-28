@@ -12364,6 +12364,16 @@
         }
       }
     },
+    "Mark Unwatched": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Marquer comme non vu"
+          }
+        }
+      }
+    },
     "Mark Watched": {
       "localizations": {
         "de": {

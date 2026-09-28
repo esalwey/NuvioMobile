@@ -30,6 +30,9 @@ final class DetailViewModel: ObservableObject {
     /// Episodes to badge as watched, keyed "season:episode" — explicit Watched marks OR
     /// effectively-completed watch progress (mirrors mobile's player episode rows).
     @Published private(set) var watchedEpisodeKeys: Set<String> = []
+    /// AES-4/EP-2: partial watch progress (0…1) per episode, keyed "season:episode" — the latest
+    /// record of each episode still in progress; watched episodes are left out (they get the check).
+    @Published private(set) var episodeProgress: [String: Double] = [:]
     /// Series-level primary play action (Resume SxEy / Play SxEy, honoring behaviorHints
     /// defaultVideoId) from the shared resolver; nil for movies or while meta loads.
     @Published private(set) var seriesAction: SeriesPrimaryAction?
@@ -497,7 +500,42 @@ final class DetailViewModel: ObservableObject {
         isSaved = LibraryRepository.shared.isSaved(id: contentId, type: contentType)
             || previewIdentityIfDistinct.map { LibraryRepository.shared.isSaved(id: $0.id, type: $0.type) } == true
         watchedEpisodeKeys = computeWatchedEpisodeKeys()
+        let progress = computeEpisodeProgress(excluding: watchedEpisodeKeys)
+        if progress != episodeProgress { episodeProgress = progress }
         seriesAction = computeSeriesAction()
+    }
+
+    /// EP-2: mark / unmark one episode (mobile's episode long-press, shared
+    /// `WatchingActions.toggleEpisodeWatched`). "Watched" is what the badge shows — an explicit mark
+    /// or a completed playback; the shared action clears the episode's progress either way and
+    /// re-derives the series-level marker.
+    func toggleEpisodeWatched(_ episode: MetaVideo) {
+        guard let meta, let s = episode.season?.value, let e = episode.episode?.value else { return }
+        WatchingActions.shared.toggleEpisodeWatched(
+            meta: meta,
+            episode: episode,
+            isCurrentlyWatched: watchedEpisodeKeys.contains("\(s):\(e)")
+        )
+    }
+
+    /// The latest progress record per episode of this series (under the meta's id, DET-1), kept
+    /// when it is still in progress.
+    private func computeEpisodeProgress(excluding watched: Set<String>) -> [String: Double] {
+        guard let meta, EpisodesSection.isSeriesLike(meta) else { return [:] }
+        let id = meta.id
+        var latest: [String: WatchProgressEntry] = [:]
+        for entry in latestProgressEntries where entry.parentMetaId == id {
+            guard let s = entry.seasonNumber?.value, let e = entry.episodeNumber?.value else { continue }
+            let key = "\(s):\(e)"
+            if let existing = latest[key], existing.lastUpdatedEpochMs >= entry.lastUpdatedEpochMs { continue }
+            latest[key] = entry
+        }
+        var result: [String: Double] = [:]
+        for (key, entry) in latest where !watched.contains(key) && !entry.isEffectivelyCompleted {
+            let fraction = Double(entry.progressFraction)
+            if fraction > 0.01 && fraction < 1 { result[key] = fraction }
+        }
+        return result
     }
 
     /// Hydrates Trakt-sourced per-episode completion for this title (no-op/cached otherwise), once
