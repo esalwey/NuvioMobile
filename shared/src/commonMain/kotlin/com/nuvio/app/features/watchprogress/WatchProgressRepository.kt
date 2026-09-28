@@ -61,6 +61,21 @@ internal const val WATCH_PROGRESS_BACKLOG_PUSH_LIMIT = 200
 private const val CONTINUE_WATCHING_DIAGNOSTICS_SEED_LIMIT = 20
 private const val CONTINUE_WATCHING_SERIES_IDENTITY_WARM_UP_CONCURRENCY = 2
 
+/** How far ahead of this device's clock a server row may be dated (CW legacy #3). */
+internal const val WATCH_PROGRESS_SERVER_FUTURE_TOLERANCE_MS = 10 * 60_000L
+
+/**
+ * CW legacy diagnosis (REMAINING_FIX #3): the date a server row gets locally. A `last_watched`
+ * more than [WATCH_PROGRESS_SERVER_FUTURE_TOLERANCE_MS] ahead of [nowEpochMs] (a device with a
+ * wrong clock wrote it) becomes 0, undated: otherwise it outranks every real row of its series,
+ * for good — the local rows written since are older than it, in the snapshot merge, in the delta
+ * decision and in the acknowledgement alike. Undated, it loses to any dated row, a dirty local
+ * row of the same key stays local and dirty (so the backlog push rewrites the account's copy),
+ * and it sorts last in Continue Watching.
+ */
+internal fun serverLastWatchedForLocalUse(lastWatched: Long, nowEpochMs: Long): Long =
+    if (lastWatched > nowEpochMs + WATCH_PROGRESS_SERVER_FUTURE_TOLERANCE_MS) 0L else lastWatched
+
 /**
  * CW sync (REMAINING_FIX #2): the rows the one-time post-pull backlog push sends — local rows whose
  * key is still dirty, newest first, at most [limit]. Rows without a content or video id are left
@@ -433,6 +448,9 @@ object WatchProgressRepository {
     private val seriesIdentityWarmUpLock = SynchronizedObject()
     private val seriesIdentityWarmUpAttemptedIds = mutableSetOf<String>()
     private val seriesIdentityWarmUpPermits = Semaphore(CONTINUE_WATCHING_SERIES_IDENTITY_WARM_UP_CONCURRENCY)
+    /** CW legacy #3: the server rows undated for being ahead of the clock, logged once each. */
+    private val futureServerRowLock = SynchronizedObject()
+    private val futureServerRowKeys = mutableSetOf<String>()
 
     init {
         ensureTrackingProvidersRegistered()
@@ -536,6 +554,7 @@ object WatchProgressRepository {
         remoteWriteDeduplicator.clear()
         crossProfileWriteCount = 0
         lastCrossProfileWrite = ""
+        synchronized(futureServerRowLock) { futureServerRowKeys.clear() }
         // Another account's profiles reuse the same ids: they get their own backlog push.
         synchronized(backlogPushLock) { backlogPushedProfileIds.clear() }
         TrackingProviderRegistry.progressProviders().forEach(TrackingProgressProvider::clearLocalState)
@@ -1134,8 +1153,19 @@ object WatchProgressRepository {
         else -> WatchProgressDeltaDecision(WatchProgressDeltaDecisionType.IGNORE)
     }
 
-    private fun ProgressSyncRecord.toWatchProgressEntry(cached: WatchProgressEntry?): WatchProgressEntry =
-        WatchProgressEntry(
+    /**
+     * The one converter from a server row: the snapshot merge, the delta decision and the
+     * acknowledgement all go through it, so a row dated in the future is undated for all three
+     * ([serverLastWatchedForLocalUse], CW legacy #3).
+     */
+    private fun ProgressSyncRecord.toWatchProgressEntry(cached: WatchProgressEntry?): WatchProgressEntry {
+        val progressKey = resolvedProgressKey()
+        val nowEpochMs = WatchProgressClock.nowEpochMs()
+        val lastUpdatedEpochMs = serverLastWatchedForLocalUse(lastWatched = lastWatched, nowEpochMs = nowEpochMs)
+        if (lastUpdatedEpochMs != lastWatched) {
+            noteFutureServerRow(progressKey = progressKey, aheadMs = lastWatched - nowEpochMs)
+        }
+        return WatchProgressEntry(
             contentType = contentType,
             parentMetaId = contentId,
             parentMetaType = cached?.parentMetaType ?: contentType,
@@ -1150,7 +1180,7 @@ object WatchProgressRepository {
             episodeThumbnail = cached?.episodeThumbnail,
             lastPositionMs = position,
             durationMs = duration,
-            lastUpdatedEpochMs = lastWatched,
+            lastUpdatedEpochMs = lastUpdatedEpochMs,
             providerName = cached?.providerName,
             providerAddonId = cached?.providerAddonId,
             lastStreamTitle = cached?.lastStreamTitle,
@@ -1158,8 +1188,22 @@ object WatchProgressRepository {
             pauseDescription = cached?.pauseDescription,
             lastSourceUrl = cached?.lastSourceUrl,
             isCompleted = isWatchProgressComplete(position, duration, false),
-            progressKey = resolvedProgressKey(),
+            progressKey = progressKey,
         )
+    }
+
+    /** Logs a future-dated server row once per key, and counts it for the diagnostics (`fut=`). */
+    private fun noteFutureServerRow(progressKey: String, aheadMs: Long) {
+        val first = synchronized(futureServerRowLock) { futureServerRowKeys.add(progressKey) }
+        if (first) {
+            log.w {
+                "Server watch progress $progressKey is dated ${aheadMs / 60_000L} min ahead of this device; " +
+                    "it counts as undated here"
+            }
+        }
+    }
+
+    private fun futureServerRowCount(): Int = synchronized(futureServerRowLock) { futureServerRowKeys.size }
 
     private fun ProgressDeltaEvent.toProgressSyncRecord(): ProgressSyncRecord =
         ProgressSyncRecord(
@@ -1664,7 +1708,7 @@ object WatchProgressRepository {
                     "cur=$currentProfileId act=${ProfileRepository.activeProfileId} src=$activeSource " +
                         "n=${localEntries.size} dirty=${dirtyKeys.size} deltaInit=$deltaInitialized " +
                         "remote=$hasLoadedNuvioRemoteProgress xprof=$crossProfileWriteCount " +
-                        "map=${ContinueWatchingSeriesIdentity.aliasCount()}",
+                        "map=${ContinueWatchingSeriesIdentity.aliasCount()} fut=${futureServerRowCount()}",
                 )
                 if (lastCrossProfileWrite.isNotEmpty()) add("xprof last $lastCrossProfileWrite")
             },

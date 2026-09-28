@@ -16,7 +16,8 @@ import kotlin.math.abs
  *
  * Markers:
  * - `FUTURE`: dated more than a minute ahead of this Apple TV's clock. Such a row outranks every
- *   real one of its series.
+ *   real one of its series. A server row more than 10 minutes ahead is undated on arrival
+ *   (REMAINING_FIX #3): it then shows `d=t0`, and the header's `fut=` counts those rows.
  * - `ALIAS?`: another card, or another series of the list, has the same title under another id
  *   the row does not group with this one. The same show is then stored twice (`tmdb:…` and
  *   `tt…`) and makes two cards.
