@@ -23,6 +23,10 @@ data class ExternalPlayerPlaybackRequest(
     val episodeTitle: String? = null,
     // JSON array of intro/outro skip segments, passed to players that support auto-skipping.
     val skipSegmentsJson: String? = null,
+    // x-callback-url return addresses (tvOS, upstream 99ced26a4): Infuse opens `callbackSuccessUrl`
+    // with the position it stopped at, which the app records as watch progress.
+    val callbackSuccessUrl: String? = null,
+    val callbackErrorUrl: String? = null,
 ) {
     /**
      * Builds a display title for external players.

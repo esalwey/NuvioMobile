@@ -21,11 +21,24 @@ private val iosExternalPlayerSpecs = listOf(
             buildString {
                 append("infuse://x-callback-url/play?url=")
                 append(request.sourceUrl.urlQueryEncode())
+                // Upstream 99ced26a4: start where the built-in player would resume (seconds)…
+                append("&position=")
+                append(request.resumePositionMs.coerceAtLeast(0L) / 1000L)
                 append("&filename=")
                 append(request.buildPlayerTitle(includeEpisodeTitle = true).urlQueryEncode())
                 request.subtitles?.forEach { subtitle ->
                     append("&sub=")
                     append(subtitle.url.urlQueryEncode())
+                }
+                // …and report where playback stopped: Infuse opens x-success with `position` and
+                // `lastPlayedUrl` when the viewer leaves it (x-error when it can't play the file).
+                request.callbackSuccessUrl?.takeIf { it.isNotBlank() }?.let { callback ->
+                    append("&x-success=")
+                    append(callback.urlQueryEncode())
+                }
+                request.callbackErrorUrl?.takeIf { it.isNotBlank() }?.let { callback ->
+                    append("&x-error=")
+                    append(callback.urlQueryEncode())
                 }
             }
         },

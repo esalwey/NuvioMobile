@@ -782,6 +782,31 @@ struct StreamPickerView: View {
             guard let progress, !progress.isCompleted, progress.lastPositionMs > 10_000 else { return 0 }
             return progress.lastPositionMs
         }()
+        // Infuse reports where it stopped through x-callback-url (upstream 99ced26a4): register the
+        // launch it will report back on.
+        var callbackLaunchId: String?
+        var callbacks: (success: String, error: String)?
+        if playerId == "infuse" {
+            let launch = ExternalPlaybackCallbacks.PendingLaunch(
+                id: UUID().uuidString,
+                sourceUrl: urlString,
+                profileId: ActiveProfileProvider.shared.activeProfileId,
+                contentType: type,
+                parentMetaId: parentMetaId,
+                videoId: videoId,
+                title: title,
+                poster: poster,
+                season: season,
+                episode: episode,
+                providerName: stream.addonName,
+                providerAddonId: stream.addonId,
+                streamTitle: stream.streamLabel,
+                streamSubtitle: { let s: String? = stream.description_; return s }(),
+                durationMs: progress.flatMap { $0.durationMs > 0 ? $0.durationMs : nil }
+            )
+            callbackLaunchId = launch.id
+            callbacks = ExternalPlaybackCallbacks.prepare(launch)
+        }
         let request = ExternalPlayerPlaybackRequest(
             sourceUrl: urlString,
             title: title,
@@ -795,11 +820,14 @@ struct StreamPickerView: View {
             season: season.map { KotlinInt(int: Int32($0)) },
             episode: episode.map { KotlinInt(int: Int32($0)) },
             episodeTitle: nil,
-            skipSegmentsJson: nil
+            skipSegmentsJson: nil,
+            callbackSuccessUrl: callbacks?.success,
+            callbackErrorUrl: callbacks?.error
         )
         let result = ExternalPlayerPlatform.shared.open(request: request, playerId: playerId)
         // SharedCore lowercases the whole Kotlin enum entry name (see KMP bridging notes).
         guard result != ExternalPlayerOpenResult.opened else { return }
+        if let callbackLaunchId { ExternalPlaybackCallbacks.cancel(id: callbackLaunchId) }
         if fallbackToInternal, let url = URL(string: urlString) {
             showToast(String(localized: "Couldn\u{2019}t open the external player \u{2014} playing in NuvioTV."))
             NextEpisodeEngine.consecutiveAutoPlays = 0
