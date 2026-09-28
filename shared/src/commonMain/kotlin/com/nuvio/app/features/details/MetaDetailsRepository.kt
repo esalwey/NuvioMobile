@@ -250,9 +250,11 @@ object MetaDetailsRepository {
 
         val metaScreenSettingsFingerprint = buildMetaScreenSettingsFingerprint(MdbListSettingsRepository.snapshot())
         val cachedEntry = cachedMetaByRequestKey[requestKey] ?: return null
-        return cachedEntry.metaScreenMeta
+        val cachedMeta = cachedEntry.metaScreenMeta
             ?.takeIf { cachedEntry.metaScreenSettingsFingerprint == metaScreenSettingsFingerprint }
             ?: cachedEntry.baseMeta
+        // Upstream 752962638: the same view a loaded title gets (unreleased rows filtered).
+        return cachedMeta.withUnreleasedFilter()
     }
 
     /**

@@ -72,4 +72,42 @@ class HomeCatalogParserTest {
         assertEquals("2027", result.items.single().releaseInfo)
         assertEquals("2027-05-12T00:00:00.000Z", result.items.single().rawReleaseDate)
     }
+
+    // Upstream 0b7ab892a (parser part). The fork's MetaPreview has no landscapePoster field (Swift
+    // builds MetaPreview positionally), so only the banner fallback is ported.
+    @Test
+    fun `parse catalog response reads addon landscape poster`() {
+        val result = HomeCatalogParser.parseCatalogResponse(
+            payload = """
+                {
+                  "metas": [
+                    {
+                      "id": "tt1",
+                      "type": "movie",
+                      "name": "One",
+                      "background": "https://img/background.jpg",
+                      "landscapePoster": "https://img/landscape-1.jpg"
+                    },
+                    {
+                      "id": "tt2",
+                      "type": "movie",
+                      "name": "Two",
+                      "landscapePoster": "https://img/landscape-2.jpg"
+                    },
+                    {
+                      "id": "tt3",
+                      "type": "movie",
+                      "name": "Three",
+                      "landscapePoster": " "
+                    }
+                  ]
+                }
+            """.trimIndent(),
+        )
+
+        val (withBackground, withoutBackground, blankLandscape) = result.items
+        assertEquals("https://img/background.jpg", withBackground.banner)
+        assertEquals("https://img/landscape-2.jpg", withoutBackground.banner)
+        assertEquals(null, blankLandscape.banner)
+    }
 }
