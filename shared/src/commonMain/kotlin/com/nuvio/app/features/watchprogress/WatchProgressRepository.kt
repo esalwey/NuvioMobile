@@ -1650,34 +1650,35 @@ object WatchProgressRepository {
             daysCap = TraktSettingsRepository.uiState.value.continueWatchingDaysCap,
             nowEpochMs = WatchProgressClock.nowEpochMs(),
         )
-        val entries = currentEntries()
-        warmUpContinueWatchingSeriesIdentity(entries)
-        return buildContinueWatchingRowEntries(
-            entries = entries,
+        val row = buildContinueWatchingRowEntries(
+            entries = currentEntries(),
             isDroppedShow = ::isDroppedShow,
             recencyCutoffEpochMs = cutoffEpochMs,
             limit = limit,
         )
+        warmUpContinueWatchingSeriesIdentity(row)
+        return row
     }
 
     /**
-     * CW alias fix (REMAINING_FIX #2): looks up, in the background, the IMDb id of the row's recent
-     * series stored under another id ([selectSeriesIdentityWarmUpKeys]), so the row can group them
+     * CW alias fix (REMAINING_FIX #2): looks up, in the background, the IMDb id of the row's series
+     * cards stored under another id ([selectSeriesIdentityWarmUpKeys]), so the row can group them
      * with their `tt` rows. Rows whose metadata is complete are never enriched, so nothing else
      * would ever fetch their series. Each id once per profile load, [MetaDetailsRepository]'s cache
-     * first; a learned id republishes the state (see the collector in `init`).
+     * first; a learned id republishes the state (see the collector in `init`), and the next build
+     * shows one card.
      *
      * Like the metadata enrichment, it leaves out the rows a display-ready provider (Trakt) can
      * represent: that is network the shipped build never issued. Runs on the Swift main thread's
      * call to [continueWatchingRow], so it never throws.
      */
-    private fun warmUpContinueWatchingSeriesIdentity(entries: List<WatchProgressEntry>) {
+    private fun warmUpContinueWatchingSeriesIdentity(rowEntries: List<WatchProgressEntry>) {
         try {
             val displayReadyProvider = activeProgressProvider()
                 ?.takeIf(TrackingProgressProvider::providesCompleteMetadata)
             val attempted = synchronized(seriesIdentityWarmUpLock) { seriesIdentityWarmUpAttemptedIds.toSet() }
             val candidates = selectSeriesIdentityWarmUpKeys(
-                entries = entries.filter { entry ->
+                rowEntries = rowEntries.filter { entry ->
                     displayReadyProvider?.canRepresentContentId(entry.parentMetaId) != true
                 },
                 isResolved = ContinueWatchingSeriesIdentity::isResolved,

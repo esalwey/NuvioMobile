@@ -104,29 +104,31 @@ internal fun WatchProgressEntry.isContinueWatchingSeries(): Boolean =
 internal fun WatchProgressEntry.continueWatchingSeriesKey(canonicalSeriesId: (String) -> String): String =
     if (isContinueWatchingSeries()) canonicalSeriesId(parentMetaId) else parentMetaId.trim()
 
-/** How many of the most recent series the warm-up considers (REMAINING_FIX #2). */
-internal const val ContinueWatchingSeriesIdentityWarmUpSeries = 30
+/** How many series one warm-up pass looks up at most (REMAINING_FIX #2). */
+internal const val ContinueWatchingSeriesIdentityWarmUpLimit = 30
 
 /**
  * CW alias fix (REMAINING_FIX #2): the series whose meta the row's warm-up fetches to learn their
- * IMDb id — among the [seriesLimit] most recent series of [entries], the ones stored under another
- * id ([isResolved] false) and not looked up yet ([alreadyAttempted]), with the metadata key the
- * repository's enrichment uses for them (so both share [MetaDetailsRepository]'s cache).
+ * IMDb id. An alias only shows as a card of its own, so the candidates are the series cards of the
+ * row ([rowEntries]) stored under another id ([isResolved] false: an IMDb id needs no lookup) and
+ * not looked up yet ([alreadyAttempted]) — the [limit] most recent — each with the metadata key
+ * the repository's enrichment uses for it (so both share [MetaDetailsRepository]'s cache). The
+ * other alias shape, an Up Next seed, is learned when its card is resolved.
  */
 internal fun selectSeriesIdentityWarmUpKeys(
-    entries: Collection<WatchProgressEntry>,
+    rowEntries: Collection<WatchProgressEntry>,
     isResolved: (String) -> Boolean,
     alreadyAttempted: Set<String>,
-    seriesLimit: Int = ContinueWatchingSeriesIdentityWarmUpSeries,
-): List<WatchProgressMetadataKey> = entries
+    limit: Int = ContinueWatchingSeriesIdentityWarmUpLimit,
+): List<WatchProgressMetadataKey> = rowEntries
     .filter(WatchProgressEntry::isContinueWatchingSeries)
     .sortedByDescending(WatchProgressEntry::lastUpdatedEpochMs)
     .distinctBy { entry -> entry.parentMetaId.trim() }
-    .take(seriesLimit.coerceAtLeast(0))
     .filter { entry ->
         val id = entry.parentMetaId.trim()
         !isMalformedNextUpSeedContentId(id) && !isResolved(id) && id !in alreadyAttempted
     }
+    .take(limit.coerceAtLeast(0))
     .map(WatchProgressEntry::metadataKey)
 
 /**

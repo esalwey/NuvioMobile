@@ -308,27 +308,47 @@ class ContinueWatchingSeriesIdentityTest {
     // The warm-up
 
     @Test
-    fun `the warm-up looks up the recent series stored under another id, once`() {
-        val entries = listOf(
-            episode(tmdbId, episode = 1, updatedAt = 9_000L),
-            episode(tmdbId, episode = 2, updatedAt = 8_000L),
-            episode(imdbId, episode = 5, updatedAt = 7_000L),
-            episode("kitsu:1", episode = 1, updatedAt = 6_000L),
-            episode("tmdb:", episode = 1, updatedAt = 5_000L),
-            movie("tmdb:550", updatedAt = 4_000L),
-            episode("tmdb:42", episode = 1, updatedAt = 3_000L),
-            episode("tmdb:43", episode = 1, updatedAt = 2_000L),
+    fun `the warm-up looks up the row's series cards stored under another id, once`() {
+        val rowEntries = listOf(
+            episode(tmdbId, episode = 2, updatedAt = 9_000L),
+            episode(imdbId, episode = 5, updatedAt = 8_000L),
+            episode("kitsu:1", episode = 1, updatedAt = 7_000L),
+            episode("tmdb:", episode = 1, updatedAt = 6_000L),
+            movie("tmdb:550", updatedAt = 5_000L),
+            episode("tmdb:42", episode = 1, updatedAt = 4_000L),
+            episode("tmdb:43", episode = 1, updatedAt = 3_000L),
+            episode("tmdb:44", episode = 1, updatedAt = 2_000L),
         )
 
         val keys = selectSeriesIdentityWarmUpKeys(
-            entries = entries,
+            rowEntries = rowEntries,
             isResolved = { id -> id.startsWith("tt") || id == "tmdb:42" },
             alreadyAttempted = setOf("kitsu:1"),
-            seriesLimit = 5,
+            limit = 2,
         )
 
-        // The IMDb id, the resolved one, the attempted one and the malformed id are left out, and
-        // the movie is no series; tmdb:43 is past the 5 most recent series.
-        assertEquals(listOf(WatchProgressMetadataKey(metaId = tmdbId, metaType = "series")), keys)
+        // The IMDb id, the resolved one, the attempted one and the malformed id are left out, the
+        // movie is no series, and tmdb:44 is past the 2 most recent candidates.
+        assertEquals(
+            listOf(
+                WatchProgressMetadataKey(metaId = tmdbId, metaType = "series"),
+                WatchProgressMetadataKey(metaId = "tmdb:43", metaType = "series"),
+            ),
+            keys,
+        )
+    }
+
+    @Test
+    fun `an old alias card behind many IMDb cards is still looked up`() {
+        val recentImdbCards = (1..40).map { number -> episode("tt${1_000_000 + number}", 1, 10_000L + number) }
+        val oldAliasCard = episode(tmdbId, episode = 1, updatedAt = 1_000L)
+
+        val keys = selectSeriesIdentityWarmUpKeys(
+            rowEntries = recentImdbCards + oldAliasCard,
+            isResolved = ContinueWatchingSeriesIdentity::isResolved,
+            alreadyAttempted = emptySet(),
+        )
+
+        assertEquals(listOf(tmdbId), keys.map(WatchProgressMetadataKey::metaId))
     }
 }
