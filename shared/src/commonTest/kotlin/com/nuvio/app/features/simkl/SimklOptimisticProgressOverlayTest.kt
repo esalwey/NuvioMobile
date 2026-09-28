@@ -126,20 +126,40 @@ class SimklOptimisticProgressOverlayTest {
         val snapshot = listOf(simklRow(episode = 1, percent = 40f, updatedAt = minutes(10)))
         val overlay = SimklOptimisticProgressOverlay()
         val now = minutes(100)
+        val heldUntil = now + TrackerOptimisticStopInFlightHoldMs
         overlay.put(PROFILE, localRow(episode = 2, completed = true, updatedAt = now), now)
         overlay.put(PROFILE, localRow(episode = 1, positionMin = 3, updatedAt = now, contentId = "tt0903747"), now)
-        overlay.hold(PROFILE, listOf("tt0944947", "tt0903747"), now + TrackerOptimisticStopInFlightHoldMs, now)
+        overlay.hold(PROFILE, listOf("tt0944947", "tt0903747"), heldUntil, now)
 
         val deliveredAt = now + 30_000L
-        assertEquals(0, overlay.release(OTHER_PROFILE, listOf("tt0944947"), deliveredAt + TrackerOptimisticProgressTtlMs))
-        assertEquals(1, overlay.release(PROFILE, listOf("tt0944947"), deliveredAt + TrackerOptimisticProgressTtlMs))
+        val ttlFromDelivery = deliveredAt + TrackerOptimisticProgressTtlMs
+        assertEquals(0, overlay.release(OTHER_PROFILE, listOf("tt0944947"), ttlFromDelivery, heldUntil))
+        assertEquals(1, overlay.release(PROFILE, listOf("tt0944947"), ttlFromDelivery, heldUntil))
 
         // The delivered title is gone once the TTL has run from the delivery; the other title is
         // still held, because its stop is still on the way.
-        val afterTtl = deliveredAt + TrackerOptimisticProgressTtlMs
-        assertEquals(listOf("tt0903747", "tt0944947"), overlay.merge(PROFILE, snapshot, afterTtl).map { it.parentMetaId })
+        assertEquals(listOf("tt0903747", "tt0944947"), overlay.merge(PROFILE, snapshot, ttlFromDelivery).map { it.parentMetaId })
         // A row due to expire sooner is not extended.
-        assertEquals(0, overlay.release(PROFILE, listOf("tt0903747"), now + TrackerOptimisticStopInFlightHoldMs + 60_000L))
+        assertEquals(0, overlay.release(PROFILE, listOf("tt0903747"), heldUntil + 60_000L, heldUntil + 120_000L))
+    }
+
+    @Test
+    fun `a delivered stop leaves the day-long hold of a failed one`() {
+        val overlay = SimklOptimisticProgressOverlay()
+        val now = minutes(100)
+        overlay.put(PROFILE, localRow(episode = 2, completed = true, updatedAt = now), now)
+        // E2's stop failed: its rows are kept for a day.
+        overlay.hold(PROFILE, listOf("tt0944947"), now + TrackerOptimisticFailedStopRetentionMs, now)
+        // A later stop of the show holds, then is delivered.
+        val later = now + 60_000L
+        val heldUntil = later + TrackerOptimisticStopInFlightHoldMs
+        overlay.put(PROFILE, localRow(episode = 3, positionMin = 20, updatedAt = later), later)
+        overlay.hold(PROFILE, listOf("tt0944947"), heldUntil, later)
+
+        assertEquals(1, overlay.release(PROFILE, listOf("tt0944947"), later + TrackerOptimisticProgressTtlMs, heldUntil))
+
+        val twoHoursLater = now + 2L * 60L * 60_000L
+        assertEquals(listOf(2), overlay.merge(PROFILE, emptyList(), twoHoursLater).map { it.episodeNumber })
     }
 
     @Test

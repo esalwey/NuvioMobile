@@ -254,14 +254,15 @@ object TraktScrobbleRepository : TrackingScrobbler {
     ) {
         if (ActiveProfileProvider.activeProfileId != profileId) return
         val clampedProgress = progressPercent.coerceIn(0f, 100f)
+        // The same scrobble reached Trakt moments ago: nothing to send, and nothing to hold.
+        if (shouldSkip(profileId, action, item.itemKey, clampedProgress)) return
         val isStop = action == "stop"
+        // CW sync #4: the title's optimistic rows outlive this stop's retries and timeouts, so a
+        // stop that fails slowly still finds them to keep (reportUndeliveredStop). A delivered stop
+        // releases exactly this hold again.
+        val heldUntilEpochMs = TraktPlatformClock.nowEpochMs() + TrackerOptimisticStopInFlightHoldMs
         if (isStop) {
-            // CW sync #4: the title's optimistic rows outlive this stop's retries and timeouts, so
-            // a stop that fails slowly still finds them to keep (reportUndeliveredStop).
-            TraktProgressRepository.holdOptimisticProgress(
-                item = item,
-                untilEpochMs = TraktPlatformClock.nowEpochMs() + TrackerOptimisticStopInFlightHoldMs,
-            )
+            TraktProgressRepository.holdOptimisticProgress(item = item, untilEpochMs = heldUntilEpochMs)
         }
         val headers = TraktAuthRepository.authorizedHeaders() ?: run {
             // Disconnected: nothing to report. Connected without a usable token (the refresh
@@ -272,11 +273,6 @@ object TraktScrobbleRepository : TrackingScrobbler {
             return
         }
         if (ActiveProfileProvider.activeProfileId != profileId) return
-        if (shouldSkip(profileId, action, item.itemKey, clampedProgress)) {
-            // The same stop reached Trakt moments ago: nothing is in flight.
-            if (isStop) TraktProgressRepository.releaseOptimisticProgressHold(item)
-            return
-        }
 
         val url = "$BASE_URL/scrobble/$action"
         val requestBody = json.encodeToString(buildRequestBody(item, clampedProgress))
@@ -379,8 +375,8 @@ object TraktScrobbleRepository : TrackingScrobbler {
         )
 
         if (action == "stop") {
-            // Delivered: the title's rows go back to the plain TTL (CW sync #4).
-            TraktProgressRepository.releaseOptimisticProgressHold(item)
+            // Delivered: the in-flight hold above is released (CW sync #4).
+            TraktProgressRepository.releaseOptimisticProgressHold(item = item, heldUntilEpochMs = heldUntilEpochMs)
             runCatching { TraktProgressRepository.invalidateAndRefresh() }
                 .onFailure { error ->
                     if (error is CancellationException) throw error

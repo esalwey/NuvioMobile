@@ -204,11 +204,12 @@ object SimklMutationRepository : TrackingListWriter, TrackingHistoryWriter, Trac
         // (SimklProgressRepository's overlay; a no-op unless Simkl is the Watch Progress Source).
         val playedContentId = event.media.catalog?.contentId?.takeIf(String::isNotBlank)
             .takeIf { action == TrackingScrobbleAction.STOP }
+        val heldUntilEpochMs = SimklPlatformClock.nowEpochMs() + TrackerOptimisticStopInFlightHoldMs
         if (playedContentId != null) {
             SimklProgressRepository.holdOptimisticProgress(
                 profileId = profileId,
                 contentId = playedContentId,
-                forMs = TrackerOptimisticStopInFlightHoldMs,
+                untilEpochMs = heldUntilEpochMs,
             )
         }
         val enriched = SimklSyncRepository.state.value.snapshot.enrichMediaReference(event.media)
@@ -226,7 +227,7 @@ object SimklMutationRepository : TrackingListWriter, TrackingHistoryWriter, Trac
                 val kept = SimklProgressRepository.holdOptimisticProgress(
                     profileId = profileId,
                     contentId = playedContentId,
-                    forMs = TrackerOptimisticFailedStopRetentionMs,
+                    untilEpochMs = SimklPlatformClock.nowEpochMs() + TrackerOptimisticFailedStopRetentionMs,
                 )
                 log.w {
                     val consequence = if (kept > 0) {
@@ -244,11 +245,13 @@ object SimklMutationRepository : TrackingListWriter, TrackingHistoryWriter, Trac
             }
             throw error
         }
-        // Delivered: the in-flight hold is released, and the title's rows go back to the plain TTL.
+        // Delivered: the in-flight hold above is released, and the title's rows go back to the
+        // plain TTL.
         if (playedContentId != null) {
             SimklProgressRepository.releaseOptimisticProgressHold(
                 profileId = profileId,
                 contentId = playedContentId,
+                heldUntilEpochMs = heldUntilEpochMs,
             )
         }
         if (action != TrackingScrobbleAction.START) {

@@ -524,21 +524,28 @@ object TraktProgressRepository {
     }
 
     /**
-     * CW sync #4 (review): Trakt accepted a scrobble stop of [item]'s title, so nothing about it
-     * is in flight any more. The rows that [holdOptimisticProgress] kept past the plain TTL go back
-     * to it, counted from now. Rows due to expire sooner are left alone. Without this, a delivered
-     * stop would still keep every row of the show for the 10 minutes of the in-flight hold, unless a
-     * snapshot confirmed them, and a completed row rarely gets confirmed. A hold left by an earlier
-     * stop of the title that failed is released as well: Trakt now has this newer viewing of the
-     * title. Returns how many rows it released.
+     * CW sync #4 (review): Trakt accepted a scrobble stop of [item]'s title, so its in-flight hold
+     * ([holdOptimisticProgress] up to [heldUntilEpochMs]) is no longer needed. The title's rows held
+     * past the plain TTL, up to that deadline, go back to the TTL counted from now.
+     *
+     * Without this, a delivered stop would still keep every row of the show for the 10 minutes of
+     * the hold, unless a snapshot confirmed them, and a completed row rarely gets confirmed.
+     *
+     * Left alone: rows due to expire sooner, and rows held longer. The longer holds are a failed
+     * stop's 24 h, which stops finishing out of order must not cut short, and a later stop still in
+     * flight. Returns how many rows it released.
      */
-    internal fun releaseOptimisticProgressHold(item: TraktScrobbleItem): Int {
+    internal fun releaseOptimisticProgressHold(item: TraktScrobbleItem, heldUntilEpochMs: Long): Int {
         val until = TraktPlatformClock.nowEpochMs() + OPTIMISTIC_PROGRESS_TTL_MS
         var released = 0
         optimisticProgress.update { current ->
             released = 0
             current.mapValues { (_, optimistic) ->
-                if (optimistic.expiresAtMs > until && optimistic.progress.isOfTraktScrobbleTitle(item)) {
+                if (
+                    optimistic.expiresAtMs > until &&
+                    optimistic.expiresAtMs <= heldUntilEpochMs &&
+                    optimistic.progress.isOfTraktScrobbleTitle(item)
+                ) {
                     released += 1
                     optimistic.copy(expiresAtMs = until)
                 } else {

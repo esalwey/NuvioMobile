@@ -279,32 +279,32 @@ object SimklProgressRepository {
     }
 
     /**
-     * Keeps the local rows of [contentId] on Continue Watching for at least [forMs] — while a
-     * scrobble stop is in flight, and after one failed (`SimklMutationRepository.scrobble`). Both the
-     * id as played and Simkl's canonical id for it match (rows are written under the canonical one).
-     * Returns how many rows it holds.
+     * Keeps the local rows of [contentId] on Continue Watching until at least [untilEpochMs] — while
+     * a scrobble stop is in flight, and after one failed (`SimklMutationRepository.scrobble`). Both
+     * the id as played and Simkl's canonical id for it match (rows are written under the canonical
+     * one). Returns how many rows it holds.
      */
-    internal fun holdOptimisticProgress(profileId: Int, contentId: String, forMs: Long): Int {
+    internal fun holdOptimisticProgress(profileId: Int, contentId: String, untilEpochMs: Long): Int {
         val canonicalId = runCatching {
             SimklSyncRepository.state.value.snapshot.resolveCanonicalContentId(contentId)
         }.getOrNull()
         return synchronized(publicationLock) {
-            val now = SimklPlatformClock.nowEpochMs()
             optimisticProgress.hold(
                 profileId = profileId,
                 contentIds = listOfNotNull(contentId, canonicalId),
-                untilEpochMs = now + forMs,
-                nowEpochMs = now,
+                untilEpochMs = untilEpochMs,
+                nowEpochMs = SimklPlatformClock.nowEpochMs(),
             )
         }
     }
 
     /**
-     * CW sync #3 (review): a stop of [contentId] reached Simkl. The rows [holdOptimisticProgress]
-     * kept for it go back to the plain TTL, counted from now, like Trakt's
-     * `releaseOptimisticProgressHold`. Returns how many rows it released.
+     * CW sync #3 (review): a stop of [contentId] reached Simkl, so the in-flight hold that
+     * [holdOptimisticProgress] set up to [heldUntilEpochMs] is released. The rows go back to the
+     * plain TTL, counted from now, like Trakt's `releaseOptimisticProgressHold`. Returns how many
+     * rows it released.
      */
-    internal fun releaseOptimisticProgressHold(profileId: Int, contentId: String): Int {
+    internal fun releaseOptimisticProgressHold(profileId: Int, contentId: String, heldUntilEpochMs: Long): Int {
         val canonicalId = runCatching {
             SimklSyncRepository.state.value.snapshot.resolveCanonicalContentId(contentId)
         }.getOrNull()
@@ -313,6 +313,7 @@ object SimklProgressRepository {
                 profileId = profileId,
                 contentIds = listOfNotNull(contentId, canonicalId),
                 untilEpochMs = SimklPlatformClock.nowEpochMs() + TrackerOptimisticProgressTtlMs,
+                heldUntilEpochMs = heldUntilEpochMs,
             )
         }
     }

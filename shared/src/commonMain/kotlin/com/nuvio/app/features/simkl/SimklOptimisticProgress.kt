@@ -146,17 +146,18 @@ internal class SimklOptimisticProgressOverlay(
     }
 
     /**
-     * Brings the live rows of [contentIds] that expire after [untilEpochMs] back to it: a stop
-     * was delivered, so the in-flight hold that [hold] set is no longer needed. Rows due to expire
-     * sooner are left alone. Returns how many rows it released.
+     * A stop was delivered, so the in-flight hold that [hold] set up to [heldUntilEpochMs] is no
+     * longer needed. The rows of [contentIds] held past [untilEpochMs], up to that deadline, are
+     * brought back to [untilEpochMs]. Rows due to expire sooner are left alone, and so are rows held
+     * longer (a failed stop's 24 h). Returns how many rows it released.
      */
-    fun release(profileId: Int, contentIds: Collection<String>, untilEpochMs: Long): Int {
+    fun release(profileId: Int, contentIds: Collection<String>, untilEpochMs: Long, heldUntilEpochMs: Long): Int {
         if (held.isEmpty() || ownerProfileId != profileId) return 0
         val ids = contentIds.mapNotNullTo(mutableSetOf()) { id -> id.trim().takeIf(String::isNotEmpty) }
         if (ids.isEmpty()) return 0
         var count = 0
         held = held.mapValues { (key, row) ->
-            if (key.contentId in ids && row.expiresAtMs > untilEpochMs) {
+            if (key.contentId in ids && row.expiresAtMs > untilEpochMs && row.expiresAtMs <= heldUntilEpochMs) {
                 count += 1
                 row.copy(expiresAtMs = untilEpochMs)
             } else {
