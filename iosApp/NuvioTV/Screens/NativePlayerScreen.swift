@@ -113,6 +113,11 @@ struct NativePlayerScreen: View {
                             panelOpen = open
                             // The Up Next countdown waits while the panel is open.
                             upNext?.setPanelOpen(open)
+                            // The swipe hint has done its job on both engines (AES-9).
+                            if open {
+                                PlayerSwipeHint.markLearned()
+                                hideSwipeHint()
+                            }
                         }
                     )
                     .ignoresSafeArea()
@@ -214,6 +219,8 @@ struct NativePlayerScreen: View {
     private enum SwipeHintReason { case start, pause }
 
     private func flashSwipeHint(after delay: Double, reason: SwipeHintReason) {
+        // Only until the viewer has opened the panel once (AES-9, shared with the mpv screen).
+        guard !PlayerSwipeHint.isLearned else { return }
         swipeHintTask?.cancel()
         swipeHintReason = reason
         swipeHintTask = Task { @MainActor in

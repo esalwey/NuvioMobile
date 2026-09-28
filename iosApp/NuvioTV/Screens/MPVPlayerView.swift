@@ -1656,6 +1656,12 @@ struct MPVPlayerScreen: View {
     @State private var endScreenClosedByMenu = false
     /// Series · code · episode name for the transport bar and the pause card (AES-8/AES-9).
     private let titleParts: PlaybackTitleParts
+    /// "Swipe down for info", flashed at the start of playback until the panel has been used once.
+    @State private var showSwipeHint = false
+    @State private var swipeHintTask: Task<Void, Never>?
+    @State private var didFlashStartHint = false
+    /// Measured height of the transport bar, bottom inset included (`promptBottomInset`).
+    @State private var transportHeight: CGFloat = 0
 
     init(context: PlaybackContext,
          upNext: NextEpisodeEngine,
@@ -1698,9 +1704,20 @@ struct MPVPlayerScreen: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            PlayerControlsOverlay(state: state)
+            PlayerControlsOverlay(state: state, titleParts: titleParts)
+                // Measured, not assumed: the prompts above it clear its real height (a Larger Text
+                // size or a movie's one-line title changes it).
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }, action: { height in
+                    transportHeight = height
+                })
                 .opacity(state.controlsVisible ? 1 : 0)
                 .animation(.easeInOut(duration: 0.25), value: state.controlsVisible)
+
+            // AES-9: the "Swipe down for info" hint flashes once playback starts (and rides the
+            // pause card), instead of living in the transport bar; gone once the panel was opened.
+            if showSwipeHint, !state.panelOpen, !upNext.isCardVisible, state.skipPrompt == nil, !state.isEnded {
+                PlayerSwipeHint().transition(.opacity)
+            }
 
             // Metadata card after a sustained pause (Android TV PauseOverlay parity) — not on the
             // last frame, and not under the Up Next card.
@@ -1727,18 +1744,21 @@ struct MPVPlayerScreen: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                     .padding(.trailing, PlayerChipStyle.edgePadding)
                     // Clear the transport bar while it's showing.
-                    .padding(.bottom, PlayerChipStyle.edgePadding + (state.controlsVisible ? Self.transportClearance : 0))
+                    .padding(.bottom, promptBottomInset)
                     .transition(.opacity)
             } else if let prompt = state.skipPrompt {
                 PlayerActionChip(label: prompt.label, symbol: PlayerChipStyle.skipSymbol, showsPressHint: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                    .padding(PlayerChipStyle.edgePadding)
+                    .padding(.trailing, PlayerChipStyle.edgePadding)
+                    // Same clearance as the Up Next card: the chip used to sit on the bar's end.
+                    .padding(.bottom, promptBottomInset)
                     .transition(.opacity)
             }
         }
         .animation(PlayerChipStyle.animation, value: state.skipPrompt)
         .animation(PlayerChipStyle.animation, value: upNext.phase)
         .animation(PlayerChipStyle.animation, value: state.controlsVisible)
+        .animation(PlayerChipStyle.animation, value: showSwipeHint)
         .animation(.easeInOut(duration: 0.25), value: showPauseInfo)
         .animation(.easeInOut(duration: 0.25), value: state.showStreamInfo)
         .fullScreenCover(isPresented: endScreenPresented, onDismiss: { endScreenDidDismiss() }) {
@@ -1767,6 +1787,13 @@ struct MPVPlayerScreen: View {
         .onChange(of: routingNote) { _, note in state.routingNote = note ?? "" }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
+            swipeHintTask?.cancel()
+        }
+        // First frames on screen: flash the swipe hint once (the native screen's start hint).
+        .onChange(of: state.isBuffering) { _, buffering in
+            guard !buffering, !didFlashStartHint else { return }
+            didFlashStartHint = true
+            flashSwipeHint()
         }
         .onChange(of: state.positionSec) { _, position in
             upNext.onProgress(positionSec: position, durationSec: state.durationSec)
@@ -1781,7 +1808,14 @@ struct MPVPlayerScreen: View {
             }
         }
         // The Up Next countdown waits while the top panel is open.
-        .onChange(of: state.panelOpen) { _, open in upNext.setPanelOpen(open) }
+        .onChange(of: state.panelOpen) { _, open in
+            upNext.setPanelOpen(open)
+            // The viewer found the panel: the swipe hint has done its job (AES-9).
+            if open {
+                PlayerSwipeHint.markLearned()
+                hideSwipeHint()
+            }
+        }
         .onChange(of: state.isPaused) { _, paused in
             // The Up Next countdown pauses with the video.
             upNext.setPaused(paused)
@@ -1801,8 +1835,33 @@ struct MPVPlayerScreen: View {
         }
     }
 
-    /// Height the transport bar (`PlayerControlsOverlay`) occupies above the bottom inset.
-    private static let transportClearance: CGFloat = 210
+    /// Bottom inset of the bottom-trailing prompts (Up Next card, skip chip): the screen-edge inset,
+    /// or — while the transport bar shows — its measured height plus a gap, so they sit just above
+    /// it instead of on it.
+    private var promptBottomInset: CGFloat {
+        guard state.controlsVisible else { return PlayerChipStyle.edgePadding }
+        return max(PlayerChipStyle.edgePadding, transportHeight + Theme.Spacing.md)
+    }
+
+    /// Shows the swipe hint for a few seconds after a beat — until the viewer has opened the panel
+    /// once (`PlayerSwipeHint.isLearned`), same timing as the native screen.
+    private func flashSwipeHint() {
+        guard !PlayerSwipeHint.isLearned else { return }
+        swipeHintTask?.cancel()
+        swipeHintTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            showSwipeHint = true
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            showSwipeHint = false
+        }
+    }
+
+    private func hideSwipeHint() {
+        swipeHintTask?.cancel()
+        showSwipeHint = false
+    }
 
     /// Hooks between this screen, its libmpv controller (via `state`) and the shared engine.
     /// Re-installed on every appearance — after a native → mpv fallback they replace the native
@@ -1885,22 +1944,33 @@ struct MPVPlayerScreen: View {
     }
 }
 
-/// Bottom transport bar: title, scrubber, elapsed/remaining time, play/pause indicator.
+/// Bottom transport bar: what's playing, scrubber, elapsed/remaining time, play/pause indicator.
 private struct PlayerControlsOverlay: View {
     @ObservedObject var state: MPVPlaybackState
+    let titleParts: PlaybackTitleParts
 
     var body: some View {
         // Floating glass transport bar (HIG revamp): mirrors the native AVPlayerViewController
         // tvOS 26 chrome — an inset Liquid Glass panel over the video instead of the old
-        // full-width black gradient.
+        // full-width black gradient. AES-9: a two-line title block at section size (the 48 pt
+        // screen title outweighed a 10 pt scrubber) and no permanent "Swipe down for info" line —
+        // that hint is transient now (`PlayerSwipeHint`).
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            Text(state.title)
-                .font(Theme.Font.screenTitle)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                Text(titleParts.heading)
+                    .font(Theme.Font.sectionTitle)
+                    .lineLimit(1)
+                if let detail = titleParts.detail {
+                    Text(detail)
+                        .font(Theme.Font.meta)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .lineLimit(1)
+                }
+            }
 
             HStack(spacing: Theme.Spacing.lg) {
                 Image(systemName: state.isPaused ? "pause.fill" : "play.fill")
-                    .font(Theme.Font.screenTitle.weight(.regular))
+                    .font(Theme.Font.sectionTitle)
 
                 Text(timeString(state.positionSec))
                     .font(Theme.Font.body).monospacedDigit()
@@ -1911,9 +1981,6 @@ private struct PlayerControlsOverlay: View {
                 Text("-\(timeString(max(state.durationSec - state.positionSec, 0)))")
                     .font(Theme.Font.body).monospacedDigit()
             }
-
-            Label("Swipe down for info", systemImage: "chevron.down")
-                .font(Theme.Font.caption).foregroundStyle(.white.opacity(0.7))
         }
         .foregroundStyle(Theme.Palette.textPrimary)
         .padding(PlayerChipStyle.panelPadding)
@@ -1986,12 +2053,25 @@ private struct PauseInfoCard: View {
                         .foregroundStyle(Theme.Palette.textSecondary)
                         .lineLimit(1)
                 }
+                if showsSwipeHint {
+                    Label("Swipe down for info", systemImage: "chevron.compact.down")
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .padding(.top, Theme.Spacing.xs)
+                }
             }
         }
         .foregroundStyle(Theme.Palette.textPrimary)
         .padding(PlayerChipStyle.panelPadding)
         .frame(maxWidth: 860, alignment: .leading)
         .playerPanelGlass()
+    }
+
+    /// AES-9: the pause is when the panel is most useful, so the hint rides this card (the old
+    /// transport bar line) until the viewer has opened the panel once — not while Down would skip
+    /// a segment instead.
+    private var showsSwipeHint: Bool {
+        !PlayerSwipeHint.isLearned && state.skipPrompt == nil
     }
 
     @ViewBuilder
