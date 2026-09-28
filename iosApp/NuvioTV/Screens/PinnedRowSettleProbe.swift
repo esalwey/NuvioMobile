@@ -165,10 +165,17 @@ enum PinnedRowSettleProbe {
     /// `!rowSettleProbeLines.isEmpty` gate stays the only thing deciding whether the block renders
     /// at all.
     nonisolated static func displayPages(_ persisted: [String], linesPerPage: Int = 5) -> [[String]] {
-        let ordered = displayOrder(persisted)
-        guard !ordered.isEmpty else { return [] }
-        return stride(from: 0, to: ordered.count, by: linesPerPage).map {
-            Array(ordered[$0..<Swift.min($0 + linesPerPage, ordered.count)])
+        pages(displayOrder(persisted), linesPerPage: linesPerPage)
+    }
+
+    /// The chunking half of `displayPages`, without its newest-first reordering: `lines` cut into
+    /// `linesPerPage`-line pages, in the given order. For a readout that is one snapshot rather
+    /// than a log, whose header must stay on page 1 — the Continue Watching diagnostics
+    /// (`ContinueWatchingDiagnosticsRows`). An empty input makes zero pages.
+    nonisolated static func pages(_ lines: [String], linesPerPage: Int = 5) -> [[String]] {
+        guard !lines.isEmpty, linesPerPage > 0 else { return [] }
+        return stride(from: 0, to: lines.count, by: linesPerPage).map {
+            Array(lines[$0..<Swift.min($0 + linesPerPage, lines.count)])
         }
     }
 }

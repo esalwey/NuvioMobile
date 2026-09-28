@@ -6328,6 +6328,26 @@
         }
       }
     },
+    "Continue Watching Diagnostics": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diagnostic de « Continuer à regarder »"
+          }
+        }
+      }
+    },
+    "Continue Watching Diagnostics · page %lld/%lld": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diagnostic de « Continuer à regarder » · page %lld/%lld"
+          }
+        }
+      }
+    },
     "Corners": {
       "localizations": {
         "de": {
@@ -17300,6 +17320,16 @@
         }
       }
     },
+    "Play from the card, come back here, press Refresh, then photograph every page": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lancez depuis la carte, revenez ici, appuyez sur Actualiser, puis photographiez chaque page"
+          }
+        }
+      }
+    },
     "PRIMARY": {
       "localizations": {
         "de": {
@@ -24738,6 +24768,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "NGÀY MAI"
+          }
+        }
+      }
+    },
+    "Turn on if asked to capture why a Continue Watching card stays out of date": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Activez si l'on vous demande pourquoi une carte « Continuer à regarder » reste périmée"
           }
         }
       }

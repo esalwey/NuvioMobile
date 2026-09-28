@@ -21,6 +21,7 @@ import com.nuvio.app.features.tracking.WatchProgressSource
 import com.nuvio.app.features.tracking.effectiveWatchProgressSource
 import com.nuvio.app.features.tracking.providerId
 import com.nuvio.app.features.trakt.TraktSettingsRepository
+import com.nuvio.app.features.watched.WatchedRepository
 import com.nuvio.app.features.watching.application.WatchingActions
 import com.nuvio.app.features.watching.sync.ProgressDeltaEvent
 import com.nuvio.app.features.watching.sync.ProgressSyncRecord
@@ -56,6 +57,8 @@ private const val WATCH_PROGRESS_DELTA_OPERATION_UPSERT = "upsert"
 private const val WATCH_PROGRESS_DELTA_OPERATION_DELETE = "delete"
 private const val WATCH_PROGRESS_REMOTE_WRITE_DEDUP_WINDOW_MS = 5_000L
 internal const val WATCH_PROGRESS_BACKLOG_PUSH_LIMIT = 200
+/** Mirrors `ContinueWatchingNextUpModel.seedLimit` (Swift): the seeds a Home row build considers. */
+private const val CONTINUE_WATCHING_DIAGNOSTICS_SEED_LIMIT = 20
 
 /**
  * CW sync (REMAINING_FIX #2): the rows the one-time post-pull backlog push sends — local rows whose
@@ -415,6 +418,13 @@ object WatchProgressRepository {
     /** Profiles whose dirty-row backlog was already pushed (or tried) by this process (#2). */
     private val backlogPushLock = SynchronizedObject()
     private val backlogPushedProfileIds = mutableSetOf<Int>()
+    /**
+     * CW legacy diagnosis (REMAINING_FIX #1): playback writes whose profile was not the one loaded
+     * here, or not the active one (the branch of [upsert] that only writes to disk). Shown as
+     * `xprof` by [continueWatchingDiagnosticLines].
+     */
+    private var crossProfileWriteCount = 0
+    private var lastCrossProfileWrite = ""
 
     init {
         ensureTrackingProvidersRegistered()
@@ -506,6 +516,8 @@ object WatchProgressRepository {
         deltaCursorEventId = 0L
         deltaInitialized = false
         remoteWriteDeduplicator.clear()
+        crossProfileWriteCount = 0
+        lastCrossProfileWrite = ""
         // Another account's profiles reuse the same ids: they get their own backlog push.
         synchronized(backlogPushLock) { backlogPushedProfileIds.clear() }
         TrackingProviderRegistry.progressProviders().forEach(TrackingProgressProvider::clearLocalState)
@@ -1508,6 +1520,59 @@ object WatchProgressRepository {
         )
     }
 
+    /**
+     * CW legacy diagnosis (REMAINING_FIX #1): the Continue Watching report of Settings > About
+     * ([buildContinueWatchingDiagnosticLines]), taken now: the in-progress cards Home shows, the
+     * series of its Up Next cards and the rows behind them.
+     *
+     * Called from the Swift main thread, so it never throws: a failure becomes the report's only line.
+     */
+    fun continueWatchingDiagnosticLines(): List<String> = try {
+        ensureLoaded()
+        val nowEpochMs = WatchProgressClock.nowEpochMs()
+        val localEntries = localEntriesSnapshot()
+        val dirtyKeys = dirtyProgressKeysSnapshot()
+        val rowEntries = continueWatchingRow()
+        val seeds = try {
+            continueWatchingNextUpSeedsForDiagnostics(rowEntries)
+        } catch (error: Throwable) {
+            log.w { "Continue Watching diagnostics: no Up Next seeds (${error.message})" }
+            emptyList()
+        }
+        buildContinueWatchingDiagnosticLines(
+            header = buildList {
+                add(
+                    "cur=$currentProfileId act=${ProfileRepository.activeProfileId} src=$activeSource " +
+                        "n=${localEntries.size} dirty=${dirtyKeys.size} deltaInit=$deltaInitialized " +
+                        "remote=$hasLoadedNuvioRemoteProgress xprof=$crossProfileWriteCount",
+                )
+                if (lastCrossProfileWrite.isNotEmpty()) add("xprof last $lastCrossProfileWrite")
+            },
+            entries = currentEntries(),
+            dirtyKeys = dirtyKeys,
+            rowEntries = rowEntries,
+            nowEpochMs = nowEpochMs,
+            nextUpSeeds = seeds,
+        )
+    } catch (error: Throwable) {
+        log.e(error) { "Continue Watching diagnostics failed" }
+        listOf("Continue Watching diagnostics failed: ${error::class.simpleName}: ${error.message.orEmpty()}")
+    }
+
+    /** The Up Next seeds Home resolves its cards from, as `ContinueWatchingNextUpModel` asks for them. */
+    private fun continueWatchingNextUpSeedsForDiagnostics(
+        rowEntries: List<WatchProgressEntry>,
+    ): List<ContinueWatchingNextUpSeed> {
+        val preferences = ContinueWatchingPreferencesRepository.uiState.value
+        return ContinueWatchingNextUp.seeds(
+            watchedItems = WatchedRepository.uiState.value.items,
+            inProgressEntries = rowEntries,
+            preferFurthestEpisode = preferences.upNextFromFurthestEpisode,
+            dismissedNextUpKeys = preferences.dismissedNextUpKeys,
+            limit = CONTINUE_WATCHING_DIAGNOSTICS_SEED_LIMIT,
+        )
+    }
+
     fun refreshEpisodeProgress(contentId: String, forceRefresh: Boolean = false) {
         ensureLoaded()
         val provider = activeProgressProvider() ?: return
@@ -1581,6 +1646,9 @@ object WatchProgressRepository {
         ).normalizedCompletion()
 
         if (targetProfileId != currentProfileId || ProfileRepository.activeProfileId != targetProfileId) {
+            recordCrossProfileWrite(
+                "target=$targetProfileId current=$currentProfileId active=${ProfileRepository.activeProfileId}",
+            )
             val resolvedEntry = resolveStoredProfileProgressIdentity(
                 profileId = targetProfileId,
                 entry = candidateEntry,
@@ -1643,6 +1711,18 @@ object WatchProgressRepository {
         ) {
             WatchingActions.onProgressEntryUpdated(entry, syncRemote = syncRemote)
         }
+    }
+
+    /**
+     * CW legacy diagnosis (REMAINING_FIX #1): counts a playback write that did not go through the
+     * loaded profile's in-memory state. Playback saves every 5 s, so the warning is only logged
+     * when the profiles involved change.
+     */
+    private fun recordCrossProfileWrite(detail: String) {
+        crossProfileWriteCount += 1
+        if (detail == lastCrossProfileWrite) return
+        lastCrossProfileWrite = detail
+        log.w { "Watch progress write outside the loaded profile: $detail" }
     }
 
     private fun upsertStoredProfileProgress(
