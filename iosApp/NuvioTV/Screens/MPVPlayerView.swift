@@ -181,6 +181,11 @@ final class MPVTVPlayerViewController: UIViewController {
     private var skipSegments: [SkipSegment] = []
     /// Last raw eof-reached value (edge detection for the post-play cover).
     private var lastEofFlag = false
+    /// PLY-4: last cached pause flag — a pause pushes the position to the account (mobile flushes
+    /// on every playing → paused), as does leaving the app mid-playback (the TV button, sleep):
+    /// neither reaches `viewDidDisappear`'s flush.
+    private var lastPausedFlag = false
+    private var backgroundObserver: NSObjectProtocol?
 
     // MARK: Event-driven property cache
     //
@@ -296,6 +301,12 @@ final class MPVTVPlayerViewController: UIViewController {
         let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeDown))
         swipeDown.direction = .down
         view.addGestureRecognizer(swipeDown)
+
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.saveProgress(flush: true) }
+        }
 
         setupMpv()
     }
@@ -1100,10 +1111,10 @@ final class MPVTVPlayerViewController: UIViewController {
             contentType: context.contentType,
             parentMetaId: context.parentMetaId,
             videoId: context.videoId,
-            title: context.title,
+            title: context.progressTitle,
             seasonNumber: context.season.map { KotlinInt(int: Int32($0)) },
             episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) },
-            episodeTitle: nil,
+            episodeTitle: context.episodeTitle,
             releaseInfo: nil
         ) { [weak self] item, _ in
             // Suspend completions can land off-main; hop before touching controller state.
@@ -1404,25 +1415,27 @@ final class MPVTVPlayerViewController: UIViewController {
         if seconds > 10 { pendingResumeSec = seconds }
     }
 
+    // CW-1: the series name + the episode's own name/still, never the "S1E3 · Pilot" header label
+    // as the show's title (same record `PlaybackProgressRecorder` writes for the native engine).
     private lazy var session = WatchProgressPlaybackSession(
         profileId: ActiveProfileProvider.shared.activeProfileId,
         contentType: context.contentType,
         parentMetaId: context.parentMetaId,
         parentMetaType: context.contentType,
         videoId: context.videoId,
-        title: context.title,
-        logo: nil,
+        title: context.progressTitle,
+        logo: context.logo,
         poster: context.poster,
         background: context.background,
         seasonNumber: context.season.map { KotlinInt(int: Int32($0)) },
         episodeNumber: context.episode.map { KotlinInt(int: Int32($0)) },
-        episodeTitle: nil,
-        episodeThumbnail: nil,
+        episodeTitle: context.episodeTitle,
+        episodeThumbnail: context.episodeStill,
         providerName: context.providerName,
         providerAddonId: context.providerAddonId,
         lastStreamTitle: context.streamTitle,
         lastStreamSubtitle: context.streamSubtitle,
-        pauseDescription: nil,
+        pauseDescription: context.synopsis,
         lastSourceUrl: context.url.absoluteString
     )
 
@@ -1447,7 +1460,10 @@ final class MPVTVPlayerViewController: UIViewController {
             videoHeight: Int32(truncatingIfNeeded: cachedProps().videoH)
         )
         if flush {
-            WatchProgressRepository.shared.flushPlaybackProgress(session: session, snapshot: snapshot, syncRemote: false)
+            // PLY-4: the end-of-file / teardown write reaches the Nuvio account (mobile
+            // `flushWatchProgress` parity), and with it the watched mark of a finished episode.
+            // The 5 s ticks below stay local; the push is deduplicated.
+            WatchProgressRepository.shared.flushPlaybackProgress(session: session, snapshot: snapshot, syncRemote: true)
         } else {
             WatchProgressRepository.shared.upsertPlaybackProgress(session: session, snapshot: snapshot, syncRemote: false)
         }
@@ -1480,6 +1496,10 @@ final class MPVTVPlayerViewController: UIViewController {
         if traktStartPending, snap.duration > 0 {
             traktStartPending = false
             startTraktScrobble()
+        }
+        if snap.paused != lastPausedFlag {
+            lastPausedFlag = snap.paused
+            if snap.paused, !snap.eof, !state.isEnded { saveProgress(flush: true) }   // PLY-4
         }
 
         // Rising-edge detection: eof-reached STAYS true while keep-open holds the last frame, so
@@ -1965,6 +1985,7 @@ final class MPVTVPlayerViewController: UIViewController {
     deinit {
         loadWatchdog?.cancel()
         subtitleRestoreDeadline?.cancel()
+        if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
         pollTimer?.invalidate()
         seekTimer?.invalidate()
         subtitleWatcher?.cancel()

@@ -945,7 +945,10 @@ final class NextEpisodeEngine: ObservableObject {
             requestHeaders: StreamModelsKt.sanitizePlaybackHeaders(
                 headers: stream.behaviorHints.proxyHeaders?.request),
             // The new source picks up exactly where this one is (c69b643a6).
-            startPositionSec: lastPositionSec
+            startPositionSec: lastPositionSec,
+            seriesTitle: seriesTitleForRecord,
+            episodeTitle: context.episodeTitle,
+            logo: context.logo
         )
         handedOff = true
         countdownTask?.cancel()
@@ -1397,8 +1400,21 @@ final class NextEpisodeEngine: ObservableObject {
             meta: context.meta,
             fileSizeBytes: { let n: Int64? = stream.behaviorHints.videoSize?.int64Value; return n }(),
             requestHeaders: StreamModelsKt.sanitizePlaybackHeaders(
-                headers: stream.behaviorHints.proxyHeaders?.request)
+                headers: stream.behaviorHints.proxyHeaders?.request),
+            // CW-1: same series; the next episode's own name.
+            seriesTitle: seriesTitleForRecord,
+            episodeTitle: Self.nonEmpty(next.title),
+            logo: context.logo
         )
+    }
+
+    /// CW-1: the series name the next context's progress record is filed under. A launch from a
+    /// legacy progress record may not have had it (its label was dropped, the picker's fetch had not
+    /// landed); by the hand-off that fetch — or this engine's own — has cached the series meta.
+    private var seriesTitleForRecord: String? {
+        if let seriesTitle = context.seriesTitle { return seriesTitle }
+        guard context.season != nil, context.episode != nil else { return nil }
+        return ProgressRecordTitles.cachedSeriesName(type: context.contentType, id: context.parentMetaId)
     }
 
     // MARK: - Episode resolution (Swift port of mobile's PlayerNextEpisodeRules)

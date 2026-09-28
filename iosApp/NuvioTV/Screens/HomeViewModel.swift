@@ -214,6 +214,8 @@ final class HomeViewModel: ObservableObject {
     private var noSourcesWaitGeneration = 0
     private var progressWatcher: FlowWatcher?
     private var progressSourceWatcher: FlowWatcher?
+    /// CW-2: the Up Next cards merged into `continueWatching` (profile-scoped, reset in `stop()`).
+    private let nextUp = ContinueWatchingNextUpModel()
     private var traktSettingsWatcher: FlowWatcher?
     /// Last Trakt continue-watching days cap the row was built with; `nil` until the settings
     /// watcher's replay lands. Profile-scoped — cleared with the watchers in `teardownPipeline()`.
@@ -412,6 +414,7 @@ final class HomeViewModel: ObservableObject {
         sections = []
         rows = []
         continueWatching = []
+        nextUp.reset()
         upcoming = []
         isLoading = false
         errorMessage = nil
@@ -770,6 +773,13 @@ final class HomeViewModel: ObservableObject {
             self.lastTraktContinueWatchingDaysCap = state.continueWatchingDaysCap
             self.refreshContinueWatching()
         }
+        // CW-2: Up Next cards join the row — their own inputs (watched items, Continue Watching
+        // preferences) and every card that resolves rebuild it too.
+        nextUp.onChange = { [weak self] in
+            guard let self, self.pipelineGeneration == gen else { return }
+            self.refreshContinueWatching()
+        }
+        nextUp.start()
 
         // BUG-86 hero-off rows (beta.18): applied BEFORE `AddonRepository.initialize()`, not
         // alongside the burst sim below, because initialize()'s first add-on emission can drive
@@ -834,11 +844,36 @@ final class HomeViewModel: ObservableObject {
 
     /// Rebuilds the Continue Watching row from the shared provider-aware builder. Called by every
     /// watcher that can change what the row contains: the progress entries themselves, the active
-    /// progress source, and the Trakt continue-watching days cap.
+    /// progress source, the Trakt continue-watching days cap — and the Up Next cards (CW-2).
     private func refreshContinueWatching() {
-        continueWatching = WatchProgressRepository.shared.continueWatchingRow(
+        let row = nextUp.row(inProgress: inProgressContinueWatching())
+        // A rebuild that changes nothing (a watched or preference emission elsewhere, a card that
+        // resolved to what the row already shows) republishes nothing.
+        if row != continueWatching { continueWatching = row }
+    }
+
+    private func inProgressContinueWatching() -> [WatchProgressEntry] {
+        WatchProgressRepository.shared.continueWatchingRow(
             limit: ContinueWatchingRowKt.ContinueWatchingRowScanLimit
         )
+    }
+
+    /// "Remove from Continue Watching". CW-3: the whole title leaves the row (mobile
+    /// `removeProgress(contentId)`), not the one episode an older in-progress episode of the same
+    /// show would replace at once — and the Up Next card its episode marks would put back is
+    /// dismissed with it. An Up Next card itself is dismissed until another episode is finished.
+    func removeFromContinueWatching(_ entry: WatchProgressEntry) {
+        if ContinueWatchingNextUpModel.isNextUp(entry) {
+            nextUp.dismiss(entry)
+            return
+        }
+        let contentId = entry.parentMetaId
+        // The replacement Up Next card, as the seeds stand before the removal (a provider's
+        // completed history) and after it (explicit episode marks) — see `replacementDismissKeys`.
+        var replacements = nextUp.replacementDismissKeys(forContentId: contentId, inProgress: inProgressContinueWatching())
+        WatchProgressRepository.shared.removeProgress(contentId: contentId, seasonNumber: nil, episodeNumber: nil)
+        replacements.formUnion(nextUp.replacementDismissKeys(forContentId: contentId, inProgress: inProgressContinueWatching()))
+        nextUp.dismiss(keys: replacements)
     }
 
     /// The real teardown. Idempotent (`started` gates it) so a hard `stop()` on an already-stopped
@@ -859,6 +894,7 @@ final class HomeViewModel: ObservableObject {
         noSourcesSyncWatcher?.cancel()
         progressWatcher?.cancel()
         progressSourceWatcher?.cancel()
+        nextUp.stop()
         traktSettingsWatcher?.cancel()
         collectionsWatcher?.cancel()
         catalogSettingsWatcher?.cancel()

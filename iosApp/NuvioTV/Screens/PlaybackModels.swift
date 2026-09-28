@@ -80,6 +80,20 @@ struct PlaybackContext: Identifiable {
     /// the saved position is up to a tick stale, and an entry already counted as completed near the
     /// end would restart the episode from 0. nil = the saved progress decides.
     var startPositionSec: Double? = nil
+    /// CW-1: the parent title the watch-progress record (and the Trakt scrobble) is filed under —
+    /// the SERIES name for an episode, while `title` is the "S1E3 · Pilot" label the picker and the
+    /// player header show. nil = `title` (movies, launch paths without the series name).
+    var seriesTitle: String? = nil
+    /// CW-1: the episode's own name, recorded as the progress entry's `episodeTitle`.
+    var episodeTitle: String? = nil
+    /// CW-1: the title's logo, recorded with the progress entry (Continue Watching hero).
+    var logo: String? = nil
+
+    /// The title watch progress and Trakt are told about (see `seriesTitle`).
+    var progressTitle: String {
+        guard let seriesTitle, !seriesTitle.isEmpty else { return title }
+        return seriesTitle
+    }
 
     // Headers join the identity (Codex 2026-08-20 round 3): two sources for the same episode can
     // share a URL but require different headers; StreamPickerView rebuilds the player and
@@ -96,6 +110,51 @@ struct PlaybackContext: Identifiable {
                 .map { "\($0.key)\u{1F}\($0.value)" }
                 .joined(separator: "\u{1E}")
         return "\(videoId)|\(url.absoluteString)\(headerFingerprint)"
+    }
+}
+
+/// CW-1: titles for the launch paths that start from a watch-progress record (Continue Watching,
+/// the Top Shelf) instead of from the title's metadata.
+enum ProgressRecordTitles {
+    /// Builds before CW-1 recorded an episode's picker label ("S1E3 · Pilot") as the SERIES title of
+    /// its progress entry. True when `title` is such a label for this episode. The label comes from
+    /// the "S%lldE%lld · %@" key, which Spanish renders with a "T".
+    static func isEpisodeLabel(_ title: String, season: Int?, episode: Int?) -> Bool {
+        guard let season, let episode else { return false }
+        for letter in ["S", "T"] {
+            let code = "\(letter)\(season)E\(episode)"
+            if title == code || title.hasPrefix(code + " \u{00B7} ") { return true }
+        }
+        return false
+    }
+
+    /// The recorded title when it names the series; nil when it is empty or a legacy episode label.
+    static func seriesTitle(_ title: String, season: Int?, episode: Int?) -> String? {
+        if title.isEmpty || isEpisodeLabel(title, season: season, episode: episode) { return nil }
+        return title
+    }
+
+    /// The series name from the metadata cache, for a launch whose record held only a legacy label
+    /// and whose own fetch has not landed (a stream picked at once, the next episode it chains to).
+    /// nil when the title is not cached — the label is then kept, and repaired on a later resume.
+    static func cachedSeriesName(type: String, id: String) -> String? {
+        let name: String? = MetaDetailsRepository.shared.peek(type: type, id: id)?.name
+        guard let name, !name.isEmpty else { return nil }
+        return name
+    }
+
+    /// The stream picker header: "S1E3 · Pilot" for an episode (the series name stands in for a
+    /// missing episode name), the title itself for anything else.
+    static func pickerTitle(title: String, season: Int?, episode: Int?, episodeTitle: String?) -> String {
+        guard let season, let episode else { return title }
+        if isEpisodeLabel(title, season: season, episode: episode) { return title }
+        let name: String
+        if let episodeTitle, !episodeTitle.isEmpty {
+            name = episodeTitle
+        } else {
+            name = title
+        }
+        return String(localized: "S\(season)E\(episode) \u{00B7} \(name)")
     }
 }
 

@@ -521,7 +521,11 @@ struct DetailView: View {
                         EpisodesSection(
                             meta: meta,
                             episodeRatings: model.episodeRatings,
-                            watchedEpisodeKeys: model.watchedEpisodeKeys
+                            watchedEpisodeKeys: model.watchedEpisodeKeys,
+                            episodeProgress: model.episodeProgress,
+                            preferredSeason: model.seriesAction?.seasonNumber?.value,
+                            preferredEpisode: model.seriesAction?.episodeNumber?.value,
+                            onToggleWatched: { model.toggleEpisodeWatched($0) }
                         )
                         // A discrete focus region: vertical D-pad moves must land here instead of
                         // geometrically skipping from the info/network chips down to the cast row.
@@ -892,8 +896,11 @@ struct DetailView: View {
             if interacted { cancelAutoPlayTrailer() }
         }
         .fullScreenCover(isPresented: $showStreams) {
+            // CW-1: the backdrop (never the poster fallback `backgroundUrl` ends on) and the logo
+            // are recorded with the progress entry for Continue Watching and its hero.
             StreamPickerView(type: preview.type, videoId: streamVideoId, title: title,
-                             poster: posterUrl, synopsis: overview, meta: playbackMeta)
+                             poster: posterUrl, synopsis: overview, meta: playbackMeta,
+                             background: model.meta?.background ?? preview.banner, logo: logoUrl)
         }
         .fullScreenCover(item: $seriesPlay) { route in
             StreamPickerView(
@@ -907,7 +914,12 @@ struct DetailView: View {
                 poster: route.meta.poster,
                 episodeStill: route.episodeStill,
                 synopsis: route.synopsis,
-                meta: playbackMeta
+                meta: playbackMeta,
+                // CW-1: progress is filed under the series, with the episode's own name beside it.
+                seriesTitle: route.meta.name,
+                episodeTitle: route.episodeName,
+                background: route.meta.background,
+                logo: route.meta.logo
             )
         }
         // FEAT-32: presented from `presentedTrailer`, which `beginTrailerBridge` sets after the
@@ -1437,14 +1449,14 @@ struct DetailView: View {
                         // BUG-4) covers both states: accent-contrasting text unfocused, dark text
                         // on the near-white focus lift.
                         actionButtonPadding(
-                            actionLabel("Play", systemImage: "play.fill")
-                                .font(Theme.Font.meta)
-                                .prominentAccentLabel(),
+                            playActionLabel(verbatim: nil),
                             horizontal: Theme.Spacing.lg
                         )
                     }
                 )
                 .tint(Theme.Palette.accent)
+                // Upstream 972109f9: no configured source can stream this title.
+                .disabled(!model.isPlaybackAvailable)
             } else if let action = model.seriesAction, let meta = model.meta {
                 prominentActionButtonStyle(
                     Button {
@@ -1452,14 +1464,13 @@ struct DetailView: View {
                     } label: {
                         // BUG-14: see the non-series Play button above.
                         actionButtonPadding(
-                            actionLabel(action.label, systemImage: "play.fill")
-                                .font(Theme.Font.meta)
-                                .prominentAccentLabel(),
+                            playActionLabel(verbatim: action.label),
                             horizontal: Theme.Spacing.lg
                         )
                     }
                 )
                 .tint(Theme.Palette.accent)
+                .disabled(!model.isPlaybackAvailable)
             }
 
             if model.trailerVideoURL != nil {
@@ -1527,12 +1538,43 @@ struct DetailView: View {
     }
 
     /// FEAT-9: the underlying `Label` for one action-row button — icon + text normally, icon-only
-    /// (with the title preserved for VoiceOver) when `actionIconsOnly` is on.
+    /// (with the title preserved for VoiceOver) when `actionIconsOnly` is on. A localization key:
+    /// FEAT-9 took the titles as plain `String`s, which `Label` shows verbatim, so the whole row
+    /// ("Play", "Mark Watched", "Add to Library"…) stayed English on a French Apple TV.
     @ViewBuilder
-    private func actionLabel(_ title: String, systemImage: String) -> some View {
+    private func actionLabel(_ titleKey: LocalizedStringKey, systemImage: String) -> some View {
+        let label = Label(titleKey, systemImage: systemImage)
+        if actionIconsOnly {
+            label.labelStyle(.iconOnly).accessibilityLabel(Text(titleKey))
+        } else {
+            label
+        }
+    }
+
+    /// The primary Play button's label: "Play", or the series action's already-localized label —
+    /// "Playback unavailable" instead once no configured source can stream it (upstream 972109f9).
+    @ViewBuilder
+    private func playActionLabel(verbatim seriesLabel: String?) -> some View {
+        Group {
+            if !model.isPlaybackAvailable {
+                actionLabel("Playback unavailable", systemImage: "play.slash")
+            } else if let seriesLabel {
+                actionLabel(verbatim: seriesLabel, systemImage: "play.fill")
+            } else {
+                actionLabel("Play", systemImage: "play.fill")
+            }
+        }
+        .font(Theme.Font.meta)
+        .prominentAccentLabel()
+    }
+
+    /// `actionLabel` for a title that is already localized (the shared series action's
+    /// "Resume S1E2" / "Next Up • S1E3").
+    @ViewBuilder
+    private func actionLabel(verbatim title: String, systemImage: String) -> some View {
         let label = Label(title, systemImage: systemImage)
         if actionIconsOnly {
-            label.labelStyle(.iconOnly).accessibilityLabel(Text(title))
+            label.labelStyle(.iconOnly).accessibilityLabel(Text(verbatim: title))
         } else {
             label
         }
@@ -2323,6 +2365,13 @@ private struct SeriesPlayRoute: Identifiable {
         if let overview, !overview.isEmpty { return overview }
         let d: String? = meta.description_
         return d
+    }
+    /// The episode's own name (the action's, else the resolved episode's) — CW-1.
+    var episodeName: String? {
+        let name: String? = action.episodeTitle
+        if let name, !name.isEmpty { return name }
+        let fallback: String? = episode?.title
+        return (fallback ?? "").isEmpty ? nil : fallback
     }
 
     /// "S1E1 · Pilot"-style picker title (falls back to the action label).

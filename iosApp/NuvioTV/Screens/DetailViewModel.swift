@@ -30,9 +30,16 @@ final class DetailViewModel: ObservableObject {
     /// Episodes to badge as watched, keyed "season:episode" — explicit Watched marks OR
     /// effectively-completed watch progress (mirrors mobile's player episode rows).
     @Published private(set) var watchedEpisodeKeys: Set<String> = []
+    /// AES-4/EP-2: partial watch progress (0…1) per episode, keyed "season:episode" — the latest
+    /// record of each episode still in progress; watched episodes are left out (they get the check).
+    @Published private(set) var episodeProgress: [String: Double] = [:]
     /// Series-level primary play action (Resume SxEy / Play SxEy, honoring behaviorHints
     /// defaultVideoId) from the shared resolver; nil for movies or while meta loads.
     @Published private(set) var seriesAction: SeriesPrimaryAction?
+    /// Upstream 972109f9: false once it is certain no configured source (stream add-on, plugin,
+    /// embedded stream) can stream the primary Play target — Detail greys Play out instead of
+    /// opening a stream list that can only say so. True while that is not known.
+    @Published private(set) var isPlaybackAvailable = true
     /// IMDb parental-guide severities (empty when the title has no tt-id or no guide data).
     @Published private(set) var parentalWarnings: [ParentalWarning] = []
     /// Resolved full-screen trailer (from the Trailers row); drives a player cover with sound.
@@ -49,7 +56,15 @@ final class DetailViewModel: ObservableObject {
 
     private var detailWatcher: FlowWatcher?
     private var watchedWatcher: FlowWatcher?
+    /// DET-2: fully-watched series state is its own flow (a reconcile can change it without
+    /// touching the watched items).
+    private var fullyWatchedWatcher: FlowWatcher?
     private var libraryWatcher: FlowWatcher?
+    /// Installed add-ons and plugin scrapers → `isPlaybackAvailable`.
+    private var addonsWatcher: FlowWatcher?
+    private var pluginsWatcher: FlowWatcher?
+    /// A series watched toggle is in flight (the shared action fetches the episode list first).
+    private var watchedToggleInFlight = false
     private var progressWatcher: FlowWatcher?
     private var cwPrefsWatcher: FlowWatcher?
     // Latest shared-state emissions (the exported StateFlow interface has no `value` accessor,
@@ -57,6 +72,12 @@ final class DetailViewModel: ObservableObject {
     private var latestProgressEntries: [WatchProgressEntry] = []
     private var latestWatchedItems: [WatchedItem] = []
     private var latestCwPrefs: ContinueWatchingPreferencesUiState?
+    /// DET-2: the series-level watched state is reconciled (mobile MetaDetailsScreen) only once both
+    /// stores have loaded — and only when what it reads has changed since the last run.
+    private var watchedStateLoaded = false
+    private var progressRemoteLoaded = false
+    private var watchedStateVersion = 0
+    private var lastReconcileSignature: String?
     private var didRequestTrailer = false
     private var didRequestComments = false
     private var didRequestRatings = false
@@ -80,8 +101,23 @@ final class DetailViewModel: ObservableObject {
     private var trailerResolveGeneration = 0
 
     private let preview: MetaPreview
+    /// The catalog preview's identity — the repo request key (`load`, the stale-emission guard) and
+    /// the trailer zoom key. Watch/library/progress state lives under `contentId` instead.
     private var type: String { preview.type }
     private var id: String { preview.id }
+    /// DET-1: the identity watched/library/progress state is read AND written under — the resolved
+    /// meta's. A TMDB-backed preview's `tmdb:` id resolves to `tt…`, and every write (library,
+    /// playback progress, completion marks) uses the meta's id; the preview's until it arrives.
+    private var contentId: String { meta?.id ?? preview.id }
+    private var contentType: String { meta?.type ?? preview.type }
+    /// The preview's identity while it differs from the meta's: a mark saved under it before the
+    /// meta resolved still reads as set (and is what a toggle then clears).
+    private var previewIdentityIfDistinct: (id: String, type: String)? {
+        guard let meta, meta.id != preview.id else { return nil }
+        return (preview.id, preview.type)
+    }
+    /// The content id `refreshEpisodeProgress` last ran for (re-run once the meta's id is known).
+    private var episodeProgressRequestedFor: String?
     /// BUG-59: the identity the trailer surfaces remember their measured zoom under.
     var trailerZoomKey: String { TrailerResolutionCache.key(type: type, id: id) }
 
@@ -113,6 +149,8 @@ final class DetailViewModel: ObservableObject {
                 self.fetchCommentsIfNeeded(m)
                 self.fetchEpisodeRatingsIfNeeded(m)
                 self.fetchParentalGuideIfNeeded(m)
+                // DET-1: the meta's id can differ from the preview's (tmdb: → tt…).
+                self.refreshEpisodeProgressIfNeeded()
             }
             self.refreshFlags()
         }
@@ -122,19 +160,36 @@ final class DetailViewModel: ObservableObject {
         LibraryRepository.shared.ensureLoaded()
         WatchProgressRepository.shared.ensureLoaded()
         // Hydrate Trakt-sourced per-episode completion for this title (no-op/cached otherwise).
-        WatchProgressRepository.shared.refreshEpisodeProgress(contentId: id, forceRefresh: false)
+        refreshEpisodeProgressIfNeeded()
         watchedWatcher = FlowWatcherKt.watch(WatchedRepository.shared.uiState) { [weak self] emitted in
             guard let self else { return }
-            if let state = emitted as? WatchedUiState { self.latestWatchedItems = state.items }
+            if let state = emitted as? WatchedUiState {
+                self.latestWatchedItems = state.items
+                self.watchedStateLoaded = state.isLoaded
+                self.watchedStateVersion += 1
+            }
             self.refreshFlags()
+        }
+        fullyWatchedWatcher = FlowWatcherKt.watch(WatchedRepository.shared.fullyWatchedSeriesKeys) { [weak self] _ in
+            self?.refreshFlags()
         }
         libraryWatcher = FlowWatcherKt.watch(LibraryRepository.shared.uiState) { [weak self] _ in
             guard let self else { return }
             self.refreshFlags()
         }
+        addonsWatcher = FlowWatcherKt.watch(AddonRepository.shared.uiState) { [weak self] _ in
+            self?.refreshFlags()
+        }
+        // A plugin repository synced from the phone brings its scrapers once its manifest lands.
+        pluginsWatcher = FlowWatcherKt.watch(PluginRepository.shared.uiState) { [weak self] _ in
+            self?.refreshFlags()
+        }
         progressWatcher = FlowWatcherKt.watch(WatchProgressRepository.shared.uiState) { [weak self] emitted in
             guard let self else { return }
-            if let state = emitted as? WatchProgressUiState { self.latestProgressEntries = state.entries }
+            if let state = emitted as? WatchProgressUiState {
+                self.latestProgressEntries = state.entries
+                self.progressRemoteLoaded = state.hasLoadedRemoteProgress
+            }
             self.refreshFlags()
         }
         cwPrefsWatcher = FlowWatcherKt.watch(ContinueWatchingPreferencesRepository.shared.uiState) { [weak self] emitted in
@@ -150,9 +205,14 @@ final class DetailViewModel: ObservableObject {
     func stop() {
         detailWatcher?.cancel(); detailWatcher = nil
         watchedWatcher?.cancel(); watchedWatcher = nil
+        fullyWatchedWatcher?.cancel(); fullyWatchedWatcher = nil
         libraryWatcher?.cancel(); libraryWatcher = nil
+        addonsWatcher?.cancel(); addonsWatcher = nil
+        pluginsWatcher?.cancel(); pluginsWatcher = nil
         progressWatcher?.cancel(); progressWatcher = nil
         cwPrefsWatcher?.cancel(); cwPrefsWatcher = nil
+        episodeProgressRequestedFor = nil
+        lastReconcileSignature = nil
         trailerVideoURL = nil
         trailerVideoId = nil
         didRequestTrailer = false
@@ -398,32 +458,172 @@ final class DetailViewModel: ObservableObject {
 
     // MARK: - Actions
 
-    /// Toggle the title-level watched marker. Uses the shared `MetaPreview.toWatchedItem` builder
-    /// (a Kotlin extension → Swift instance method; matches mobile's Detail screen). The repo stamps
-    /// `markedAtEpochMs` itself, so we pass 0.
+    /// DET-2: the series-aware toggle mobile's Detail runs (shared `WatchingActions.togglePosterWatched`):
+    /// a series marks — or clears — every released main-season episode along with the series
+    /// marker, so the episode badges and the Resume / Up Next action follow; a movie toggles its own
+    /// mark. Filed under the meta's identity (DET-1). A mark left under the preview's id before the
+    /// meta resolved is cleared as such.
     func toggleWatched() {
-        WatchedRepository.shared.toggleWatched(item: preview.toWatchedItem(markedAtEpochMs: 0))
+        guard !watchedToggleInFlight else { return }
+        if let previewIdentity = previewIdentityIfDistinct,
+           !isTitleWatched(id: contentId, type: contentType),
+           isTitleWatched(id: previewIdentity.id, type: previewIdentity.type) {
+            WatchedRepository.shared.unmarkWatched(item: preview.toWatchedItem(markedAtEpochMs: 0))
+            return
+        }
+        // The series path fetches the episode list first: ignore presses until it has applied.
+        watchedToggleInFlight = true
+        WatchingActions.shared.togglePosterWatched(preview: watchedPreview) { [weak self] _ in
+            DispatchQueue.main.async { self?.watchedToggleInFlight = false }
+        }
+    }
+
+    /// Title-level watched: its own mark, or (series) every released episode watched.
+    private func isTitleWatched(id: String, type: String) -> Bool {
+        WatchedRepository.shared.isWatched(id: id, type: type, season: nil, episode: nil)
+            || WatchedRepository.shared.isFullyWatchedSeries(id: id, type: type)
+    }
+
+    /// The title as a catalog preview under the meta's identity (DET-1) — what the shared watched
+    /// actions take. The catalog preview itself until the meta resolves.
+    private var watchedPreview: MetaPreview {
+        guard let meta else { return preview }
+        return MetaPreview(
+            id: meta.id,
+            type: meta.type,
+            name: meta.name,
+            poster: meta.poster ?? preview.poster,
+            banner: meta.background ?? preview.banner,
+            logo: meta.logo ?? preview.logo,
+            posterShape: preview.posterShape,
+            description: meta.description_ ?? preview.description_,
+            releaseInfo: meta.releaseInfo ?? preview.releaseInfo,
+            rawReleaseDate: preview.rawReleaseDate,
+            popularity: preview.popularity,
+            voteCount: preview.voteCount,
+            imdbRating: meta.imdbRating ?? preview.imdbRating,
+            genres: meta.genres.isEmpty ? preview.genres : meta.genres
+        )
     }
 
     /// Toggle library membership. Prefers the enriched `meta`, falling back to the preview card.
     /// `toLibraryItem` is a Kotlin extension → Swift instance method; the repo stamps
     /// `savedAtEpochMs` itself, so we pass 0.
     func toggleLibrary() {
+        // DET-1: saved under the preview's id only (before its meta resolved) → remove THAT entry;
+        // toggling the meta's id would add a duplicate instead.
+        if let previewIdentity = previewIdentityIfDistinct,
+           !LibraryRepository.shared.isSaved(id: contentId, type: contentType),
+           LibraryRepository.shared.isSaved(id: previewIdentity.id, type: previewIdentity.type) {
+            LibraryRepository.shared.toggleSaved(item: preview.toLibraryItem(savedAtEpochMs: 0))
+            return
+        }
         let item: LibraryItem = meta.map { $0.toLibraryItem(savedAtEpochMs: 0) }
             ?? preview.toLibraryItem(savedAtEpochMs: 0)
         LibraryRepository.shared.toggleSaved(item: item)
     }
 
     private func refreshFlags() {
-        isWatched = WatchedRepository.shared.isWatched(id: id, type: type, season: nil, episode: nil)
-        isSaved = LibraryRepository.shared.isSaved(id: id, type: type)
+        // DET-2: a series whose released episodes are all watched counts as watched too.
+        isWatched = isTitleWatched(id: contentId, type: contentType)
+            || previewIdentityIfDistinct.map { isTitleWatched(id: $0.id, type: $0.type) } == true
+        isSaved = LibraryRepository.shared.isSaved(id: contentId, type: contentType)
+            || previewIdentityIfDistinct.map { LibraryRepository.shared.isSaved(id: $0.id, type: $0.type) } == true
         watchedEpisodeKeys = computeWatchedEpisodeKeys()
+        let progress = computeEpisodeProgress(excluding: watchedEpisodeKeys)
+        if progress != episodeProgress { episodeProgress = progress }
         seriesAction = computeSeriesAction()
+        let playable = computePlaybackAvailability()
+        if playable != isPlaybackAvailable { isPlaybackAvailable = playable }
+        reconcileSeriesWatchedStateIfNeeded()
+    }
+
+    /// DET-2 (mobile MetaDetailsScreen parity): re-derives the series-level watched state — the
+    /// series marker and the fully-watched flag — from its episodes, so a series finished episode by
+    /// episode (here before this build, or on another device) reads as Watched, and a marker a newly
+    /// released episode made stale is dropped (else "Watched" → press → clears the whole history).
+    /// The shared call is idempotent; it runs again only when its inputs moved: the watched state,
+    /// this series' episode completions (not the positions a playback tick moves), the day.
+    private func reconcileSeriesWatchedStateIfNeeded() {
+        guard let meta, EpisodesSection.isSeriesLike(meta), watchedStateLoaded, progressRemoteLoaded,
+              !watchedToggleInFlight else { return }
+        // A meta without its episode list (an add-on that sends none) proves nothing — reconciling
+        // against it would drop the viewer's own series mark, and sync that removal.
+        guard meta.videos.contains(where: { EpisodesSection.normalizeSeasonNumber($0.season) > 0 }) else { return }
+        let today = CurrentDateProvider.shared.todayIsoDate()
+        let completions = latestProgressEntries
+            .filter { $0.parentMetaId == meta.id }
+            .map { (entry: WatchProgressEntry) -> String in
+                let season = entry.seasonNumber?.value ?? -1
+                let episode = entry.episodeNumber?.value ?? -1
+                return "\(season):\(episode):\(entry.isCompleted ? 1 : 0)"
+            }
+            .sorted()
+            .joined(separator: ",")
+        let signature = "\(meta.type)|\(meta.id)|\(meta.videos.count)|\(today)|\(watchedStateVersion)|\(completions)"
+        guard signature != lastReconcileSignature else { return }
+        lastReconcileSignature = signature
+        WatchingActions.shared.reconcileSeriesWatchedState(meta: meta, todayIsoDate: today)
+    }
+
+    /// The primary Play target as Detail requests it — the series action's episode, else the
+    /// movie under the meta's id — checked once the meta has resolved (a press before that is
+    /// covered by the stream repository's own tmdb → IMDb retry).
+    private func computePlaybackAvailability() -> Bool {
+        guard let meta else { return true }
+        if EpisodesSection.isSeriesLike(meta) {
+            guard let action = seriesAction else { return true }
+            return StreamSourceAvailability.shared.canStream(type: meta.type, videoId: action.videoId)
+        }
+        return StreamSourceAvailability.shared.canStream(type: preview.type, videoId: meta.id)
+    }
+
+    /// EP-2: mark / unmark one episode (mobile's episode long-press, shared
+    /// `WatchingActions.toggleEpisodeWatched`). "Watched" is what the badge shows — an explicit mark
+    /// or a completed playback; the shared action clears the episode's progress either way and
+    /// re-derives the series-level marker.
+    func toggleEpisodeWatched(_ episode: MetaVideo) {
+        guard let meta, let s = episode.season?.value, let e = episode.episode?.value else { return }
+        WatchingActions.shared.toggleEpisodeWatched(
+            meta: meta,
+            episode: episode,
+            isCurrentlyWatched: watchedEpisodeKeys.contains("\(s):\(e)")
+        )
+    }
+
+    /// The latest progress record per episode of this series (under the meta's id, DET-1), kept
+    /// when it is still in progress.
+    private func computeEpisodeProgress(excluding watched: Set<String>) -> [String: Double] {
+        guard let meta, EpisodesSection.isSeriesLike(meta) else { return [:] }
+        let id = meta.id
+        var latest: [String: WatchProgressEntry] = [:]
+        for entry in latestProgressEntries where entry.parentMetaId == id {
+            guard let s = entry.seasonNumber?.value, let e = entry.episodeNumber?.value else { continue }
+            let key = "\(s):\(e)"
+            if let existing = latest[key], existing.lastUpdatedEpochMs >= entry.lastUpdatedEpochMs { continue }
+            latest[key] = entry
+        }
+        var result: [String: Double] = [:]
+        for (key, entry) in latest where !watched.contains(key) && !entry.isEffectivelyCompleted {
+            let fraction = Double(entry.progressFraction)
+            if fraction > 0.01 && fraction < 1 { result[key] = fraction }
+        }
+        return result
+    }
+
+    /// Hydrates Trakt-sourced per-episode completion for this title (no-op/cached otherwise), once
+    /// per content id — again when the meta's id turns out to differ from the preview's (DET-1).
+    private func refreshEpisodeProgressIfNeeded() {
+        let target = contentId
+        guard episodeProgressRequestedFor != target else { return }
+        episodeProgressRequestedFor = target
+        WatchProgressRepository.shared.refreshEpisodeProgress(contentId: target, forceRefresh: false)
     }
 
     /// Mirrors mobile's Detail screen: shared `seriesPrimaryAction` over the full progress +
     /// watched state (resume beats next-up; first released episode — or the addon's
-    /// behaviorHints.defaultVideoId — for a fresh series).
+    /// behaviorHints.defaultVideoId — for a fresh series; upstream 2b8be69cd: a series watched to
+    /// its last released episode plays again from the first one instead of offering nothing).
     private func computeSeriesAction() -> SeriesPrimaryAction? {
         guard let meta, EpisodesSection.isSeriesLike(meta) else { return nil }
         return meta.seriesPrimaryAction(
@@ -431,7 +631,8 @@ final class DetailViewModel: ObservableObject {
             watchedItems: latestWatchedItems,
             todayIsoDate: CurrentDateProvider.shared.todayIsoDate(),
             preferFurthestEpisode: latestCwPrefs?.upNextFromFurthestEpisode ?? true,
-            showUnairedNextUp: latestCwPrefs?.showUnairedNextUp ?? false
+            showUnairedNextUp: latestCwPrefs?.showUnairedNextUp ?? false,
+            allowRewatch: true
         )
     }
 
@@ -439,6 +640,9 @@ final class DetailViewModel: ObservableObject {
     /// progress is effectively complete. Pure in-memory lookups against the shared repositories.
     private func computeWatchedEpisodeKeys() -> Set<String> {
         guard let meta, EpisodesSection.isSeriesLike(meta) else { return [] }
+        // DET-1: the meta's identity — what playback records progress and completion marks under.
+        let id = meta.id
+        let type = meta.type
         var keys: Set<String> = []
         for episode in meta.videos {
             guard let s = episode.season?.value, let e = episode.episode?.value else { continue }
@@ -459,7 +663,10 @@ final class DetailViewModel: ObservableObject {
     deinit {
         detailWatcher?.cancel()
         watchedWatcher?.cancel()
+        fullyWatchedWatcher?.cancel()
         libraryWatcher?.cancel()
+        addonsWatcher?.cancel()
+        pluginsWatcher?.cancel()
         progressWatcher?.cancel()
         cwPrefsWatcher?.cancel()
     }

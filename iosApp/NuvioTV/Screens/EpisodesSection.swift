@@ -12,16 +12,38 @@ struct EpisodesSection: View {
     var episodeRatings: [String: Double] = [:]
     /// Episodes to badge as watched, keyed "season:episode" (from `DetailViewModel.watchedEpisodeKeys`).
     var watchedEpisodeKeys: Set<String> = []
+    /// EP-2/AES-4: in-progress fraction (0…1) per episode, keyed "season:episode"
+    /// (`DetailViewModel.episodeProgress`); drawn as a bar along the bottom of the still.
+    var episodeProgress: [String: Double] = [:]
+    /// EP-1: the season and episode of the series' Resume / Up Next action — the shelf opens on
+    /// that season, scrolled to that episode, and follows it until the viewer reaches the shelf.
+    var preferredSeason: Int? = nil
+    var preferredEpisode: Int? = nil
+    /// EP-2: mark / unmark one episode (long press → context menu). nil = no menu.
+    var onToggleWatched: ((MetaVideo) -> Void)? = nil
 
     @State private var selectedSeason: Int?
+    /// EP-1: an episode card has had focus. Until then the shelf follows the Resume / Up Next action
+    /// as it resolves (local progress first, a Trakt hydration seconds later); from then on the
+    /// season on screen is pinned into `selectedSeason` and the shelf never scrolls by itself, so an
+    /// action that moves on — an episode marked watched, a season finale, a sync landing — never
+    /// swaps the season or the scroll position under the viewer.
+    @State private var shelfEngaged = false
     @State private var episodeForStreams: EpisodeRoute?
     @FocusState private var focusedEpisodeId: String?
 
     var body: some View {
         let grouped = Self.groupedEpisodes(meta.videos)
         let seasons = grouped.keys.sorted { Self.seasonSortKey($0) < Self.seasonSortKey($1) }
-        let current = selectedSeason ?? seasons.first
+        // EP-1: the viewer's pick, else the Resume / Up Next episode's season, else the first.
+        let preferred = Self.preferredSeasonKey(preferredSeason, in: grouped)
+        let current = selectedSeason ?? preferred ?? seasons.first
         let episodes = current.flatMap { grouped[$0] } ?? []
+        let restingEpisodeId = Self.shelfRestingEpisodeId(
+            episodes: episodes,
+            isPreferredSeason: preferred != nil && current == preferred,
+            preferredEpisode: preferredEpisode
+        )
 
         return VStack(alignment: .leading, spacing: 20) {
             if seasons.count > 1 {
@@ -95,31 +117,61 @@ struct EpisodesSection: View {
                                     episode: episode,
                                     fallbackImage: meta.background ?? meta.poster,
                                     rating: rating(for: episode),
-                                    isWatched: isWatched(episode)
+                                    isWatched: isWatched(episode),
+                                    progress: progress(for: episode)
                                 )
                             }
                             // BUG-93: EpisodeThumbCard uses tileFocusLift, not CardFocusTreatment - keep the native lift in ring mode.
                             .cardFocusButtonStyle(lift: .plain)
                             .posterButtonShape() // BUG-32: honor the Corners setting
                             .focused($focusedEpisodeId, equals: episode.id)
+                            .modifier(EpisodeWatchedMenu(
+                                isWatched: isWatched(episode),
+                                onToggle: toggleWatchedAction(for: episode)
+                            ))
                             .id(episode.id)
                         }
                     }
                     .padding(.vertical, Theme.Spacing.md)
                 }
                 .scrollClipDisabled()
+                .onAppear {
+                    // EP-1: open on the Resume / Up Next episode (the layout pass has to land first).
+                    // Not on a return to this page once the viewer has been through the shelf.
+                    guard !shelfEngaged, let restingEpisodeId, restingEpisodeId != episodes.first?.id else { return }
+                    DispatchQueue.main.async {
+                        var tx = Transaction()
+                        tx.disablesAnimations = true
+                        withTransaction(tx) { proxy.scrollTo(restingEpisodeId, anchor: .leading) }
+                    }
+                }
                 .onChange(of: current) { _, _ in
-                    // A new season can be shorter than the old scroll offset; snap back to the
-                    // first episode without animating through the intermediate layout.
-                    guard let first = episodes.first?.id else { return }
+                    // A new season can be shorter than the old scroll offset; snap to its first
+                    // episode — or, EP-1, to the Resume / Up Next episode — without animating
+                    // through the intermediate layout.
+                    guard let restingEpisodeId else { return }
                     var tx = Transaction()
                     tx.disablesAnimations = true
-                    withTransaction(tx) { proxy.scrollTo(first, anchor: .leading) }
+                    withTransaction(tx) { proxy.scrollTo(restingEpisodeId, anchor: .leading) }
+                }
+                .onChange(of: restingEpisodeId) { _, target in
+                    // EP-1: the action resolved late within the season on screen (a Trakt
+                    // hydration) — follow it, but only until the viewer has reached the shelf.
+                    guard let target, !shelfEngaged, focusedEpisodeId == nil else { return }
+                    var tx = Transaction()
+                    tx.disablesAnimations = true
+                    withTransaction(tx) { proxy.scrollTo(target, anchor: .leading) }
                 }
             }
             .focusSection()
+            .onChange(of: focusedEpisodeId) { _, focused in
+                // EP-1: the viewer reached the shelf — pin the season on screen (see `shelfEngaged`).
+                guard focused != nil, !shelfEngaged else { return }
+                shelfEngaged = true
+                if selectedSeason == nil { selectedSeason = current }
+            }
 
-            focusedOverviewPanel(episodes: episodes)
+            focusedOverviewPanel(episodes: episodes, restingEpisodeId: restingEpisodeId)
         }
         .fullScreenCover(item: $episodeForStreams) { route in
             StreamPickerView(
@@ -133,17 +185,24 @@ struct EpisodesSection: View {
                 poster: route.meta.poster,
                 episodeStill: route.episodeStill,
                 synopsis: route.synopsis,
-                meta: PlaybackMeta(details: route.meta)
+                meta: PlaybackMeta(details: route.meta),
+                // CW-1: progress is filed under the series, with the episode's own name beside it.
+                seriesTitle: route.meta.name,
+                episodeTitle: route.episode.title,
+                background: route.meta.background,
+                logo: route.meta.logo
             )
         }
     }
 
-    /// Fixed-height synopsis for the focused episode (falls back to the season's first episode so
-    /// the panel is never blank). Fixed frame keeps the cast row below from reflowing as focus
-    /// moves along the shelf.
+    /// Fixed-height synopsis for the focused episode (falls back to the episode the shelf rests on
+    /// — EP-1's Resume / Up Next one, else the season's first — so the panel is never blank). Fixed
+    /// frame keeps the cast row below from reflowing as focus moves along the shelf.
     @ViewBuilder
-    private func focusedOverviewPanel(episodes: [MetaVideo]) -> some View {
-        let episode = episodes.first { $0.id == focusedEpisodeId } ?? episodes.first
+    private func focusedOverviewPanel(episodes: [MetaVideo], restingEpisodeId: String?) -> some View {
+        let episode = episodes.first(where: { $0.id == focusedEpisodeId })
+            ?? episodes.first(where: { $0.id == restingEpisodeId })
+            ?? episodes.first
         VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
             if let episode {
                 if let caption = Self.episodeCaption(episode) {
@@ -268,6 +327,62 @@ struct EpisodesSection: View {
         guard let s = episode.season?.value, let e = episode.episode?.value else { return false }
         return watchedEpisodeKeys.contains("\(s):\(e)")
     }
+
+    /// EP-2/AES-4: the episode's partial progress; nil once it is watched (the check shows instead).
+    private func progress(for episode: MetaVideo) -> Double? {
+        guard let s = episode.season?.value, let e = episode.episode?.value,
+              !watchedEpisodeKeys.contains("\(s):\(e)") else { return nil }
+        return episodeProgress["\(s):\(e)"]
+    }
+
+    private func toggleWatchedAction(for episode: MetaVideo) -> (() -> Void)? {
+        guard let onToggleWatched else { return nil }
+        return { onToggleWatched(episode) }
+    }
+
+    /// EP-1: the Resume / Up Next season when it exists in the shelf (specials normalize to 0).
+    nonisolated private static func preferredSeasonKey(_ season: Int?, in grouped: [Int: [MetaVideo]]) -> Int? {
+        guard let season else { return nil }
+        let key = max(season, 0)
+        return grouped[key] == nil ? nil : key
+    }
+
+    /// EP-1: the episode the shelf rests on — the Resume / Up Next episode when its season is on
+    /// screen, else the season's first episode.
+    nonisolated private static func shelfRestingEpisodeId(episodes: [MetaVideo], isPreferredSeason: Bool,
+                                                          preferredEpisode: Int?) -> String? {
+        if isPreferredSeason, let preferredEpisode,
+           let match = episodes.first(where: { $0.episode?.value == preferredEpisode }) {
+            return match.id
+        }
+        return episodes.first?.id
+    }
+}
+
+/// EP-2: long press → mark / unmark this episode (mobile's episode long-press menu). A conditional
+/// modifier, like `ExternalPlayMenu`, so a shelf without a handler adds nothing — an empty context
+/// menu would still swallow the long press.
+private struct EpisodeWatchedMenu: ViewModifier {
+    let isWatched: Bool
+    let onToggle: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        if let onToggle {
+            content.contextMenu {
+                Button {
+                    onToggle()
+                } label: {
+                    if isWatched {
+                        Label("Mark Unwatched", systemImage: "eye.slash")
+                    } else {
+                        Label("Mark Watched", systemImage: "checkmark.circle")
+                    }
+                }
+            }
+        } else {
+            content
+        }
+    }
 }
 
 /// `KotlinInt` is an `NSNumber` subclass, whose `.intValue` Swift accessor is `Int32`. This converts
@@ -306,6 +421,8 @@ private struct EpisodeThumbCard: View {
     var rating: Double? = nil
     /// Shows the green watched checkmark on the thumbnail (mirrors mobile's watched badge).
     var isWatched: Bool = false
+    /// AES-4/EP-2: 0…1 partial progress, drawn along the bottom of the still; nil hides the bar.
+    var progress: Double? = nil
 
     @Environment(\.isFocused) private var isFocused
     // BUG-32: shared corner token, not the hardcoded Theme.Radius.card.
@@ -331,6 +448,23 @@ private struct EpisodeThumbCard: View {
                         startPoint: .top, endPoint: .bottom
                     )
                     .frame(height: 70)
+                    .clipShape(RoundedRectangle(cornerRadius: posterStyle.cornerRadius))
+                    .allowsHitTesting(false)
+                }
+
+                if let progress {
+                    // AES-4/EP-2: the Continue Watching cards' bar (`LandscapeCard`), clipped to
+                    // this card's corners and lifted with the still by `tileFocusLift` below.
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Rectangle().fill(Color.white.opacity(0.25))
+                            Rectangle()
+                                .fill(Theme.Palette.progress)
+                                .frame(width: geo.size.width * min(max(progress, 0), 1))
+                        }
+                    }
+                    .frame(height: 6)
+                    .frame(width: Theme.Size.episodeWidth, height: Theme.Size.episodeHeight, alignment: .bottom)
                     .clipShape(RoundedRectangle(cornerRadius: posterStyle.cornerRadius))
                     .allowsHitTesting(false)
                 }

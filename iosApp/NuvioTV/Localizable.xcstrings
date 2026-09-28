@@ -9922,6 +9922,16 @@
         }
       }
     },
+    "Go to Details": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Voir la fiche"
+          }
+        }
+      }
+    },
     "Go to Movie": {
       "localizations": {
         "de": {
@@ -12424,6 +12434,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Quản lý addon, hàng Trang chủ, API key và gói huy hiệu luồng từ trình duyệt trên điện thoại hoặc laptop cùng mạng — không cần bàn phím trên màn hình. Thay đổi chỉ áp dụng sau khi bạn xác nhận tại đây."
+          }
+        }
+      }
+    },
+    "Mark Unwatched": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Marquer comme non vu"
           }
         }
       }
@@ -17323,6 +17343,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tốc độ phát"
+          }
+        }
+      }
+    },
+    "Playback unavailable": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lecture indisponible"
           }
         }
       }
@@ -26702,6 +26732,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Thay đổi chưa được lưu."
+          }
+        }
+      }
+    },
+    "Up Next": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "À suivre"
           }
         }
       }

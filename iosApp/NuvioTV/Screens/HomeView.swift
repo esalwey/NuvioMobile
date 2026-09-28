@@ -1058,7 +1058,14 @@ struct HomeView: View {
                 StreamPickerView(
                     type: target.entry.parentMetaType,
                     videoId: target.entry.videoId,
-                    title: target.entry.title,
+                    // CW-1: the entry's title is the SERIES name — the picker header shows the
+                    // episode label, and the series name goes back into the progress record.
+                    title: ProgressRecordTitles.pickerTitle(
+                        title: target.entry.title,
+                        season: target.entry.seasonNumber?.value,
+                        episode: target.entry.episodeNumber?.value,
+                        episodeTitle: target.entry.episodeTitle
+                    ),
                     parentMetaId: target.entry.parentMetaId,
                     season: target.entry.seasonNumber?.value,
                     episode: target.entry.episodeNumber?.value,
@@ -1067,6 +1074,10 @@ struct HomeView: View {
                     poster: target.entry.poster,
                     episodeStill: { let still: String? = target.entry.episodeThumbnail; return (still ?? "").isEmpty ? nil : still }(),
                     synopsis: { let d: String? = target.entry.pauseDescription; return (d ?? "").isEmpty ? nil : d }(),
+                    seriesTitle: target.entry.title,
+                    episodeTitle: target.entry.episodeTitle,
+                    background: target.entry.background,
+                    logo: target.entry.logo,
                     onLeaveToDetails: { detailAfterResume = previewFromEntry(target.entry) }
                 )
             }
@@ -1201,7 +1212,10 @@ struct HomeView: View {
                     ContinueWatchingRow(
                         entries: model.continueWatching,
                         onSelect: { resume = ResumeTarget(entry: $0) },
-                        onRemove: { WatchProgressRepository.shared.clearProgress(videoId: $0.videoId, parentMetaId: $0.parentMetaId) },
+                        // CW-3: the whole title leaves the row (an Up Next card is dismissed).
+                        onRemove: { model.removeFromContinueWatching($0) },
+                        // CW-5: the card's menu reaches the title's page too.
+                        onShowDetails: { homePath.append(TitleRoute(preview: previewFromEntry($0))) },
                         // UX-7 (see reportRowFocus for the gating rationale).
                         onItemFocusChange: { entry in
                             reportRowFocus(entry.map(previewFromEntry), source: "continue-watching",
@@ -2341,7 +2355,8 @@ struct HomeView: View {
             name: entry.title,
             poster: entry.poster,
             banner: entry.background,
-            logo: nil,
+            // CW-1: recorded with the progress entry (and on the Up Next cards) since this build.
+            logo: { let logo: String? = entry.logo; return (logo ?? "").isEmpty ? nil : logo }(),
             posterShape: .poster,
             description: nil,
             releaseInfo: nil,
@@ -3736,11 +3751,14 @@ final class HeroPresentArtWait {
 
 /// Horizontal "Continue Watching" row of in-progress titles with a progress bar. Tapping a card opens
 /// the stream picker for that exact video (the in-progress episode for series), and playback resumes
-/// from the saved position.
+/// from the saved position. CW-2: a series whose last watched episode is finished shows its next
+/// episode instead, as an "Up Next" card (no progress bar).
 struct ContinueWatchingRow: View {
     let entries: [WatchProgressEntry]
     let onSelect: (WatchProgressEntry) -> Void
     let onRemove: (WatchProgressEntry) -> Void
+    /// CW-5: the long-press menu's "Go to Details".
+    let onShowDetails: (WatchProgressEntry) -> Void
     /// UX-7: reports the focused card's entry (or nil) so Home can drive the hero from it.
     /// Defaulted — nil is a plain no-op. Gating and backdrop prefetch live in the callback
     /// (HomeView.reportRowFocus), not here.
@@ -3778,7 +3796,9 @@ struct ContinueWatchingRow: View {
                                     title: entry.title,
                                     imageURL: imageURL(entry),
                                     progress: fraction(entry),
-                                    overlayLeading: episodeCode(entry)
+                                    overlayLeading: episodeCode(entry),
+                                    overlayTrailing: ContinueWatchingNextUpModel.isNextUp(entry)
+                                        ? String(localized: "Up Next") : nil
                                 )
                                 .padding(.top, cardTopReach)
                                 .padding(.bottom, cardBottomReach)
@@ -3792,6 +3812,11 @@ struct ContinueWatchingRow: View {
                             .posterButtonShape()
                             .focused($focusedVideoId, equals: entry.videoId)
                             .contextMenu {
+                                Button {
+                                    onShowDetails(entry)
+                                } label: {
+                                    Label("Go to Details", systemImage: "info.circle")
+                                }
                                 Button(role: .destructive) {
                                     onRemove(entry)
                                 } label: {
