@@ -15,6 +15,8 @@ struct EpisodesSection: View {
     /// SET-2: `EpisodeRatingsVisibility.name` — "HIDE_EPISODES" drops every rating badge,
     /// "HIDE_UNWATCHED_EPISODES" keeps them only on watched episodes (no spoilers).
     var episodeRatingsVisibility: String = "SHOW_ALL"
+    /// SET-2: Settings → Appearance → Ratings → Overall Ratings (the player's Info-tab rating chip).
+    var showOverallRatings: Bool = true
 
     @State private var selectedSeason: Int?
     @State private var episodeForStreams: EpisodeRoute?
@@ -136,9 +138,16 @@ struct EpisodesSection: View {
                 poster: route.meta.poster,
                 episodeStill: route.episodeStill,
                 synopsis: route.synopsis,
-                meta: PlaybackMeta(details: route.meta)
+                meta: playbackMeta(for: route.meta)
             )
         }
+    }
+
+    /// SET-2: with Overall Ratings off the player's Info tab shows no rating chip either.
+    private func playbackMeta(for details: MetaDetails) -> PlaybackMeta {
+        var meta = PlaybackMeta(details: details)
+        if !showOverallRatings { meta.imdbRating = nil }
+        return meta
     }
 
     /// Fixed-height synopsis for the focused episode (falls back to the season's first episode so

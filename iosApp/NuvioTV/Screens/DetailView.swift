@@ -522,7 +522,8 @@ struct DetailView: View {
                             meta: meta,
                             episodeRatings: model.episodeRatings,
                             watchedEpisodeKeys: model.watchedEpisodeKeys,
-                            episodeRatingsVisibility: model.episodeRatingsVisibility
+                            episodeRatingsVisibility: model.episodeRatingsVisibility,
+                            showOverallRatings: model.showOverallRatings
                         )
                         // A discrete focus region: vertical D-pad moves must land here instead of
                         // geometrically skipping from the info/network chips down to the cast row.
@@ -1302,10 +1303,12 @@ struct DetailView: View {
 
     /// Title facts handed to the player for its Info tab chips (same sources as `metaLine`).
     private var playbackMeta: PlaybackMeta {
-        PlaybackMeta(
+        let rating: String? = model.meta?.imdbRating ?? preview.imdbRating
+        return PlaybackMeta(
             year: { let s: String? = model.meta?.releaseInfo ?? preview.releaseInfo; return (s ?? "").isEmpty ? nil : s }(),
             runtime: { let s: String? = model.meta?.runtime; return (s ?? "").isEmpty ? nil : s }(),
-            imdbRating: { let s: String? = model.meta?.imdbRating ?? preview.imdbRating; return (s ?? "").isEmpty ? nil : s }(),
+            // SET-2: Overall Ratings off also keeps the rating chip out of the player's Info tab.
+            imdbRating: model.showOverallRatings && !(rating ?? "").isEmpty ? rating : nil,
             ageRating: { let s: String? = model.meta?.ageRating; return (s ?? "").isEmpty ? nil : s }(),
             genres: genres
         )

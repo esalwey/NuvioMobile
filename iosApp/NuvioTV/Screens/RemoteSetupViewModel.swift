@@ -235,6 +235,9 @@ final class RemoteSetupViewModel: ObservableObject {
     private func applyAddons(_ proposal: RemoteSetupServer.Proposal) {
         guard let proposed = proposal.addons else { return }
         let repo = AddonRepository.shared
+        // ADD-2: every add-on edit is a no-op on a profile that uses the main profile's add-ons;
+        // the confirm alert already said so (see `summarize`).
+        guard !repo.isManagedByPrimaryProfile() else { return }
         let currentUrls = addons.map(\.manifestUrl)
         let proposedUrls = proposed.map(\.url)
 
@@ -306,8 +309,6 @@ final class RemoteSetupViewModel: ObservableObject {
             let proposedUrls = Set(proposed.map(\.url))
             let added = proposedUrls.subtracting(currentUrls).count
             let removed = currentUrls.subtracting(proposedUrls).count
-            if added > 0 { parts.append(String(localized: "\(added) add-on\(added == 1 ? "" : "s") installed")) }
-            if removed > 0 { parts.append(String(localized: "\(removed) add-on\(removed == 1 ? "" : "s") removed")) }
             let orderChanged = proposed.map(\.url).filter { currentUrls.contains($0) }
                 != addons.map(\.manifestUrl).filter { proposedUrls.contains($0) }
             let togglesChanged = proposed.contains { entry in
@@ -316,7 +317,16 @@ final class RemoteSetupViewModel: ObservableObject {
                 else { return false }
                 return existing.enabled != enabled
             }
-            if orderChanged || togglesChanged { parts.append(String(localized: "add-on settings changed")) }
+            if AddonRepository.shared.isManagedByPrimaryProfile() {
+                // ADD-2: `applyAddons` skips them — say so instead of listing changes that won't happen.
+                if added > 0 || removed > 0 || orderChanged || togglesChanged {
+                    parts.append(String(localized: "add-on changes not applied (this profile uses the main profile\u{2019}s add-ons)"))
+                }
+            } else {
+                if added > 0 { parts.append(String(localized: "\(added) add-on\(added == 1 ? "" : "s") installed")) }
+                if removed > 0 { parts.append(String(localized: "\(removed) add-on\(removed == 1 ? "" : "s") removed")) }
+                if orderChanged || togglesChanged { parts.append(String(localized: "add-on settings changed")) }
+            }
         }
 
         if let order = proposal.rowOrder {

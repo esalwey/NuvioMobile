@@ -410,13 +410,15 @@ final class SettingsViewModel: ObservableObject {
         PlayerSettingsRepository.shared.setStreamAutoPlaySource(source: source)
     }
 
-    /// Saves the "Regex match" pattern; false (nothing saved) when it doesn't compile — the shared
-    /// selector would then match nothing and Up Next would find no stream. Checked with
-    /// NSRegularExpression, close enough to the Kotlin engine the selector uses (case-insensitive).
+    /// Saves the "Regex match" pattern; false (nothing saved) when the shared selector could not use
+    /// it — it would then match nothing and Up Next would find no stream. Checked by the shared
+    /// policy itself (Kotlin `Regex`, case-insensitive — the engine the selector compiles with, not
+    /// ICU's NSRegularExpression), which also refuses a pattern with no letter or digit. Empty is
+    /// the explicit "None" choice.
     @discardableResult
     func setStreamAutoPlayRegex(_ pattern: String) -> Bool {
         let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty, (try? NSRegularExpression(pattern: trimmed, options: [.caseInsensitive])) == nil {
+        if !trimmed.isEmpty, !StreamAutoPlayPolicy.shared.isRegexSelectionConfigured(regexPattern: trimmed) {
             return false
         }
         PlayerSettingsRepository.shared.setStreamAutoPlayRegex(regex: trimmed)

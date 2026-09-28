@@ -148,7 +148,7 @@ struct PlaybackSettingsPane: View {
                     subtitle: model.streamAutoPlayRegex.isEmpty
                         ? String(localized: "No pattern set: the first stream is picked.")
                         : String(localized: "Matches against stream name, title, description, add-on and URL: \(model.streamAutoPlayRegex)"),
-                    selection: Binding(get: { model.streamAutoPlayRegex }, set: { model.setStreamAutoPlayRegex($0) }),
+                    selection: Binding(get: { model.streamAutoPlayRegex }, set: { _ = model.setStreamAutoPlayRegex($0) }),
                     options: Self.regexOptions(current: model.streamAutoPlayRegex),
                     label: { value in Self.regexLabel(value) }
                 )

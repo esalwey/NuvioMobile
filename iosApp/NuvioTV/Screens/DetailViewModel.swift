@@ -99,6 +99,14 @@ final class DetailViewModel: ObservableObject {
         guard detailWatcher == nil else { return }
         Self.currentOwner = ownerToken
 
+        // SET-2: the rating settings are read BEFORE the detail watcher can deliver a meta, so a
+        // title opened with episode ratings hidden never fetches them (the watcher below takes over).
+        MetaScreenSettingsRepository.shared.ensureLoaded()
+        if let state = MetaScreenSettingsRepository.shared.uiState.value_ as? MetaScreenSettingsUiState {
+            showOverallRatings = state.showOverallRatings
+            episodeRatingsVisibility = state.episodeRatingsVisibility.name
+        }
+
         detailWatcher = FlowWatcherKt.watch(MetaDetailsRepository.shared.uiState) { [weak self] emitted in
             guard let self, let state = emitted as? MetaDetailsUiState else { return }
             // The shared repo holds one in-flight detail at a time — only adopt emissions for ours.
@@ -150,11 +158,12 @@ final class DetailViewModel: ObservableObject {
         }
         refreshFlags()
 
-        MetaScreenSettingsRepository.shared.ensureLoaded()
         ratingsSettingsWatcher = FlowWatcherKt.watch(MetaScreenSettingsRepository.shared.uiState) { [weak self] emitted in
             guard let self, let state = emitted as? MetaScreenSettingsUiState else { return }
             self.showOverallRatings = state.showOverallRatings
             self.episodeRatingsVisibility = state.episodeRatingsVisibility.name
+            // Episode ratings shown again after the title loaded with them hidden: fetch them now.
+            if let m = self.meta { self.fetchEpisodeRatingsIfNeeded(m) }
         }
 
         MetaDetailsRepository.shared.load(type: type, id: id)
@@ -354,7 +363,10 @@ final class DetailViewModel: ObservableObject {
     /// Once per series: per-episode IMDb ratings from api.imdbapi.dev (keyless), keyed
     /// "season:episode" for the episode list to badge. Movies and titles without a tt/tmdb id skip.
     private func fetchEpisodeRatingsIfNeeded(_ meta: MetaDetails) {
-        guard !didRequestRatings, EpisodesSection.isSeriesLike(meta) else { return }
+        // SET-2 (upstream 6fb46976b): no request while episode ratings are hidden; the settings
+        // watcher calls back in here once they are shown again.
+        guard !didRequestRatings, episodeRatingsVisibility != "HIDE_EPISODES",
+              EpisodesSection.isSeriesLike(meta) else { return }
         let imdbId = ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: meta.id)
             ?? ParentalGuideRepositoryKt.extractParentalGuideImdbId(value: id)
         let tmdbId = ParentalGuideRepositoryKt.extractParentalGuideTmdbId(value: meta.id)

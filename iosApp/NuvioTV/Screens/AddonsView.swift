@@ -8,6 +8,9 @@ struct AddonsView: View {
     @State private var newUrl = ""
     /// Addon pending a remove confirmation (drives the alert below).
     @State private var addonPendingRemoval: ManagedAddon?
+    /// ADD-2: a locked row was pressed — explain it where the press happened (the notice at the
+    /// top of the screen is off-screen once the list is scrolled).
+    @State private var showsManagedByPrimaryNotice = false
 
     var body: some View {
         NavigationStack {
@@ -20,6 +23,11 @@ struct AddonsView: View {
                 }
                 .padding(60)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .alert(String(localized: "Managed by the main profile"), isPresented: $showsManagedByPrimaryNotice) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(model.managedByPrimaryMessage)
             }
             .reportsScrollToTabBar(tab: "Add-ons")
             // FEAT-30: Menu summons the sidebar in sidebar mode (a second Menu, with focus in the
@@ -137,7 +145,13 @@ struct AddonsView: View {
                     isRefreshing: addon.isRefreshing,
                     errorMessage: addon.manifest == nil ? errorMessage : nil,
                     locked: model.managedByPrimary,
-                    onToggle: { model.setEnabled(addon, !addon.enabled) },
+                    onToggle: {
+                        if model.managedByPrimary {
+                            showsManagedByPrimaryNotice = true
+                        } else {
+                            model.setEnabled(addon, !addon.enabled)
+                        }
+                    },
                     onRetry: { model.retry(addon) },
                     onRemove: { addonPendingRemoval = addon }
                 )

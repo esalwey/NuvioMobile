@@ -12714,6 +12714,16 @@
         }
       }
     },
+    "Managed by the main profile": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Géré par le profil principal"
+          }
+        }
+      }
+    },
     "Mark Watched": {
       "localizations": {
         "de": {
@@ -14870,6 +14880,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "NuvioTV (Tích hợp)"
+          }
+        }
+      }
+    },
+    "OK": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OK"
           }
         }
       }
@@ -28659,6 +28679,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Z–A"
+          }
+        }
+      }
+    },
+    "add-on changes not applied (this profile uses the main profile’s add-ons)": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "modifications des addons non appliquées (ce profil utilise les addons du profil principal)"
           }
         }
       }
