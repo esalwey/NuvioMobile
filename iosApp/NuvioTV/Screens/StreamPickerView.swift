@@ -764,13 +764,18 @@ struct StreamPickerView: View {
     private func openExternally(urlString: String, stream: StreamItem, playerId: String, fallbackToInternal: Bool = false) {
         // PLY-7: request headers the addon requires for this stream (Referer / User-Agent / auth —
         // the built-in player sends them). None of the tvOS external players' URL schemes can carry
-        // headers, so such a stream would only fail over there: play it here, and say why.
+        // headers, so such a stream may fail over there. The default player's Select plays it here,
+        // and says why; "Open in …" (a long press) is the viewer's explicit choice — it still hands
+        // off, with a warning (many hosts don't actually enforce the header).
         let requestHeaders = StreamModelsKt.sanitizePlaybackHeaders(headers: stream.behaviorHints.proxyHeaders?.request)
-        if !requestHeaders.isEmpty, let url = URL(string: urlString) {
-            showToast(String(localized: "This source needs request headers that external players can’t send — playing in NuvioTV."))
-            NextEpisodeEngine.consecutiveAutoPlays = 0
-            selected = context(url: url, stream: stream)
-            return
+        if !requestHeaders.isEmpty {
+            if fallbackToInternal, let url = URL(string: urlString) {
+                showToast(String(localized: "This source needs request headers that external players can’t send — playing in NuvioTV."))
+                NextEpisodeEngine.consecutiveAutoPlays = 0
+                selected = context(url: url, stream: stream)
+                return
+            }
+            showToast(String(localized: "This source needs request headers that external players can’t send — it may not play there."))
         }
         let progress = WatchProgressRepository.shared.progressForVideo(
             videoId: videoId,

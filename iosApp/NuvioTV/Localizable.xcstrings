@@ -25333,6 +25333,16 @@
         }
       }
     },
+    "This source needs request headers that external players can’t send — it may not play there.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cette source exige des en-têtes HTTP que les lecteurs externes ne peuvent pas transmettre — elle risque de ne pas être lue."
+          }
+        }
+      }
+    },
     "This source needs request headers that external players can’t send — playing in NuvioTV.": {
       "localizations": {
         "fr": {
