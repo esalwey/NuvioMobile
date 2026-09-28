@@ -796,7 +796,7 @@ final class MPVTVPlayerViewController: UIViewController {
     // language / forced flag / name, and an addon subtitle by the saved file on the same episode,
     // else this episode's subtitle in the saved language from the saved provider.
 
-    private enum SubtitleRestore { case restored, waiting, none }
+    private enum SubtitleRestore { case restored, waiting, unmatched }
 
     /// Once per file: restore the saved choice, or run the language plan. A saved addon choice can
     /// wait (`.waiting`) for this episode's addon subtitles — retried on every track walk, when the
@@ -808,7 +808,7 @@ final class MPVTVPlayerViewController: UIViewController {
             finishSubtitleSelection()
         case .waiting:
             armSubtitleRestoreDeadline()
-        case .none:
+        case .unmatched:
             finishSubtitleSelection()
             applySubtitlePlan(subInfos: subInfos)
         }
@@ -821,7 +821,7 @@ final class MPVTVPlayerViewController: UIViewController {
     }
 
     private func restorePersistedSubtitle(subInfos: [TrackInfo]) -> SubtitleRestore {
-        guard let preference = persistedTrackPreference else { return .none }
+        guard let preference = persistedTrackPreference else { return .unmatched }
         let type = preference.subtitleType
         if type == PersistedSubtitleSelectionType.shared.DISABLED {
             print("[MPV] subtitles: restored Off")
@@ -840,14 +840,14 @@ final class MPVTVPlayerViewController: UIViewController {
             let streamSubtitlesPending = !subtitleRestoreDeadlinePassed && context.externalSubtitles.contains { sub in
                 !subInfos.contains { $0.sourceURL == sub.url }
             }
-            return streamSubtitlesPending ? .waiting : .none
+            return streamSubtitlesPending ? .waiting : .unmatched
         }
         if type == PersistedSubtitleSelectionType.shared.ADDON {
             let stillLoading = !subtitleRestoreDeadlinePassed && !addonSubtitleFetchFinished()
             guard let match = PlayerTrackSelectionKt.findPersistedAddonSubtitle(
                 subtitles: latestAddonSubtitles, preference: preference
             ) else {
-                return stillLoading ? .waiting : .none
+                return stillLoading ? .waiting : .unmatched
             }
             // Another provider's match waits while the saved provider may still answer.
             if stillLoading, !PlayerTrackSelectionKt.canRestorePersistedAddonSubtitleWhileLoading(
@@ -859,7 +859,7 @@ final class MPVTVPlayerViewController: UIViewController {
             selectAddonSubtitle(match)
             return .restored
         }
-        return .none
+        return .unmatched
     }
 
     /// An embedded (or stream-attached) track for a saved INTERNAL choice. The saved mpv track id
