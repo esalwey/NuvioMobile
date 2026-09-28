@@ -1466,7 +1466,7 @@ struct DetailView: View {
                     } label: {
                         // BUG-14: see the non-series Play button above.
                         actionButtonPadding(
-                            actionLabel(action.label, systemImage: "play.fill")
+                            actionLabel(verbatim: action.label, systemImage: "play.fill")
                                 .font(Theme.Font.meta)
                                 .prominentAccentLabel(),
                             horizontal: Theme.Spacing.lg
@@ -1541,12 +1541,26 @@ struct DetailView: View {
     }
 
     /// FEAT-9: the underlying `Label` for one action-row button — icon + text normally, icon-only
-    /// (with the title preserved for VoiceOver) when `actionIconsOnly` is on.
+    /// (with the title preserved for VoiceOver) when `actionIconsOnly` is on. A localization key:
+    /// FEAT-9 took the titles as plain `String`s, which `Label` shows verbatim, so the whole row
+    /// ("Play", "Mark Watched", "Add to Library"…) stayed English on a French Apple TV.
     @ViewBuilder
-    private func actionLabel(_ title: String, systemImage: String) -> some View {
+    private func actionLabel(_ titleKey: LocalizedStringKey, systemImage: String) -> some View {
+        let label = Label(titleKey, systemImage: systemImage)
+        if actionIconsOnly {
+            label.labelStyle(.iconOnly).accessibilityLabel(Text(titleKey))
+        } else {
+            label
+        }
+    }
+
+    /// `actionLabel` for a title that is already localized (the shared series action's
+    /// "Resume S1E2" / "Next Up • S1E3").
+    @ViewBuilder
+    private func actionLabel(verbatim title: String, systemImage: String) -> some View {
         let label = Label(title, systemImage: systemImage)
         if actionIconsOnly {
-            label.labelStyle(.iconOnly).accessibilityLabel(Text(title))
+            label.labelStyle(.iconOnly).accessibilityLabel(Text(verbatim: title))
         } else {
             label
         }
