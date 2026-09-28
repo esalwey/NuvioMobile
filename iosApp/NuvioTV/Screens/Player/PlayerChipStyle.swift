@@ -33,7 +33,13 @@ extension View {
     func playerPanelGlass() -> some View {
         glassEffect(.regular.tint(PlayerChipStyle.glassTint),
                     in: RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous))
-            .shadow(color: .black.opacity(0.4), radius: 14, y: 6)
+            .playerPanelShadow()
+    }
+
+    /// The one drop shadow under every floating player surface: the panels above, the swipe-down
+    /// panel (its own bottom-rounded glass shape) and the mpv action chip.
+    func playerPanelShadow() -> some View {
+        shadow(color: .black.opacity(0.4), radius: 14, y: 6)
     }
 }
 
@@ -58,7 +64,7 @@ struct PlayerActionChip: View {
         .padding(.horizontal, Theme.Spacing.lg + Theme.Spacing.xs)
         .padding(.vertical, Theme.Spacing.md)
         .glassEffect(.regular.tint(PlayerChipStyle.glassTint), in: .capsule)
-        .shadow(color: .black.opacity(0.4), radius: 10, y: 4)
+        .playerPanelShadow()
         .accessibilityElement(children: .combine)
     }
 }

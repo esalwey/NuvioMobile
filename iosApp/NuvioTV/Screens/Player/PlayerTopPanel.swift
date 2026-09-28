@@ -82,7 +82,7 @@ struct PlayerTopPanel: View {
         .glassEffect(.regular.tint(PlayerChipStyle.glassTint),
                      in: UnevenRoundedRectangle(bottomLeadingRadius: Theme.Radius.panel,
                                                 bottomTrailingRadius: Theme.Radius.panel, style: .continuous))
-        .shadow(color: .black.opacity(0.4), radius: 14, y: 6)
+        .playerPanelShadow()
     }
 
     private var tabRow: some View {

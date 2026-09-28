@@ -1704,11 +1704,14 @@ struct MPVPlayerScreen: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            PlayerControlsOverlay(state: state, titleParts: titleParts)
+            // While the pause card is up it names what's playing, so the bar keeps only the
+            // scrubber and times (AES-8: the same series and "S1 · E4 · Name" were on screen twice).
+            PlayerControlsOverlay(state: state, titleParts: titleParts, showsTitle: !pauseCardVisible)
                 // Measured, not assumed: the prompts above it clear its real height (a Larger Text
-                // size or a movie's one-line title changes it).
+                // size, a movie's one-line title or the pause card's hidden title changes it). The
+                // prompts follow a change in step with the bar instead of jumping.
                 .onGeometryChange(for: CGFloat.self, of: { $0.size.height }, action: { height in
-                    transportHeight = height
+                    withAnimation(PlayerChipStyle.animation) { transportHeight = height }
                 })
                 .opacity(state.controlsVisible ? 1 : 0)
                 .animation(.easeInOut(duration: 0.25), value: state.controlsVisible)
@@ -1721,7 +1724,7 @@ struct MPVPlayerScreen: View {
 
             // Metadata card after a sustained pause (Android TV PauseOverlay parity) — not on the
             // last frame, and not under the Up Next card.
-            if showPauseInfo, state.isPaused, !state.isBuffering, !state.isEnded, !upNext.isCardVisible {
+            if pauseCardVisible {
                 PauseInfoCard(context: context, titleParts: titleParts, state: state)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(PlayerChipStyle.edgePadding)
@@ -1833,6 +1836,12 @@ struct MPVPlayerScreen: View {
                 showPauseInfo = false
             }
         }
+    }
+
+    /// The pause card is on screen: a sustained pause, not buffering, not the last frame, and no Up
+    /// Next card over it.
+    private var pauseCardVisible: Bool {
+        showPauseInfo && state.isPaused && !state.isBuffering && !state.isEnded && !upNext.isCardVisible
     }
 
     /// Bottom inset of the bottom-trailing prompts (Up Next card, skip chip): the screen-edge inset,
@@ -1948,6 +1957,8 @@ struct MPVPlayerScreen: View {
 private struct PlayerControlsOverlay: View {
     @ObservedObject var state: MPVPlaybackState
     let titleParts: PlaybackTitleParts
+    /// False while the pause card shows the same heading and detail lines.
+    let showsTitle: Bool
 
     var body: some View {
         // Floating glass transport bar (HIG revamp): mirrors the native AVPlayerViewController
@@ -1956,16 +1967,19 @@ private struct PlayerControlsOverlay: View {
         // screen title outweighed a 10 pt scrubber) and no permanent "Swipe down for info" line —
         // that hint is transient now (`PlayerSwipeHint`).
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                Text(titleParts.heading)
-                    .font(Theme.Font.sectionTitle)
-                    .lineLimit(1)
-                if let detail = titleParts.detail {
-                    Text(detail)
-                        .font(Theme.Font.meta)
-                        .foregroundStyle(Theme.Palette.textSecondary)
+            if showsTitle {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                    Text(titleParts.heading)
+                        .font(Theme.Font.sectionTitle)
                         .lineLimit(1)
+                    if let detail = titleParts.detail {
+                        Text(detail)
+                            .font(Theme.Font.meta)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                            .lineLimit(1)
+                    }
                 }
+                .transition(.opacity)
             }
 
             HStack(spacing: Theme.Spacing.lg) {

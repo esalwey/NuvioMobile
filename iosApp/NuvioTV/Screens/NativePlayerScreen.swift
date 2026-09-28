@@ -77,11 +77,11 @@ struct NativePlayerScreen: View {
 
             switch coordinator.phase {
             case .preparing:
-                VStack(spacing: 20) {
+                VStack(spacing: Theme.Spacing.lg) {
                     ProgressView().scaleEffect(1.6)
                     Text(coordinator.preparingLabel)
                         .font(Theme.Font.body)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(Theme.Palette.textSecondary)
                 }
             case .playing:
                 if let player = coordinator.player {
