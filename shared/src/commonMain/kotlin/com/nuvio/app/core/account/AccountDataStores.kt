@@ -479,6 +479,7 @@ object AccountDataStores {
                 AppleKeySpec.ProfileScoped("tmdb_use_artwork"),
                 AppleKeySpec.ProfileScoped("tmdb_use_basic_info"),
                 AppleKeySpec.ProfileScoped("tmdb_use_details"),
+                // Setting removed (upstream 3555bd07b); kept so a value stored by an older build is still wiped.
                 AppleKeySpec.ProfileScoped("tmdb_use_release_dates"),
                 AppleKeySpec.ProfileScoped("tmdb_use_credits"),
                 AppleKeySpec.ProfileScoped("tmdb_use_productions"),

@@ -23,7 +23,6 @@ final class SettingsViewModel: ObservableObject {
     /// TMDB enrichment (cast profiles, studios/networks, collections, artwork). Gated on a user key.
     @Published private(set) var tmdbEnabled = false
     @Published private(set) var tmdbHasKey = false
-    @Published private(set) var tmdbUseReleaseDates = false
     /// Chip code for the metadata-language row: "device" while no language is stored (the shared
     /// repo derives it from the device language), else the stored code's primary subtag.
     @Published private(set) var tmdbLanguageSelection = "device"
@@ -130,7 +129,6 @@ final class SettingsViewModel: ObservableObject {
             guard let self, let state = emitted as? TmdbSettings else { return }
             self.tmdbEnabled = state.enabled
             self.tmdbHasKey = state.hasApiKey
-            self.tmdbUseReleaseDates = state.useReleaseDates
             // Stored languages may carry a region ("de-DE" from the phone's field); the chip row
             // keys on the primary subtag.
             self.tmdbLanguageSelection = TmdbSettingsRepository.shared.hasExplicitLanguage()
@@ -387,13 +385,6 @@ final class SettingsViewModel: ObservableObject {
 
     func setTmdbEnabled(_ enabled: Bool) {
         TmdbSettingsRepository.shared.setEnabled(value: enabled)
-    }
-
-    /// TMDB air dates override add-on release dates (upstream v0.3.0 moved this out of
-    /// `useDetails` behind its own default-off toggle; surfacing it restores the old behavior
-    /// for users who want it).
-    func setTmdbUseReleaseDates(_ enabled: Bool) {
-        TmdbSettingsRepository.shared.setUseReleaseDates(value: enabled)
     }
 
     /// "device" clears the stored metadata language (the shared repo then follows this Apple TV's

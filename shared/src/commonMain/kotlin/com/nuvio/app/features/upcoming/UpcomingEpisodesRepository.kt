@@ -137,8 +137,8 @@ object UpcomingEpisodesRepository {
             .map { it.manifestUrl }
 
     /**
-     * TMDB enrichment shapes what `MetaDetailsRepository.fetch` returns (fallback metas, air-date
-     * override, language for titles/artwork), so its settings are part of the provider signature:
+     * TMDB enrichment shapes what `MetaDetailsRepository.fetch` returns (fallback metas, language
+     * for titles/artwork), so its settings are part of the provider signature:
      * any change is a non-growth change → full cache clear + re-sweep.
      */
     private fun tmdbSignature(settings: TmdbSettings): String =
@@ -148,7 +148,6 @@ object UpcomingEpisodesRepository {
             // the secret itself never sits in a signature that could end up in a log.
             settings.apiKey.trim().hashCode(),
             settings.language,
-            settings.useReleaseDates,
             settings.useEpisodes,
             settings.useArtwork,
             settings.useBasicInfo,

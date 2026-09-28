@@ -25,16 +25,6 @@ struct ContentSourcesSettingsPane: View {
                             set: { model.setTmdbEnabled($0) }
                         )
                     )
-                    SettingsToggleRow(
-                        title: String(localized: "TMDB Release Dates"),
-                        subtitle: model.tmdbUseReleaseDates
-                            ? String(localized: "TMDB air dates override add-on release dates")
-                            : String(localized: "add-on release dates are used as-is"),
-                        isOn: Binding(
-                            get: { model.tmdbUseReleaseDates },
-                            set: { model.setTmdbUseReleaseDates($0) }
-                        )
-                    )
                     Text("Language for TMDB titles, descriptions, logos and the Home hero. Device follows this Apple TV's language.")
                         .font(Theme.Font.caption)
                         .foregroundStyle(Theme.Palette.textSecondary)
