@@ -1620,6 +1620,16 @@
         }
       }
     },
+    "1080p Standard": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1080p standard"
+          }
+        }
+      }
+    },
     "120 s": {
       "localizations": {
         "de": {
@@ -2062,6 +2072,16 @@
         }
       }
     },
+    "4K / Remux": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "4K / Remux"
+          }
+        }
+      }
+    },
     "512 MB": {
       "localizations": {
         "de": {
@@ -2194,6 +2214,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "7"
+          }
+        }
+      }
+    },
+    "720p / Smaller": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "720p / plus petit"
           }
         }
       }
@@ -2338,6 +2368,16 @@
     "A rotating banner built from up to 2 of your catalogs, switching to the focused title as you browse": {},
     "A row under Continue Watching with your shows' next episodes airing in the next 14 days": {},
     "API key saved": {},
+    "AVC / x264": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AVC / x264"
+          }
+        }
+      }
+    },
     "About": {
       "localizations": {
         "fr": {
@@ -3005,6 +3045,16 @@
         }
       }
     },
+    "All sources": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toutes les sources"
+          }
+        }
+      }
+    },
     "Always": {
       "localizations": {
         "de": {
@@ -3137,6 +3187,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tùy chọn ID anime"
+          }
+        }
+      }
+    },
+    "Any 1080p+": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "N’importe quel 1080p+"
+          }
+        }
+      }
+    },
+    "Any Source": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "N’importe quelle source"
           }
         }
       }
@@ -4301,6 +4371,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tốc độ bit"
+          }
+        }
+      }
+    },
+    "BluRay Quality": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Qualité BluRay"
           }
         }
       }
@@ -7076,6 +7156,26 @@
         }
       }
     },
+    "Custom": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personnalisé"
+          }
+        }
+      }
+    },
+    "Custom pattern, e.g. 4K|2160p|Remux": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modèle personnalisé, p. ex. 4K|2160p|Remux"
+          }
+        }
+      }
+    },
     "Dates & Ratings": {
       "localizations": {
         "de": {
@@ -8082,6 +8182,16 @@
         }
       }
     },
+    "Dolby Atmos / DTS": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dolby Atmos / DTS"
+          }
+        }
+      }
+    },
     "Draw an outline around text for readability": {
       "localizations": {
         "de": {
@@ -8656,6 +8766,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Đã bật"
+          }
+        }
+      }
+    },
+    "Enabled plugins only": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plugins activés uniquement"
           }
         }
       }
@@ -9462,6 +9582,16 @@
         }
       }
     },
+    "First Stream in Scope": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Premier stream du périmètre"
+          }
+        }
+      }
+    },
     "First air date": {
       "localizations": {
         "de": {
@@ -10140,6 +10270,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Dữ liệu khách trên Apple TV này (hồ sơ, thư viện, tiến độ xem) sẽ bị xóa. Sau đó bạn có thể đăng nhập ở màn hình chào."
+          }
+        }
+      }
+    },
+    "HDR / Dolby Vision": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HDR / Dolby Vision"
+          }
+        }
+      }
+    },
+    "HEVC / x265": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HEVC / x265"
           }
         }
       }
@@ -11512,6 +11662,26 @@
         }
       }
     },
+    "Installed add-ons only": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Addons installés uniquement"
+          }
+        }
+      }
+    },
+    "Invalid regex pattern": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modèle regex invalide"
+          }
+        }
+      }
+    },
     "It was opened from a TMDB source and has no matching IMDb id, which is what stream addons need. Opening it from search or a different row usually works.": {},
     "Italian": {
       "localizations": {
@@ -12612,6 +12782,16 @@
         }
       }
     },
+    "Matches against stream name, title, description, add-on and URL: %@": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Correspond au nom du stream, à l’étiquette, à la description, à l’addon et à l’URL : %@"
+          }
+        }
+      }
+    },
     "Maximum rating": {
       "localizations": {
         "fr": {
@@ -13517,6 +13697,36 @@
         }
       }
     },
+    "Next Episode Stream": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stream de l’épisode suivant"
+          }
+        }
+      }
+    },
+    "No CAM/TS": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sans CAM/TS"
+          }
+        }
+      }
+    },
+    "No REMUX/HDR": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sans REMUX/HDR"
+          }
+        }
+      }
+    },
     "No Upcoming row on Home": {},
     "No Zoom on Focus": {
       "localizations": {
@@ -13821,6 +14031,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Không có kết nối Internet"
+          }
+        }
+      }
+    },
+    "No pattern set: the first stream is picked.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aucun modèle défini : le premier stream est choisi."
           }
         }
       }
@@ -14231,6 +14451,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Chưa có số đo trailer nào — mở một tựa đề và để trailer của nó phát."
+          }
+        }
+      }
+    },
+    "None": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aucun"
           }
         }
       }
@@ -18759,6 +18989,26 @@
         }
       }
     },
+    "Regex Match": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Correspondance regex"
+          }
+        }
+      }
+    },
+    "Regex Pattern": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modèle regex"
+          }
+        }
+      }
+    },
     "Region": {
       "localizations": {
         "de": {
@@ -20149,6 +20399,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Lưu key"
+          }
+        }
+      }
+    },
+    "Save Pattern": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enregistrer le modèle"
           }
         }
       }
@@ -22638,6 +22898,16 @@
         }
       }
     },
+    "Source Scope": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Périmètre des sources"
+          }
+        }
+      }
+    },
     "Sources": {
       "localizations": {
         "de": {
@@ -23185,6 +23455,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Thông tin luồng"
+          }
+        }
+      }
+    },
+    "Stream Selection": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sélection du stream"
           }
         }
       }
@@ -26758,6 +27038,36 @@
         }
       }
     },
+    "Up Next plays the first stream found from any source.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’épisode suivant lit le premier stream trouvé, toutes sources confondues."
+          }
+        }
+      }
+    },
+    "Up Next plays the first stream found within the source scope below.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’épisode suivant lit le premier stream trouvé dans le périmètre des sources ci-dessous."
+          }
+        }
+      }
+    },
+    "Up Next plays the first stream whose text matches your pattern.": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’épisode suivant lit le premier stream dont le texte correspond à votre modèle."
+          }
+        }
+      }
+    },
     "Up next · %@ · playing in %llds": {
       "localizations": {
         "de": {
@@ -27502,6 +27812,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Số lượt bình chọn"
+          }
+        }
+      }
+    },
+    "WEB Sources": {
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sources WEB"
           }
         }
       }

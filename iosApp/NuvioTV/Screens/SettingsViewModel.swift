@@ -41,6 +41,12 @@ final class SettingsViewModel: ObservableObject {
     /// Preferred track languages (player auto-selects a matching track on load).
     @Published private(set) var preferredAudioLanguage = "device"
     @Published private(set) var preferredSubtitleLanguage = "none"
+    /// Stream auto-play (shared `PlayerSettings`, this Apple TV's settings namespace). The stream
+    /// picker is always manual on tvOS, so these decide how Up Next picks the NEXT episode's
+    /// stream (`NextEpisodeAutoPlay.select`). Values are the Kotlin enum names.
+    @Published private(set) var streamAutoPlayMode = "MANUAL"
+    @Published private(set) var streamAutoPlaySource = "ALL_SOURCES"
+    @Published private(set) var streamAutoPlayRegex = ""
     /// Poster card style (size in dp, corner radius in dp, hide titles, landscape catalog rows).
     @Published private(set) var posterWidthDp: Int32 = 126
     @Published private(set) var posterCornerRadiusDp: Int32 = 12
@@ -128,6 +134,9 @@ final class SettingsViewModel: ObservableObject {
             self.subtitleStyle = state.subtitleStyle
             self.preferredAudioLanguage = state.preferredAudioLanguage
             self.preferredSubtitleLanguage = state.preferredSubtitleLanguage
+            self.streamAutoPlayMode = state.streamAutoPlayMode.name
+            self.streamAutoPlaySource = state.streamAutoPlaySource.name
+            self.streamAutoPlayRegex = state.streamAutoPlayRegex
             // The shared (synced) Up Next threshold — may change through profile sync.
             self.upNextThreshold = UpNextPreferences.threshold(settings: state)
         }
@@ -377,6 +386,41 @@ final class SettingsViewModel: ObservableObject {
         guard seconds != Self.upNextCustomThresholdTag else { return }
         UpNextPreferences.setSecondsBeforeEnd(seconds)
         upNextThreshold = .secondsBeforeEnd(Double(seconds))
+    }
+
+    // MARK: - Stream auto-play (Settings → Playback → Next Episode Stream)
+
+    func setStreamAutoPlayMode(_ key: String) {
+        let mode: StreamAutoPlayMode
+        switch key {
+        case "FIRST_STREAM": mode = .firstStream
+        case "REGEX_MATCH": mode = .regexMatch
+        default: mode = .manual
+        }
+        PlayerSettingsRepository.shared.setStreamAutoPlayMode(mode: mode)
+    }
+
+    func setStreamAutoPlaySource(_ key: String) {
+        let source: StreamAutoPlaySource
+        switch key {
+        case "INSTALLED_ADDONS_ONLY": source = .installedAddonsOnly
+        case "ENABLED_PLUGINS_ONLY": source = .enabledPluginsOnly
+        default: source = .allSources
+        }
+        PlayerSettingsRepository.shared.setStreamAutoPlaySource(source: source)
+    }
+
+    /// Saves the "Regex match" pattern; false (nothing saved) when it doesn't compile — the shared
+    /// selector would then match nothing and Up Next would find no stream. Checked with
+    /// NSRegularExpression, close enough to the Kotlin engine the selector uses (case-insensitive).
+    @discardableResult
+    func setStreamAutoPlayRegex(_ pattern: String) -> Bool {
+        let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, (try? NSRegularExpression(pattern: trimmed, options: [.caseInsensitive])) == nil {
+            return false
+        }
+        PlayerSettingsRepository.shared.setStreamAutoPlayRegex(regex: trimmed)
+        return true
     }
 
     // MARK: - TMDB

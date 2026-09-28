@@ -123,6 +123,39 @@ struct PlaybackSettingsPane: View {
             }
         }
 
+        // Stream auto-play (shared settings, this Apple TV's namespace). The stream picker stays
+        // manual on tvOS; this is how Up Next picks the NEXT episode's stream. The binge-group
+        // preference (same source as the current episode) applies in every mode.
+        SettingsSection(String(localized: "Next Episode Stream")) {
+            SettingsPickerRow(
+                title: String(localized: "Stream Selection"),
+                subtitle: Self.streamModeSubtitle(model.streamAutoPlayMode),
+                selection: Binding(get: { model.streamAutoPlayMode }, set: { model.setStreamAutoPlayMode($0) }),
+                options: Self.streamModeOptions.map(\.value),
+                label: { value in Self.streamModeOptions.first { $0.value == value }?.label ?? value }
+            )
+            if model.streamAutoPlayMode != "MANUAL" {
+                SettingsPickerRow(
+                    title: String(localized: "Source Scope"),
+                    selection: Binding(get: { model.streamAutoPlaySource }, set: { model.setStreamAutoPlaySource($0) }),
+                    options: Self.streamSourceOptions.map(\.value),
+                    label: { value in Self.streamSourceOptions.first { $0.value == value }?.label ?? value }
+                )
+            }
+            if model.streamAutoPlayMode == "REGEX_MATCH" {
+                SettingsPickerRow(
+                    title: String(localized: "Regex Pattern"),
+                    subtitle: model.streamAutoPlayRegex.isEmpty
+                        ? String(localized: "No pattern set: the first stream is picked.")
+                        : String(localized: "Matches against stream name, title, description, add-on and URL: \(model.streamAutoPlayRegex)"),
+                    selection: Binding(get: { model.streamAutoPlayRegex }, set: { model.setStreamAutoPlayRegex($0) }),
+                    options: Self.regexOptions(current: model.streamAutoPlayRegex),
+                    label: { value in Self.regexLabel(value) }
+                )
+                RegexPatternEntryRow { model.setStreamAutoPlayRegex($0) }
+            }
+        }
+
         SettingsSection(String(localized: "Subtitles")) {
             if let style = model.subtitleStyle {
                 SubtitleAppearanceControls(
@@ -159,6 +192,59 @@ struct PlaybackSettingsPane: View {
                 label: { LanguageOptions.name(forCode: $0, in: LanguageOptions.subtitle) }
             )
         }
+    }
+
+    // MARK: - Next Episode Stream options (values = Kotlin enum names / regex patterns)
+
+    private static let streamModeOptions: [(value: String, label: String)] = [
+        ("MANUAL", String(localized: "Any Source")),
+        ("FIRST_STREAM", String(localized: "First Stream in Scope")),
+        ("REGEX_MATCH", String(localized: "Regex Match")),
+    ]
+
+    private static let streamSourceOptions: [(value: String, label: String)] = [
+        ("ALL_SOURCES", String(localized: "All sources")),
+        ("INSTALLED_ADDONS_ONLY", String(localized: "Installed add-ons only")),
+        ("ENABLED_PLUGINS_ONLY", String(localized: "Enabled plugins only")),
+    ]
+
+    private static func streamModeSubtitle(_ mode: String) -> String {
+        switch mode {
+        case "FIRST_STREAM": return String(localized: "Up Next plays the first stream found within the source scope below.")
+        case "REGEX_MATCH": return String(localized: "Up Next plays the first stream whose text matches your pattern.")
+        default: return String(localized: "Up Next plays the first stream found from any source.")
+        }
+    }
+
+    /// Upstream's regex presets (PlaybackSettingsPage), plus French audio for this app's users.
+    private static let regexPresets: [(pattern: String, label: String)] = [
+        ("(2160p|4k|1080p)", String(localized: "Any 1080p+")),
+        ("(2160p|4k|remux)", String(localized: "4K / Remux")),
+        ("(1080p|full\\s*hd)", String(localized: "1080p Standard")),
+        ("(720p|webrip|web-dl)", String(localized: "720p / Smaller")),
+        ("(web[-\\s]?dl|webrip)", String(localized: "WEB Sources")),
+        ("(bluray|b[dr]rip|remux)", String(localized: "BluRay Quality")),
+        ("(hevc|x265|h\\.265)", String(localized: "HEVC / x265")),
+        ("(x264|h\\.264|avc)", String(localized: "AVC / x264")),
+        ("(hdr|hdr10\\+?|dv|dolby\\s*vision)", String(localized: "HDR / Dolby Vision")),
+        ("(atmos|truehd|dts[-\\s]?hd|dtsx?)", String(localized: "Dolby Atmos / DTS")),
+        ("(\\beng\\b|english)", String(localized: "English")),
+        ("\\b(multi|vff|vfq|vfi|vf2|vf|truefrench|french)\\b", String(localized: "French")),
+        ("^(?!.*\\b(cam|hdcam|ts|telesync)\\b).*$", String(localized: "No CAM/TS")),
+        ("(?is)^(?!.*\\b(hdr|hdr10|dv|dolby|vision|hevc|remux|2160p)\\b).+$", String(localized: "No REMUX/HDR")),
+    ]
+
+    /// "" (no pattern), every preset, and the current pattern when it is a custom one — the picker
+    /// needs its selection among the options.
+    private static func regexOptions(current: String) -> [String] {
+        let presets = regexPresets.map(\.pattern)
+        let base = [""] + presets
+        return base.contains(current) ? base : base + [current]
+    }
+
+    private static func regexLabel(_ pattern: String) -> String {
+        if pattern.isEmpty { return String(localized: "None") }
+        return regexPresets.first { $0.pattern == pattern }?.label ?? String(localized: "Custom")
     }
 
     private static func bufferLabel(_ value: Int) -> String {
@@ -239,6 +325,44 @@ private struct DefaultPlayerRow: View {
                    !externalPlayers.contains(where: { $0.id == defaultExternalPlayerId }) {
                     defaultExternalPlayerId = ""
                 }
+            }
+        }
+    }
+}
+
+/// Custom pattern for the Next Episode Stream "Regex Match" mode. Checked before it is saved (see
+/// `SettingsViewModel.setStreamAutoPlayRegex`); the typed pattern stays when it is rejected.
+private struct RegexPatternEntryRow: View {
+    let onSave: (String) -> Bool
+    @State private var pattern = ""
+    @State private var rejected = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            HStack(spacing: Theme.Spacing.md) {
+                Image(systemName: "text.magnifyingglass")
+                    .font(SettingsRowFont.title)
+                    .foregroundStyle(.secondary)
+                TextField(String(localized: "Custom pattern, e.g. 4K|2160p|Remux"), text: $pattern)
+                    .textFieldStyle(.plain)
+                    .font(SettingsRowFont.title)
+            }
+            Button {
+                if onSave(pattern) {
+                    pattern = ""
+                    rejected = false
+                } else {
+                    rejected = true
+                }
+            } label: {
+                Label("Save Pattern", systemImage: "checkmark")
+                    .font(SettingsRowFont.subtitle)
+            }
+            .disabled(pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if rejected {
+                Text("Invalid regex pattern")
+                    .font(SettingsRowFont.subtitle)
+                    .foregroundStyle(.red)
             }
         }
     }
