@@ -192,7 +192,10 @@ final class PlaybackProgressRecorder {
         let percent: Float = short ? 0 : Self.percent(positionSec, durationSec)
         if otherTrackersOpen {
             otherTrackersOpen = false
-            scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent)
+            // Not for a placeholder clip (its start can go out before its duration is known): Simkl
+            // keeps one paused session per show, so a stop at 0 % would replace the show's real
+            // resume point with the stub's.
+            if !short { scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent) }
         }
         guard let item = traktItem else { return }
         traktItem = nil

@@ -1160,7 +1160,9 @@ final class MPVTVPlayerViewController: UIViewController {
         let percent: Float = short ? 0 : (finished ? 100 : currentProgressPercent())
         if otherTrackersOpen {
             otherTrackersOpen = false
-            scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent)
+            // Not for a placeholder clip: Simkl keeps one paused session per show, so a stop at 0 %
+            // would replace the show's real resume point with the stub's.
+            if !short { scrobbleOtherTrackers(TrackingScrobbleAction.stop, percent: percent) }
         }
         guard let item = traktScrobbleItem else { return }
         traktScrobbleItem = nil
