@@ -23,7 +23,9 @@ struct NativeInfoHeader: Equatable {
     let streamLabel: String?
 
     init(context: PlaybackContext) {
-        title = context.title
+        // AES-8: the series heads an episode's header when the meta cache knows it — the launch
+        // title ("S1E4 · Name") repeated the subtitle line below it.
+        title = PlaybackTitleParts(context: context).series ?? context.title
         var parts: [String] = []
         var usedStreamLabel = false
         if let s = context.season, let e = context.episode {

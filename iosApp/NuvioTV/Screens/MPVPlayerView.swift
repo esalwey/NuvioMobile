@@ -1654,6 +1654,8 @@ struct MPVPlayerScreen: View {
     @State private var panelAdapter: MPVPlayerPanelAdapter?
     /// The end screen's cover was closed with Menu: leave for the details page once it's gone.
     @State private var endScreenClosedByMenu = false
+    /// Series · code · episode name for the transport bar and the pause card (AES-8/AES-9).
+    private let titleParts: PlaybackTitleParts
 
     init(context: PlaybackContext,
          upNext: NextEpisodeEngine,
@@ -1663,6 +1665,7 @@ struct MPVPlayerScreen: View {
          onExitToDetails: (() -> Void)? = nil,
          onPickNextSource: ((MetaVideo) -> Void)? = nil) {
         self.context = context
+        titleParts = PlaybackTitleParts(context: context)
         _upNext = ObservedObject(wrappedValue: upNext)
         self.canSwitchStreams = canSwitchStreams
         self.startPositionSec = startPositionSec
@@ -1702,7 +1705,7 @@ struct MPVPlayerScreen: View {
             // Metadata card after a sustained pause (Android TV PauseOverlay parity) — not on the
             // last frame, and not under the Up Next card.
             if showPauseInfo, state.isPaused, !state.isBuffering, !state.isEnded, !upNext.isCardVisible {
-                PauseInfoCard(context: context, state: state)
+                PauseInfoCard(context: context, titleParts: titleParts, state: state)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(PlayerChipStyle.edgePadding)
                     .transition(.opacity)
@@ -1942,35 +1945,40 @@ private struct ProgressBar: View {
     }
 }
 
-/// Metadata card shown top-leading after playback has been paused for a moment: artwork, title,
-/// episode line, stream/source info, and time remaining (Android TV `PauseOverlay` parity).
+/// Metadata card shown top-leading after playback has been paused for a moment: artwork, what's
+/// playing, time remaining and the source (Android TV `PauseOverlay` parity). AES-8: an episode
+/// shows its own 16:9 still (the 2:3 poster only for movies, or an episode without one), names the
+/// series once as the heading and "S1 · E4 · Name" once under it — the old card printed the
+/// "S1E4 · Name" launch title right above "Season 1 · Episode 4" and never the series.
 private struct PauseInfoCard: View {
     let context: PlaybackContext
+    let titleParts: PlaybackTitleParts
     @ObservedObject var state: MPVPlaybackState
+
+    private static let stillSize = CGSize(width: 288, height: 162)
+    private static let posterSize = CGSize(width: 120, height: 180)
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.lg) {
-            if let poster = context.poster, !poster.isEmpty {
-                CachedAsyncImage(string: poster)
-                    .frame(width: 140, height: 210)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
-            }
+            artwork
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Text("Paused")
                     .font(Theme.Font.meta)
                     .foregroundStyle(Theme.Palette.textSecondary)
-                Text(context.title)
+                Text(titleParts.heading)
                     .font(Theme.Font.screenTitle)
                     .lineLimit(2)
-                if let season = context.season, let episode = context.episode {
-                    Text("Season \(season) \u{00B7} Episode \(episode)")
+                if let detail = titleParts.detail {
+                    Text(detail)
                         .font(Theme.Font.body)
-                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                        .lineLimit(2)
                 }
                 if state.durationSec > 0 {
                     Text("\(remainingString) remaining")
                         .font(Theme.Font.body).monospacedDigit()
                         .foregroundStyle(Theme.Palette.textSecondary)
+                        .padding(.top, Theme.Spacing.xxs)
                 }
                 if let provider = context.providerName, !provider.isEmpty {
                     Text(provider)
@@ -1986,10 +1994,35 @@ private struct PauseInfoCard: View {
         .playerPanelGlass()
     }
 
+    @ViewBuilder
+    private var artwork: some View {
+        if titleParts.isEpisode, let still = CachedTitleArt.nonEmpty(context.episodeStill) {
+            CachedAsyncImage(string: still)
+                .frame(width: Self.stillSize.width, height: Self.stillSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+                .accessibilityHidden(true)
+        } else if let poster = CachedTitleArt.nonEmpty(context.poster) {
+            CachedAsyncImage(string: poster)
+                .frame(width: Self.posterSize.width, height: Self.posterSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// "42 min" / "1 h 12 min" in French ("42m" / "1h 12m" in English, as before). Whole minutes,
+    /// truncated like the old arithmetic, so the formatter never rounds 59:59 up to "60m".
     private var remainingString: String {
-        let total = Int(max(state.durationSec - state.positionSec, 0))
-        let h = total / 3600, m = (total % 3600) / 60
-        return h > 0 ? "\(h)h \(m)m" : "\(m)m"
+        let remaining = max(state.durationSec - state.positionSec, 0)
+        let seconds = remaining.isFinite ? (remaining / 60).rounded(.down) * 60 : 0
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .abbreviated
+        if seconds >= 3600 {
+            formatter.allowedUnits = [.hour, .minute]
+        } else {
+            formatter.allowedUnits = [.minute]
+        }
+        formatter.zeroFormattingBehavior = .dropLeading
+        return formatter.string(from: seconds) ?? ""
     }
 }
 
