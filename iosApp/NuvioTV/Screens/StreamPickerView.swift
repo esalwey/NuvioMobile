@@ -102,8 +102,8 @@ struct StreamPickerView: View {
     @AppStorage("default_external_player_id") private var defaultExternalPlayerId = ""
     @Environment(\.dismiss) private var dismiss
 
+    /// Focus key of the DEBUG-only test-stream button (`devTestStreamButton`).
     private static let testRowKey = "test-stream"
-    private let testStreamURL = URL(string: "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_ts/master.m3u8")!
 
     init(
         type: String,
@@ -324,7 +324,11 @@ struct StreamPickerView: View {
                 debridWarning(warning)
                     .padding([.horizontal, .top], Theme.Spacing.lg)
             }
-            streamList
+            if let reason = model.emptyReason, model.groups.isEmpty, !model.isLoading {
+                emptyState(reason: reason)
+            } else {
+                streamList
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.Surface.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous))
@@ -369,51 +373,75 @@ struct StreamPickerView: View {
                     // leaking focus into a sibling group's rows.
                     .focusSection()
                 }
-
-                if let reason = model.emptyReason {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                        // Primary reason renders at full text-primary weight — prominent,
-                        // not the muted secondary tone the plain "nothing found" empty
-                        // states get elsewhere on tvOS — since the debrid/filtered case is
-                        // actionable rather than a dead end.
-                        Text(reason)
-                            .font(Theme.Font.body)
-                            .foregroundStyle(Theme.Palette.textPrimary)
-                        if let hint = model.emptyReasonHint {
-                            Text(hint)
-                                .font(Theme.Font.caption)
-                                .foregroundStyle(Theme.Palette.textSecondary)
-                        }
-                    }
-                    .padding(.top, Theme.Spacing.xs)
-                }
-
-                // Dev/diagnostics affordance — only when there is nothing real to play, so it
-                // can never steal initial focus from the stream list (the old always-visible
-                // button was the only focusable view while loading → focus started at the
-                // bottom of the screen).
-                if model.groups.isEmpty && !model.isLoading {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                        Text("Test")
-                            .font(Theme.Font.sectionTitle)
-                            .foregroundStyle(Theme.Palette.textPrimary)
-                        Button {
-                            selected = context(url: testStreamURL, stream: nil)
-                        } label: {
-                            Label("Play test stream (Apple HLS sample)", systemImage: "play.circle")
-                                .padding(.vertical, Theme.Spacing.xs)
-                        }
-                        .buttonStyle(.glass)
-                        .focused($focusedRow, equals: Self.testRowKey)
-                    }
-                    .padding(.top, Theme.Spacing.lg)
-                }
             }
             // Inside the scroll content, so a focused row's lift never meets the panel's clip.
             .padding(Theme.Spacing.lg)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
+
+    /// AES-6: nothing playable — the reason and where to fix it, centred in the panel, and a Back
+    /// button so focus has somewhere to land. That target used to be the developer "Play test
+    /// stream (Apple HLS sample)" button, shipped in release builds; it's DEBUG-only now. The
+    /// reason keeps full text-primary weight: the debrid/filtered cases are actionable, not a dead
+    /// end. Back is deliberately not bound to `focusedRow`, so streams arriving later (a stale-link
+    /// reload) still take focus.
+    private func emptyState(reason: String) -> some View {
+        VStack(spacing: Theme.Spacing.lg) {
+            Image(systemName: "play.slash")
+                .font(Theme.Font.hero)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .accessibilityHidden(true)
+            VStack(spacing: Theme.Spacing.sm) {
+                Text(reason)
+                    .font(Theme.Font.sectionTitle)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                if let hint = model.emptyReasonHint {
+                    Text(hint)
+                        .font(Theme.Font.body)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                }
+            }
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            Button {
+                dismiss()
+            } label: {
+                Label("Back", systemImage: "chevron.backward")
+                    .font(Theme.Font.meta)
+                    .padding(.horizontal, Theme.Spacing.lg)
+                    .padding(.vertical, Theme.Spacing.xxs + 2)
+            }
+            .buttonStyle(.glass)
+            .padding(.top, Theme.Spacing.sm)
+            devTestStreamButton
+        }
+        .frame(maxWidth: 760)
+        .padding(Theme.Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    #if DEBUG
+    /// Dev/diagnostics affordance (DEBUG builds only): plays Apple's HLS sample through the real
+    /// player pipeline. Only reachable from the empty state, so it can never steal initial focus
+    /// from a stream list.
+    private var devTestStreamButton: some View {
+        Button {
+            selected = context(url: Self.testStreamURL, stream: nil)
+        } label: {
+            Label("Play test stream (Apple HLS sample)", systemImage: "play.circle")
+                .font(Theme.Font.caption)
+                .padding(.horizontal, Theme.Spacing.md)
+                .padding(.vertical, Theme.Spacing.xxs)
+        }
+        .buttonStyle(.glass)
+        .focused($focusedRow, equals: Self.testRowKey)
+    }
+
+    private static let testStreamURL = URL(string: "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_ts/master.m3u8")!
+    #else
+    private var devTestStreamButton: some View { EmptyView() }
+    #endif
 
     /// AES-11: the debrid-session warning in the Theme's warning amber — tinted fill, a leading
     /// accent bar and body-size text readable at 10 ft (it was caption text on a raw `.yellow`
